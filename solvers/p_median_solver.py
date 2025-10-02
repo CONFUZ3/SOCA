@@ -1,0 +1,541 @@
+from .base_solver import SpatialOptimizationProblem
+from typing import Dict, List, Any, Optional
+import geopandas as gpd
+import numpy as np
+import time
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PMedianSolver(SpatialOptimizationProblem):
+    """
+    P-Median Problem Solver
+    
+    Minimizes the total (or average) weighted distance from demand points to facilities.
+    """
+    
+    def get_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": "P-Median Problem",
+            "short_name": "p-median",
+            "category": "distance minimization",
+            "description": "Locate p facilities to minimize the total or average weighted distance from demand points to their nearest facility. Optimal for minimizing access costs or travel distances.",
+            "mathematical_formulation": """
+Minimize: Σᵢ Σⱼ dᵢⱼ · wᵢ · yᵢⱼ
+
+Subject to:
+- Σⱼ xⱼ = p  (locate exactly p facilities)
+- Σⱼ yᵢⱼ = 1, ∀i  (each demand assigned to one facility)
+- yᵢⱼ ≤ xⱼ, ∀i,j  (assignment only to open facilities)
+- xⱼ, yᵢⱼ ∈ {0,1}
+
+Where:
+- dᵢⱼ = distance from demand i to candidate site j
+- wᵢ = weight (demand) at point i
+- xⱼ = 1 if facility located at j, 0 otherwise
+- yᵢⱼ = 1 if demand i assigned to facility j, 0 otherwise
+- p = number of facilities to locate
+            """,
+            "academic_refs": [
+                "Hakimi, S. L. (1964). Optimum locations of switching centers and the absolute centers and medians of a graph. Operations Research, 12(3), 450-459.",
+                "ReVelle, C. S., & Swain, R. W. (1970). Central facilities location. Geographical Analysis, 2(1), 30-42.",
+                "Kariv, O., & Hakimi, S. L. (1979). An algorithmic approach to network location problems. SIAM Journal on Applied Mathematics, 37(3), 513-538.",
+                "Daskin, M. S. (2013). Network and discrete location: models, algorithms, and applications. John Wiley & Sons."
+            ],
+            "complexity": "NP-hard",
+            "typical_use_cases": [
+                "Warehouse location to minimize distribution costs",
+                "Public facility siting (libraries, schools, post offices)",
+                "Emergency service station location",
+                "Retail store placement",
+                "Distribution center optimization"
+            ],
+            "keywords": [
+                "p-median", "minimize distance", "minimize average distance", 
+                "minimize total distance", "minimize cost", "access optimization",
+                "facility location", "median", "distribution"
+            ],
+            "variants": [
+                "Capacitated P-Median",
+                "P-Median with forbidden pairs",
+                "Weighted P-Median",
+                "Probabilistic P-Median"
+            ]
+        }
+    
+    def get_conversation_prompts(self) -> Dict[str, Any]:
+        return {
+            "problem_detection": [
+                "minimize distance", "minimize average", "minimize total",
+                "minimize cost", "access", "p-median", "median"
+            ],
+            "parameter_questions": [
+                {
+                    "param": "n_facilities",
+                    "question": "How many facilities would you like to locate?",
+                    "type": "int",
+                    "validation": "Must be a positive integer",
+                    "help": "The number of facilities (p) to establish"
+                },
+                {
+                    "param": "objective",
+                    "question": "Would you like to minimize 'total' distance or 'average' distance?",
+                    "type": "choice",
+                    "choices": ["total", "average"],
+                    "default": "total",
+                    "help": "Total weights all demands equally, average normalizes by total demand"
+                }
+            ],
+            "constraint_suggestions": [
+                "Would you like to specify any facilities that must be included?",
+                "Are there any candidate sites that should be excluded?",
+                "Do you want to set a maximum distance threshold?"
+            ],
+            "explanation_template": "The P-Median solution locates {n_facilities} facilities to minimize the {objective} weighted distance. Total objective value: {obj_value:.2f}. Average distance: {avg_dist:.2f}."
+        }
+    
+    def get_required_data(self) -> Dict[str, Dict[str, Any]]:
+        return {
+            "demand_points": {
+                "required": True,
+                "description": "Points representing demand locations (e.g., population centers, customers)",
+                "required_fields": [],
+                "optional_fields": ["demand", "weight", "population"],
+                "geometry_type": "Point"
+            },
+            "candidate_sites": {
+                "required": True,
+                "description": "Potential facility locations to choose from",
+                "required_fields": [],
+                "optional_fields": ["capacity", "cost"],
+                "geometry_type": "Point"
+            }
+        }
+    
+    def validate_parameters(self, params: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        """Validate problem-specific parameters"""
+        if "n_facilities" not in params:
+            return False, "Missing required parameter: n_facilities (p)"
+        
+        n_facilities = params["n_facilities"]
+        
+        if not isinstance(n_facilities, int) or n_facilities <= 0:
+            return False, "n_facilities must be a positive integer"
+        
+        # Check objective if provided
+        if "objective" in params:
+            if params["objective"] not in ["total", "average"]:
+                return False, "objective must be either 'total' or 'average'"
+        
+        return True, None
+    
+    def solve(
+        self,
+        data: Dict[str, gpd.GeoDataFrame],
+        parameters: Dict[str, Any],
+        constraints: Dict[str, Any],
+        distance_metric: str = "euclidean"
+    ) -> Dict[str, Any]:
+        """Solve the P-Median problem"""
+        start_time = time.time()
+        
+        try:
+            # Import optimizer
+            from utils.distance_calculator import DistanceCalculator
+            
+            # Extract data
+            demand_gdf = data.get('demand_points')
+            candidate_gdf = data.get('candidate_sites')
+            
+            if demand_gdf is None or candidate_gdf is None:
+                raise ValueError("Both demand_points and candidate_sites are required")
+            
+            # Get parameters
+            p = parameters['n_facilities']
+            objective_type = parameters.get('objective', 'total')
+            
+            # Validate p
+            if p > len(candidate_gdf):
+                raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
+            
+            # Get demand weights
+            demand_weights = self._extract_weights(demand_gdf)
+            
+            # Calculate distance matrix
+            dist_calc = DistanceCalculator()
+            distance_matrix = dist_calc.calculate_distance_matrix(
+                demand_gdf, candidate_gdf, metric=distance_metric
+            )
+            
+            # Solve using optimization
+            solution = self._solve_mip(
+                distance_matrix, demand_weights, p, constraints
+            )
+            
+            # Calculate metrics
+            metrics = self._calculate_metrics(
+                distance_matrix, demand_weights, 
+                solution['selected_facilities'], 
+                solution['assignments'],
+                objective_type
+            )
+            
+            solution_time = time.time() - start_time
+            
+            return {
+                "status": solution['status'],
+                "objective_value": solution['objective_value'],
+                "selected_facilities": solution['selected_facilities'],
+                "assignments": solution['assignments'],
+                "metrics": metrics,
+                "solution_time": solution_time,
+                "solver_details": solution.get('solver_details', {}),
+                "academic_metadata": {
+                    "algorithm_used": "Mixed Integer Programming (MIP)",
+                    "references": self.get_metadata()['academic_refs'][:2],
+                    "assumptions": [
+                        "Each demand point is assigned to exactly one facility",
+                        "Facilities have unlimited capacity",
+                        f"Distance metric: {distance_metric}",
+                        "Travel occurs along straight lines" if distance_metric == "euclidean" else f"Distance calculation: {distance_metric}"
+                    ]
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error solving P-Median problem: {e}")
+            return {
+                "status": "error",
+                "error": str(e),
+                "solution_time": time.time() - start_time
+            }
+    
+    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame) -> np.ndarray:
+        """Extract demand weights from GeoDataFrame"""
+        # Look for weight columns
+        weight_cols = ['demand', 'weight', 'population', 'pop']
+        
+        for col in weight_cols:
+            if col in demand_gdf.columns:
+                weights = demand_gdf[col].values
+                if np.all(weights > 0):
+                    return weights
+        
+        # Default to uniform weights
+        logger.info("No weight column found, using uniform weights of 1.0")
+        return np.ones(len(demand_gdf))
+    
+    def _solve_mip(
+        self,
+        distance_matrix: np.ndarray,
+        demand_weights: np.ndarray,
+        p: int,
+        constraints: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Solve using Mixed Integer Programming"""
+        n_demand, n_candidates = distance_matrix.shape
+        
+        # Try Gurobi first, fall back to PuLP
+        try:
+            import gurobipy as gp
+            from gurobipy import GRB
+            return self._solve_gurobi(distance_matrix, demand_weights, p, constraints)
+        except ImportError:
+            logger.info("Gurobi not available, using PuLP")
+            return self._solve_pulp(distance_matrix, demand_weights, p, constraints)
+    
+    def _solve_gurobi(
+        self,
+        distance_matrix: np.ndarray,
+        demand_weights: np.ndarray,
+        p: int,
+        constraints: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Solve using Gurobi"""
+        import gurobipy as gp
+        from gurobipy import GRB
+        
+        n_demand, n_candidates = distance_matrix.shape
+        
+        # Create model
+        model = gp.Model("p-median")
+        model.setParam('OutputFlag', 0)  # Suppress output
+        model.setParam('TimeLimit', 300)  # 5 minute time limit
+        
+        # Decision variables
+        x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")  # facility location
+        y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")  # assignment
+        
+        # Objective: minimize weighted distance
+        obj = gp.quicksum(
+            distance_matrix[i, j] * demand_weights[i] * y[i, j]
+            for i in range(n_demand)
+            for j in range(n_candidates)
+        )
+        model.setObjective(obj, GRB.MINIMIZE)
+        
+        # Constraint: locate exactly p facilities
+        model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) == p, "p_facilities")
+        
+        # Constraint: each demand assigned to exactly one facility
+        for i in range(n_demand):
+            model.addConstr(
+                gp.quicksum(y[i, j] for j in range(n_candidates)) == 1,
+                f"assign_demand_{i}"
+            )
+        
+        # Constraint: assignment only to open facilities
+        for i in range(n_demand):
+            for j in range(n_candidates):
+                model.addConstr(y[i, j] <= x[j], f"open_facility_{i}_{j}")
+        
+        # Add custom constraints
+        must_include = constraints.get('must_include', [])
+        for j in must_include:
+            if 0 <= j < n_candidates:
+                model.addConstr(x[j] == 1, f"must_include_{j}")
+        
+        must_exclude = constraints.get('must_exclude', [])
+        for j in must_exclude:
+            if 0 <= j < n_candidates:
+                model.addConstr(x[j] == 0, f"must_exclude_{j}")
+        
+        # Solve
+        model.optimize()
+        
+        # Extract solution
+        if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
+            selected = [j for j in range(n_candidates) if x[j].X > 0.5]
+            assignments = {}
+            for i in range(n_demand):
+                for j in range(n_candidates):
+                    if y[i, j].X > 0.5:
+                        assignments[i] = j
+                        break
+            
+            return {
+                'status': 'optimal' if model.status == GRB.OPTIMAL else 'feasible',
+                'objective_value': model.objVal,
+                'selected_facilities': selected,
+                'assignments': assignments,
+                'solver_details': {
+                    'solver': 'gurobi',
+                    'gap': model.MIPGap,
+                    'iterations': model.IterCount,
+                    'formulation': 'P-Median MIP'
+                }
+            }
+        else:
+            return {
+                'status': 'infeasible',
+                'objective_value': None,
+                'selected_facilities': [],
+                'assignments': {},
+                'solver_details': {'solver': 'gurobi', 'status': model.status}
+            }
+    
+    def _solve_pulp(
+        self,
+        distance_matrix: np.ndarray,
+        demand_weights: np.ndarray,
+        p: int,
+        constraints: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Solve using PuLP"""
+        import pulp
+        
+        n_demand, n_candidates = distance_matrix.shape
+        
+        # Create problem
+        prob = pulp.LpProblem("p-median", pulp.LpMinimize)
+        
+        # Decision variables
+        x = pulp.LpVariable.dicts("x", range(n_candidates), cat='Binary')
+        y = pulp.LpVariable.dicts("y", 
+            ((i, j) for i in range(n_demand) for j in range(n_candidates)),
+            cat='Binary')
+        
+        # Objective
+        prob += pulp.lpSum([
+            distance_matrix[i, j] * demand_weights[i] * y[(i, j)]
+            for i in range(n_demand)
+            for j in range(n_candidates)
+        ])
+        
+        # Constraints
+        prob += pulp.lpSum([x[j] for j in range(n_candidates)]) == p, "p_facilities"
+        
+        for i in range(n_demand):
+            prob += pulp.lpSum([y[(i, j)] for j in range(n_candidates)]) == 1, f"assign_{i}"
+        
+        for i in range(n_demand):
+            for j in range(n_candidates):
+                prob += y[(i, j)] <= x[j], f"open_{i}_{j}"
+        
+        # Custom constraints
+        must_include = constraints.get('must_include', [])
+        for j in must_include:
+            if 0 <= j < n_candidates:
+                prob += x[j] == 1
+        
+        must_exclude = constraints.get('must_exclude', [])
+        for j in must_exclude:
+            if 0 <= j < n_candidates:
+                prob += x[j] == 0
+        
+        # Solve
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        
+        # Extract solution
+        if prob.status == pulp.LpStatusOptimal:
+            selected = [j for j in range(n_candidates) if pulp.value(x[j]) > 0.5]
+            assignments = {}
+            for i in range(n_demand):
+                for j in range(n_candidates):
+                    if pulp.value(y[(i, j)]) > 0.5:
+                        assignments[i] = j
+                        break
+            
+            return {
+                'status': 'optimal',
+                'objective_value': pulp.value(prob.objective),
+                'selected_facilities': selected,
+                'assignments': assignments,
+                'solver_details': {
+                    'solver': 'pulp',
+                    'formulation': 'P-Median MIP'
+                }
+            }
+        else:
+            return {
+                'status': 'infeasible',
+                'objective_value': None,
+                'selected_facilities': [],
+                'assignments': {},
+                'solver_details': {'solver': 'pulp', 'status': prob.status}
+            }
+    
+    def _calculate_metrics(
+        self,
+        distance_matrix: np.ndarray,
+        demand_weights: np.ndarray,
+        selected_facilities: List[int],
+        assignments: Dict[int, int],
+        objective_type: str
+    ) -> Dict[str, float]:
+        """Calculate solution metrics"""
+        # Calculate distances for assignments
+        distances = []
+        for demand_id, facility_id in assignments.items():
+            dist = distance_matrix[demand_id, facility_id]
+            weight = demand_weights[demand_id]
+            distances.append((dist, weight))
+        
+        total_weighted_distance = sum(d * w for d, w in distances)
+        total_weight = sum(demand_weights)
+        average_distance = total_weighted_distance / total_weight if total_weight > 0 else 0
+        max_distance = max((d for d, w in distances), default=0)
+        
+        return {
+            "total_weighted_distance": total_weighted_distance,
+            "average_distance": average_distance,
+            "max_distance": max_distance,
+            "num_facilities": len(selected_facilities),
+            "num_demand_points": len(assignments),
+            "total_demand_weight": total_weight
+        }
+    
+    def explain_solution(
+        self,
+        solution: Dict[str, Any],
+        data: Dict[str, gpd.GeoDataFrame],
+        detail_level: str = "standard"
+    ) -> str:
+        """Generate human-readable explanation"""
+        if solution.get('status') == 'error':
+            return f"❌ Solution failed: {solution.get('error', 'Unknown error')}"
+        
+        if solution.get('status') == 'infeasible':
+            return "❌ No feasible solution found. This may be due to conflicting constraints."
+        
+        metrics = solution.get('metrics', {})
+        n_facilities = metrics.get('num_facilities', 0)
+        avg_dist = metrics.get('average_distance', 0)
+        max_dist = metrics.get('max_distance', 0)
+        total_dist = metrics.get('total_weighted_distance', 0)
+        
+        if detail_level == "brief":
+            return f"Located {n_facilities} facilities with average distance {avg_dist:.2f}."
+        
+        elif detail_level == "standard":
+            return f"""
+**P-Median Solution Summary**
+
+✅ Successfully located {n_facilities} facilities to minimize total weighted distance.
+
+**Key Metrics:**
+- Total Weighted Distance: {total_dist:.2f}
+- Average Distance: {avg_dist:.2f}
+- Maximum Distance: {max_dist:.2f}
+
+The selected facilities minimize the overall access cost, with each demand point assigned to its most appropriate facility.
+            """.strip()
+        
+        elif detail_level == "detailed":
+            selected = solution.get('selected_facilities', [])
+            return f"""
+**P-Median Solution - Detailed Analysis**
+
+✅ **Optimization Status:** {solution.get('status', 'Unknown')}
+✅ **Solution Time:** {solution.get('solution_time', 0):.2f} seconds
+
+**Selected Facilities:** {len(selected)}
+Facility indices: {', '.join(map(str, selected))}
+
+**Distance Metrics:**
+- Total Weighted Distance: {total_dist:.2f}
+- Average Distance per Demand Unit: {avg_dist:.2f}
+- Maximum Distance (worst case): {max_dist:.2f}
+
+**Problem Characteristics:**
+- Demand Points Served: {metrics.get('num_demand_points', 0)}
+- Total Demand Weight: {metrics.get('total_demand_weight', 0):.2f}
+
+**Interpretation:**
+This solution minimizes the total weighted distance between demand points and facilities. The selected locations balance proximity to high-demand areas while maintaining service coverage across all demand points.
+            """.strip()
+        
+        elif detail_level == "academic":
+            solver_details = solution.get('solver_details', {})
+            academic = solution.get('academic_metadata', {})
+            return f"""
+**P-Median Problem Solution - Academic Report**
+
+**Mathematical Formulation:**
+The P-Median problem minimizes Σᵢ Σⱼ dᵢⱼ · wᵢ · yᵢⱼ subject to locating exactly p facilities.
+
+**Solution Details:**
+- Status: {solution.get('status', 'Unknown')}
+- Objective Value: {solution.get('objective_value', 0):.4f}
+- Solution Time: {solution.get('solution_time', 0):.4f} seconds
+- Solver: {solver_details.get('solver', 'Unknown')}
+- Gap: {solver_details.get('gap', 0):.4f}
+
+**Results:**
+- Facilities Located: {n_facilities}
+- Average Distance: {avg_dist:.4f}
+- Maximum Distance: {max_dist:.4f}
+- Total Demand Served: {metrics.get('total_demand_weight', 0):.2f}
+
+**Methodology:**
+{academic.get('algorithm_used', 'MIP')} formulation solved using {'Gurobi' if solver_details.get('solver') == 'gurobi' else 'PuLP CBC'}.
+
+**Assumptions:**
+{chr(10).join('- ' + a for a in academic.get('assumptions', []))}
+
+**Key References:**
+{chr(10).join('- ' + r for r in academic.get('references', []))}
+            """.strip()
+        
+        return "Solution explanation not available."
+

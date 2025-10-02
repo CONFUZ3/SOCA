@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data
+data/
+temp/
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+

@@ -1,0 +1,1938 @@
+# Comprehensive Cursor AI Prompt for Spatial Optimization Conversational Agent
+
+```markdown
+# PROJECT: Spatial Optimization Conversational Agent for Academic Research
+
+## OVERVIEW
+Build a Streamlit-based conversational agent that helps urban planners and city administrators solve facility location problems (P-Median, P-Center, MCLP, LSCP, etc.). This is an academic research tool focusing on extensibility, reproducibility, and rigorous documentation.
+
+## TECH STACK
+- **Frontend**: Streamlit (Python)
+- **Conversational AI**: Anthropic Claude API (using Claude Computer Use SDK patterns)
+- **Optimization**: spopt, PySAL, gurobipy, PuLP
+- **Geospatial**: GeoPandas, Shapely, Folium/streamlit-folium
+- **Distance Calculations**: NetworkX, OSMnx (future), scipy.spatial
+
+## PROJECT STRUCTURE
+
+```
+spatial-optimization-agent/
+├── app.py                          # Main Streamlit application
+├── requirements.txt
+├── README.md
+├── config/
+│   └── settings.py                 # Configuration (API keys, solver settings)
+├── solvers/
+│   ├── __init__.py
+│   ├── base_solver.py              # Abstract base class for all problems
+│   ├── registry.py                 # Problem registry and management
+│   ├── p_median_solver.py          # P-Median implementation
+│   ├── p_center_solver.py          # P-Center implementation
+│   ├── mclp_solver.py              # MCLP implementation
+│   ├── lscp_solver.py              # LSCP implementation
+│   └── ...                         # Additional problem types
+├── agent/
+│   ├── __init__.py
+│   ├── conversation_manager.py     # Claude API integration following SDK patterns
+│   ├── prompts.py                  # System prompts and templates
+│   └── state_manager.py            # Conversation state management
+├── utils/
+│   ├── __init__.py
+│   ├── data_processor.py           # GeoDataFrame loading and validation
+│   ├── distance_calculator.py      # Distance matrix computation
+│   ├── visualizer.py               # Map generation with Folium
+│   └── export_handler.py           # Solution export (GeoJSON, CSV, reports)
+├── tests/
+│   ├── test_solvers.py
+│   ├── test_data_processor.py
+│   └── test_data/
+│       ├── sample_demand.geojson
+│       └── sample_candidates.geojson
+└── docs/
+    ├── architecture.md
+    ├── adding_new_problems.md
+    └── problems/
+        ├── p_median.md
+        ├── p_center.md
+        └── ...
+```
+
+---
+
+## DETAILED IMPLEMENTATION REQUIREMENTS
+
+### 1. BASE SOLVER CLASS (`solvers/base_solver.py`)
+
+Create an abstract base class that ALL spatial optimization problems must inherit from. This ensures consistency and extensibility.
+
+**Required Methods:**
+```python
+from abc import ABC, abstractmethod
+from typing import Dict, List, Any, Optional
+import geopandas as gpd
+
+class SpatialOptimizationProblem(ABC):
+    """
+    Abstract base class for all spatial optimization problems.
+    
+    Academic Research Requirements:
+    - Full provenance tracking (citations, methodology)
+    - Reproducible solutions (all parameters stored)
+    - Clear mathematical formulation documentation
+    """
+    
+    @abstractmethod
+    def get_metadata(self) -> Dict[str, Any]:
+        """
+        Returns comprehensive problem metadata for academic documentation.
+        
+        Must include:
+        - name: Full problem name
+        - short_name: Identifier (e.g., "p-median")
+        - category: Problem category (coverage, distance, equity, etc.)
+        - description: Clear problem description
+        - mathematical_formulation: LaTeX or plain text formulation
+        - academic_refs: List of key academic papers (APA format)
+        - complexity: Computational complexity (e.g., "NP-hard")
+        - typical_use_cases: List of real-world applications
+        - keywords: Search/detection keywords
+        - variants: Known problem variants
+        """
+        pass
+    
+    @abstractmethod
+    def get_conversation_prompts(self) -> Dict[str, Any]:
+        """
+        Defines conversation flow for this problem type.
+        
+        Must include:
+        - problem_detection: Keywords/phrases to detect this problem
+        - parameter_questions: List of questions to elicit parameters
+          Each question should have: param name, question text, type, 
+          validation rules, help text
+        - constraint_suggestions: Proactive constraint suggestions
+        - explanation_template: Template for explaining solutions
+        """
+        pass
+    
+    @abstractmethod
+    def get_required_data(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Specifies required geospatial data inputs.
+        
+        For each data type (demand_points, candidate_sites, etc.):
+        - required: bool
+        - description: What this data represents
+        - required_fields: List of required GeoDataFrame columns
+        - optional_fields: List of optional columns
+        - geometry_type: Point, Polygon, LineString
+        """
+        pass
+    
+    @abstractmethod
+    def validate_parameters(self, params: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+        """
+        Validates problem-specific parameters.
+        Returns: (is_valid, error_message)
+        """
+        pass
+    
+    @abstractmethod
+    def solve(
+        self,
+        data: Dict[str, gpd.GeoDataFrame],
+        parameters: Dict[str, Any],
+        constraints: Dict[str, Any],
+        distance_metric: str = "euclidean"
+    ) -> Dict[str, Any]:
+        """
+        Solves the optimization problem.
+        
+        Returns standardized solution format:
+        {
+            "status": "optimal" | "feasible" | "infeasible" | "error",
+            "objective_value": float,
+            "selected_facilities": List[int],  # Indices
+            "assignments": Dict[int, int],  # demand_id -> facility_id
+            "metrics": {
+                "total_distance": float,
+                "average_distance": float,
+                "max_distance": float,
+                "coverage_percentage": float,
+                # ... problem-specific metrics
+            },
+            "solution_time": float,
+            "solver_details": {
+                "solver": "gurobi" | "pulp" | "custom",
+                "gap": float,
+                "iterations": int,
+                "formulation": str  # Brief description
+            },
+            "academic_metadata": {
+                "algorithm_used": str,
+                "references": List[str],
+                "assumptions": List[str]
+            }
+        }
+        """
+        pass
+    
+    @abstractmethod
+    def explain_solution(
+        self,
+        solution: Dict[str, Any],
+        data: Dict[str, gpd.GeoDataFrame],
+        detail_level: str = "standard"
+    ) -> str:
+        """
+        Generates human-readable explanation.
+        
+        detail_level options:
+        - "brief": 2-3 sentences
+        - "standard": Paragraph with key insights
+        - "detailed": Full explanation with rationale
+        - "academic": Technical explanation with methodology
+        """
+        pass
+    
+    def get_visualization_config(self) -> Dict[str, Any]:
+        """
+        Optional: Problem-specific visualization settings.
+        Override for custom map styling.
+        """
+        return {
+            "facility_marker": {"color": "red", "size": 10, "icon": "circle"},
+            "demand_marker": {"color": "blue", "size": 5, "icon": "circle"},
+            "show_assignments": True,
+            "assignment_line_color": "gray",
+            "show_service_areas": False
+        }
+    
+    def sensitivity_analysis(
+        self,
+        data: Dict[str, gpd.GeoDataFrame],
+        parameters: Dict[str, Any],
+        constraints: Dict[str, Any],
+        vary_param: str,
+        values: List[Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Optional: Performs sensitivity analysis.
+        Default implementation solves for each parameter value.
+        """
+        pass
+```
+
+---
+
+### 2. PROBLEM REGISTRY (`solvers/registry.py`)
+
+**Purpose**: Auto-discovery and management of all problem types.
+
+**Key Features:**
+- Singleton pattern for global registry
+- Auto-registration of problem classes
+- Problem type inference from natural language
+- Keyword-based problem detection
+- Academic metadata aggregation
+
+**Implementation Requirements:**
+```python
+class ProblemRegistry:
+    """
+    Central registry for all spatial optimization problems.
+    Supports dynamic problem discovery and registration.
+    """
+    
+    def __init__(self):
+        self._problems: Dict[str, Type[SpatialOptimizationProblem]] = {}
+        self._metadata_cache: Dict[str, Dict] = {}
+        self._register_default_problems()
+    
+    def register(self, problem_class: Type[SpatialOptimizationProblem]):
+        """Register a new problem type"""
+        # Validate that class implements all required methods
+        # Cache metadata for fast access
+        # Log registration for debugging
+    
+    def get_problem(self, short_name: str) -> SpatialOptimizationProblem:
+        """Get problem instance by short name"""
+    
+    def list_problems(self) -> List[Dict[str, Any]]:
+        """List all registered problems with full metadata"""
+    
+    def infer_problem_type(self, user_message: str) -> Optional[str]:
+        """
+        Infer problem type from natural language.
+        Uses keyword matching and phrase detection.
+        Returns short_name of most likely problem or None.
+        """
+    
+    def get_problems_by_category(self, category: str) -> List[str]:
+        """Get all problems in a category (coverage, distance, etc.)"""
+    
+    def get_academic_references(self) -> Dict[str, List[str]]:
+        """Aggregate all academic references for citations"""
+    
+    def search_problems(self, query: str) -> List[Dict[str, Any]]:
+        """Search problems by keyword, use case, or description"""
+
+# Global singleton
+problem_registry = ProblemRegistry()
+```
+
+---
+
+### 3. CONVERSATION MANAGER (`agent/conversation_manager.py`)
+
+**CRITICAL**: Follow Anthropic's Claude SDK patterns and best practices.
+
+**Reference Documentation:**
+- Anthropic Python SDK: https://github.com/anthropics/anthropic-sdk-python
+- Computer Use Demo patterns for maintaining state
+- Message history management patterns
+
+**Implementation:**
+```python
+import anthropic
+from typing import List, Dict, Any, Optional
+import json
+
+class ConversationManager:
+    """
+    Manages conversation with Claude API following SDK best practices.
+    
+    Key Responsibilities:
+    - Maintain complete conversation history (Claude is stateless)
+    - Include problem state in every request
+    - Handle streaming responses (optional)
+    - Parse structured outputs (JSON when needed)
+    - Error handling and retry logic
+    """
+    
+    def __init__(self, api_key: str, problem_registry):
+        self.client = anthropic.Anthropic(api_key=api_key)
+        self.problem_registry = problem_registry
+        self.model = "claude-sonnet-4-20250514"
+        self.max_tokens = 4096
+    
+    def chat(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        problem_state: Dict[str, Any],
+        uploaded_data_summary: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """
+        Send message to Claude with full context.
+        
+        Returns:
+        {
+            "response": str,  # Claude's text response
+            "actions": List[Dict],  # Any actions to take (e.g., trigger optimization)
+            "updated_state": Dict  # Updated problem state
+        }
+        """
+        
+        # Build comprehensive context
+        system_prompt = self._build_system_prompt()
+        
+        # Prepare messages with full history + current state
+        messages = self._prepare_messages(
+            user_message,
+            conversation_history,
+            problem_state,
+            uploaded_data_summary
+        )
+        
+        # Call Claude API
+        try:
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=self.max_tokens,
+                system=system_prompt,
+                messages=messages
+            )
+            
+            # Parse response
+            return self._parse_response(response, problem_state)
+            
+        except anthropic.APIError as e:
+            return {
+                "response": f"I encountered an error: {str(e)}. Please try again.",
+                "actions": [],
+                "updated_state": problem_state
+            }
+    
+    def _build_system_prompt(self) -> str:
+        """
+        Constructs comprehensive system prompt with all problem types.
+        
+        Must include:
+        - Role definition (spatial optimization expert for academic research)
+        - Available problem types with full metadata
+        - Conversation guidelines
+        - Output format instructions (when to return JSON actions)
+        - Academic context and citation requirements
+        """
+        
+        problems_info = self.problem_registry.list_problems()
+        
+        prompt = f"""You are an expert spatial optimization assistant for academic research.
+You help urban planners and city administrators solve facility location problems.
+
+# Available Problem Types
+
+You can help solve {len(problems_info)} types of spatial optimization problems:
+
+"""
+        
+        for prob in problems_info:
+            prompt += f"""
+## {prob['name']} ({prob['short_name']})
+
+**Description:** {prob['description']}
+
+**Mathematical Formulation:**
+{prob.get('mathematical_formulation', 'See academic references')}
+
+**Use Cases:** {', '.join(prob['typical_use_cases'])}
+
+**Key References:**
+{chr(10).join(f'  - {ref}' for ref in prob['academic_refs'][:2])}
+
+**Detection Keywords:** {', '.join(prob['keywords'])}
+
+---
+"""
+        
+        prompt += """
+
+# Your Responsibilities
+
+1. **Problem Identification**: Listen carefully and identify the appropriate problem type
+2. **Academic Rigor**: Provide technically accurate information with proper citations
+3. **Parameter Elicitation**: Ask targeted questions based on problem requirements
+4. **Data Guidance**: Help users understand what geospatial data they need
+5. **Solution Explanation**: Explain both the "what" and the "why" of solutions
+6. **Iterative Refinement**: Support what-if analysis and constraint modifications
+
+# Conversation Guidelines
+
+- Start broad: Let users describe challenges naturally
+- Confirm problem type before diving into parameters
+- Ask one question at a time (avoid overwhelming users)
+- Provide academic context when relevant
+- Be explicit about assumptions
+- Always maintain full conversation context
+
+# Output Format
+
+**Normal conversation**: Respond with natural language text
+
+**When ready to optimize**: Return JSON in this exact format:
+{
+  "action": "optimize",
+  "problem_type": "p-median",
+  "parameters": {...},
+  "constraints": {...}
+}
+
+**When user uploads data**: Acknowledge and summarize the data
+
+**When explaining solutions**: Use clear structure with metrics, rationale, and implications
+
+# Academic Context
+
+Users may request:
+- Mathematical formulations
+- Algorithm details
+- Computational complexity analysis
+- Literature references
+- Comparative analysis of problem types
+
+Always be prepared to discuss theoretical foundations while maintaining practical focus.
+
+# Critical Rules
+
+1. NEVER proceed to optimization without confirming problem type and parameters
+2. ALWAYS validate that required data has been uploaded
+3. INCLUDE full conversation context in your responses
+4. CITE academic sources when discussing methodology
+5. EXPLAIN trade-offs and limitations clearly
+"""
+        
+        return prompt
+    
+    def _prepare_messages(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        problem_state: Dict[str, Any],
+        uploaded_data_summary: Optional[Dict]
+    ) -> List[Dict[str, str]]:
+        """
+        Prepares message array with full context.
+        
+        CRITICAL: Include COMPLETE conversation history and current state.
+        Claude has no memory between requests.
+        """
+        
+        messages = []
+        
+        # Add conversation history
+        for msg in conversation_history:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        
+        # Build current message with embedded state
+        current_content = f"""User message: {user_message}
+
+# Current Problem State
+
+Problem Type: {problem_state.get('problem_type', 'Not yet identified')}
+Parameters Collected: {json.dumps(problem_state.get('parameters', {}), indent=2)}
+Constraints Defined: {json.dumps(problem_state.get('constraints', {}), indent=2)}
+"""
+        
+        if uploaded_data_summary:
+            current_content += f"""
+# Uploaded Data Summary
+
+{json.dumps(uploaded_data_summary, indent=2)}
+"""
+        
+        if problem_state.get('solution'):
+            current_content += f"""
+# Current Solution
+
+Status: {problem_state['solution'].get('status')}
+Objective Value: {problem_state['solution'].get('objective_value')}
+"""
+        
+        messages.append({
+            "role": "user",
+            "content": current_content
+        })
+        
+        return messages
+    
+    def _parse_response(
+        self,
+        response,
+        problem_state: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Parses Claude's response and extracts actions.
+        
+        Detects:
+        - JSON action requests (optimization trigger)
+        - State updates (parameter collection)
+        - Normal conversational responses
+        """
+        
+        text_response = response.content[0].text
+        
+        # Check for JSON action
+        if "action" in text_response and "{" in text_response:
+            try:
+                # Extract JSON (may be wrapped in markdown)
+                json_str = text_response
+                if "```json" in json_str:
+                    json_str = json_str.split("```json")[1].split("```")[0]
+                elif "```" in json_str:
+                    json_str = json_str.split("```")[1].split("```")[0]
+                
+                action_data = json.loads(json_str.strip())
+                
+                if action_data.get("action") == "optimize":
+                    return {
+                        "response": "I'm ready to solve your problem. Let me run the optimization...",
+                        "actions": [action_data],
+                        "updated_state": problem_state
+                    }
+            except json.JSONDecodeError:
+                pass  # Not a valid action, treat as normal text
+        
+        # Normal conversation
+        # Try to extract state updates from conversation
+        updated_state = self._extract_state_updates(text_response, problem_state)
+        
+        return {
+            "response": text_response,
+            "actions": [],
+            "updated_state": updated_state
+        }
+    
+    def _extract_state_updates(
+        self,
+        response_text: str,
+        current_state: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Attempts to extract parameter/constraint updates from conversation.
+        This is a heuristic approach - may need refinement.
+        """
+        # Implementation: Pattern matching, keyword detection, etc.
+        # For MVP, can return current_state unchanged
+        return current_state
+```
+
+---
+
+### 4. STREAMLIT APP (`app.py`)
+
+**Main application structure using Streamlit's best practices.**
+
+**Key Features:**
+- Session state management
+- File upload handling
+- Chat interface with message history
+- Map visualization
+- Metrics dashboard
+- Export functionality
+
+**Structure:**
+```python
+import streamlit as st
+import folium
+from streamlit_folium import st_folium
+import geopandas as gpd
+from pathlib import Path
+
+# Imports
+from agent.conversation_manager import ConversationManager
+from solvers.registry import problem_registry
+from utils.data_processor import DataProcessor
+from utils.visualizer import MapVisualizer
+from utils.export_handler import ExportHandler
+
+# Page config
+st.set_page_config(
+    page_title="Spatial Optimization Agent",
+    page_icon="🗺️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Initialize session state
+def initialize_session_state():
+    """Initialize all session state variables"""
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "problem_state" not in st.session_state:
+        st.session_state.problem_state = {
+            "problem_type": None,
+            "parameters": {},
+            "constraints": {},
+            "data": {},
+            "solution": None,
+            "solution_history": []
+        }
+    if "conversation_manager" not in st.session_state:
+        api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        st.session_state.conversation_manager = ConversationManager(
+            api_key=api_key,
+            problem_registry=problem_registry
+        )
+    if "data_processor" not in st.session_state:
+        st.session_state.data_processor = DataProcessor()
+    if "map_visualizer" not in st.session_state:
+        st.session_state.map_visualizer = MapVisualizer()
+
+initialize_session_state()
+
+# Sidebar
+with st.sidebar:
+    st.title("🗺️ Spatial Optimization")
+    st.markdown("### Academic Research Tool")
+    
+    st.divider()
+    
+    # File upload section
+    st.subheader("📁 Upload Data")
+    
+    uploaded_files = st.file_uploader(
+        "Upload geospatial data",
+        type=["geojson", "json", "csv", "shp", "zip"],
+        accept_multiple_files=True,
+        help="Upload demand points, candidate sites, or boundary files"
+    )
+    
+    if uploaded_files:
+        # Process uploaded files
+        for file in uploaded_files:
+            if file.name not in st.session_state.problem_state["data"]:
+                with st.spinner(f"Processing {file.name}..."):
+                    try:
+                        gdf = st.session_state.data_processor.load_file(file)
+                        st.session_state.problem_state["data"][file.name] = gdf
+                        st.success(f"✓ Loaded {file.name}: {len(gdf)} features")
+                    except Exception as e:
+                        st.error(f"Error loading {file.name}: {str(e)}")
+    
+    # Display loaded data summary
+    if st.session_state.problem_state["data"]:
+        st.divider()
+        st.subheader("📊 Loaded Data")
+        for name, gdf in st.session_state.problem_state["data"].items():
+            with st.expander(name):
+                st.write(f"Features: {len(gdf)}")
+                st.write(f"Geometry: {gdf.geometry.type.unique()[0]}")
+                st.write(f"Columns: {', '.join(gdf.columns)}")
+    
+    st.divider()
+    
+    # Problem registry info
+    st.subheader("📚 Available Problems")
+    problems = problem_registry.list_problems()
+    st.write(f"{len(problems)} problem types loaded")
+    
+    with st.expander("View All Problems"):
+        for prob in problems:
+            st.markdown(f"**{prob['name']}**")
+            st.caption(prob['description'])
+            st.divider()
+    
+    st.divider()
+    
+    # Current problem state
+    if st.session_state.problem_state["problem_type"]:
+        st.subheader("🎯 Current Problem")
+        st.info(st.session_state.problem_state["problem_type"])
+        
+        if st.session_state.problem_state["parameters"]:
+            with st.expander("Parameters"):
+                st.json(st.session_state.problem_state["parameters"])
+        
+        if st.session_state.problem_state["constraints"]:
+            with st.expander("Constraints"):
+                st.json(st.session_state.problem_state["constraints"])
+
+# Main content area
+st.title("Spatial Optimization Conversational Agent")
+st.caption("An academic research tool for facility location problems")
+
+# Create two columns: chat and map
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.subheader("💬 Conversation")
+    
+    # Chat container
+    chat_container = st.container(height=500)
+    
+    with chat_container:
+        # Display message history
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                st.markdown(message["content"])
+    
+    # Chat input
+    if prompt := st.chat_input("Describe your spatial optimization problem..."):
+        # Add user message to history
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        # Display user message immediately
+        with chat_container:
+            with st.chat_message("user"):
+                st.markdown(prompt)
+        
+        # Get data summary for context
+        data_summary = None
+        if st.session_state.problem_state["data"]:
+            data_summary = {
+                name: {
+                    "num_features": len(gdf),
+                    "geometry_type": gdf.geometry.type.unique()[0],
+                    "columns": list(gdf.columns),
+                    "bounds": gdf.total_bounds.tolist()
+                }
+                for name, gdf in st.session_state.problem_state["data"].items()
+            }
+        
+        # Call conversation manager
+        with st.spinner("Thinking..."):
+            result = st.session_state.conversation_manager.chat(
+                user_message=prompt,
+                conversation_history=st.session_state.messages[:-1],  # Exclude current message
+                problem_state=st.session_state.problem_state,
+                uploaded_data_summary=data_summary
+            )
+        
+        # Update state
+        st.session_state.problem_state = result["updated_state"]
+        
+        # Add assistant response to history
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": result["response"]
+        })
+        
+        # Display assistant response
+        with chat_container:
+            with st.chat_message("assistant"):
+                st.markdown(result["response"])
+        
+        # Handle actions (e.g., optimization trigger)
+        if result["actions"]:
+            for action in result["actions"]:
+                if action["action"] == "optimize":
+                    with st.spinner("Running optimization..."):
+                        # Get problem solver
+                        problem_solver = problem_registry.get_problem(action["problem_type"])
+                        
+                        # Prepare data
+                        data_dict = {}
+                        required_data = problem_solver.get_required_data()
+                        
+                        # Map uploaded files to required data types
+                        # (This is simplified - needs proper data type identification)
+                        for data_name, gdf in st.session_state.problem_state["data"].items():
+                            if "demand" in data_name.lower():
+                                data_dict["demand_points"] = gdf
+                            elif "candidate" in data_name.lower() or "site" in data_name.lower():
+                                data_dict["candidate_sites"] = gdf
+                        
+                        # Solve
+                        try:
+                            solution = problem_solver.solve(
+                                data=data_dict,
+                                parameters=action["parameters"],
+                                constraints=action["constraints"]
+                            )
+                            
+                            st.session_state.problem_state["solution"] = solution
+                            st.session_state.problem_state["solution_history"].append(solution)
+                            
+                            # Generate explanation
+                            explanation = problem_solver.explain_solution(
+                                solution=solution,
+                                data=data_dict,
+                                detail_level="standard"
+                            )
+                            
+                            # Add explanation to chat
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": f"✅ **Optimization Complete!**\n\n{explanation}"
+                            })
+                            
+                            st.success("Optimization completed! Check the map for results.")
+                            
+                        except Exception as e:
+                            error_msg = f"❌ Optimization failed: {str(e)}"
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": error_msg
+                            })
+                            st.error(error_msg)
+        
+        st.rerun()
+
+with col2:
+    st.subheader("🗺️ Visualization")
+    
+    # Map display
+    if st.session_state.problem_state["data"] or st.session_state.problem_state["solution"]:
+        
+        # Create map
+        map_obj = st.session_state.map_visualizer.create_map(
+            data=st.session_state.problem_state["data"],
+            solution=st.session_state.problem_state["solution"],
+            problem_type=st.session_state.problem_state["problem_type"]
+        )
+        
+        # Display map
+        st_folium(map_obj, width=700, height=500)
+        
+        # Metrics dashboard
+        if st.session_state.problem_state["solution"]:
+            st.divider()
+            st.subheader("📈 Solution Metrics")
+            
+            solution = st.session_state.problem_state["solution"]
+            metrics = solution.get("metrics", {})
+            
+            # Display key metrics in columns
+            metric_cols = st.columns(3)
+            
+            with metric_cols[0]:
+                st.metric(
+                    "Objective Value",
+                    f"{solution.get('objective_value', 0):.2f}"
+                )
+            
+            with metric_cols[1]:
+                st.metric(
+                    "Solution Status",
+                    solution.get('status', 'Unknown')
+                )
+            
+            with metric_cols[2]:
+                st.metric(
+                    "Solution Time",
+                    f"{solution.get('solution_time', 0):.2f}s"
+                )
+            
+            # Additional metrics
+            with st.expander("Detailed Metrics"):
+                st.json(metrics)
+            
+            # Export options
+            st.divider()
+            export_col1, export_col2, export_col3 = st.columns(3)
+            
+            with export_col1:
+                if st.button("📄 Export Solution"):
+                    # Implementation in export_handler
+                    pass
+            
+            with export_col2:
+                if st.button("📊 Generate Report"):
+                    # Implementation in export_handler
+                    pass
+            
+            with export_col3:
+                if st.button("💾 Save Session"):
+                    # Save problem state for reproducibility
+                    pass
+    
+    else:
+        st.info("👆 Upload data or start a conversation to see visualizations")
+
+# Footer
+st.divider()
+st.caption("Academic Research Tool | Built with Streamlit + Anthropic Claude")
+```
+
+---
+
+### 5. INITIAL PROBLEM SOLVERS
+
+Implement these 4 problem types for MVP:
+
+#### A. P-Median (`solvers/p_median_solver.py`)
+- Minimize total/average distance
+- Use spopt.locate.PMedian or custom MIP with gurobipy/PuLP
+- Include academic references (Hakimi 1964, ReVelle & Swain 1970)
+
+#### B. P-Center (`solvers/p_center_solver.py`)
+- Minimize maximum distance (minimax)
+- MIP formulation with Gurobi/PuLP
+- References: Hakimi 1964, Daskin 1995
+
+#### C. MCLP (`solvers/mclp_solver.py`)
+- Maximize coverage within distance threshold
+- Use spopt.locate.MCLP
+- References: Church & ReVelle 1974
+
+#### D. LSCP (`solvers/lscp_solver.py`)
+- Minimize facilities while covering all demand
+- Use spopt.locate.LSCP
+- References: Toregas et al. 1971
+
+---
+
+### 6. UTILITY MODULES
+
+#### `utils/data_processor.py`
+```python
+class DataProcessor:
+    """Handles loading, validation, and preprocessing of geospatial data"""
+    
+    def load_file(self, file) -> gpd.GeoDataFrame:
+        """Load GeoJSON, Shapefile,```python
+    def load_file(self, file) -> gpd.GeoDataFrame:
+        """Load GeoJSON, Shapefile, or CSV with coordinates"""
+        
+    def validate_data(self, gdf: gpd.GeoDataFrame, required_fields: List[str]) -> tuple[bool, Optional[str]]:
+        """Validate that GeoDataFrame has required fields and valid geometry"""
+        
+    def identify_data_type(self, gdf: gpd.GeoDataFrame) -> str:
+        """Heuristically identify if data is demand_points, candidate_sites, etc."""
+        
+    def preprocess_data(self, gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+        """Standardize CRS, clean geometries, handle missing values"""
+```
+
+#### `utils/distance_calculator.py`
+```python
+class DistanceCalculator:
+    """Computes distance matrices using various metrics"""
+    
+    def calculate_distance_matrix(
+        self,
+        origins: gpd.GeoDataFrame,
+        destinations: gpd.GeoDataFrame,
+        metric: str = "euclidean"
+    ) -> np.ndarray:
+        """
+        Calculate distance matrix.
+        
+        Metrics:
+        - euclidean: Straight-line distance
+        - manhattan: Grid-based distance
+        - network: Road network distance (requires OSMnx)
+        """
+        
+    def euclidean_distance(self, origins, destinations) -> np.ndarray:
+        """Vectorized Euclidean distance calculation"""
+        
+    def manhattan_distance(self, origins, destinations) -> np.ndarray:
+        """Manhattan (L1) distance"""
+        
+    def network_distance(self, origins, destinations, network_graph=None) -> np.ndarray:
+        """
+        Network-based distance using OSMnx.
+        For future implementation.
+        """
+```
+
+#### `utils/visualizer.py`
+```python
+import folium
+from folium import plugins
+import branca.colormap as cm
+
+class MapVisualizer:
+    """Creates interactive Folium maps with solutions"""
+    
+    def create_map(
+        self,
+        data: Dict[str, gpd.GeoDataFrame],
+        solution: Optional[Dict[str, Any]] = None,
+        problem_type: Optional[str] = None
+    ) -> folium.Map:
+        """
+        Create comprehensive map visualization.
+        
+        Layers:
+        - Base map (OpenStreetMap)
+        - Demand points (blue circles)
+        - Candidate sites (gray circles)
+        - Selected facilities (red stars)
+        - Assignment lines (demand to facility)
+        - Service areas (coverage circles/polygons)
+        - Legend
+        """
+        
+    def _add_demand_points(self, map_obj, gdf, solution=None):
+        """Add demand points with optional color coding by assignment"""
+        
+    def _add_candidate_sites(self, map_obj, gdf, selected_indices=None):
+        """Add candidate sites, highlighting selected ones"""
+        
+    def _add_selected_facilities(self, map_obj, gdf, selected_indices, labels=True):
+        """Add selected facilities with prominent markers"""
+        
+    def _add_assignment_lines(self, map_obj, demand_gdf, facility_gdf, assignments):
+        """Draw lines connecting demand points to assigned facilities"""
+        
+    def _add_service_areas(self, map_obj, facility_gdf, radius, metric="euclidean"):
+        """Add service area circles/polygons around facilities"""
+        
+    def _add_legend(self, map_obj, problem_type):
+        """Add legend explaining map symbols"""
+        
+    def _calculate_map_center(self, gdfs: List[gpd.GeoDataFrame]) -> tuple[float, float]:
+        """Calculate center point of all data for map initialization"""
+```
+
+#### `utils/export_handler.py`
+```python
+class ExportHandler:
+    """Handles exporting solutions in various formats"""
+    
+    def export_solution_geojson(
+        self,
+        solution: Dict[str, Any],
+        data: Dict[str, gpd.GeoDataFrame],
+        filename: str
+    ) -> bytes:
+        """Export solution as GeoJSON with facility locations and assignments"""
+        
+    def export_solution_csv(
+        self,
+        solution: Dict[str, Any],
+        filename: str
+    ) -> bytes:
+        """Export solution metrics and assignments as CSV"""
+        
+    def export_solution_shapefile(
+        self,
+        solution: Dict[str, Any],
+        data: Dict[str, gpd.GeoDataFrame],
+        filename: str
+    ) -> bytes:
+        """Export solution as Shapefile (zipped)"""
+        
+    def generate_pdf_report(
+        self,
+        solution: Dict[str, Any],
+        problem_metadata: Dict[str, Any],
+        map_image: bytes,
+        filename: str
+    ) -> bytes:
+        """
+        Generate comprehensive PDF report with:
+        - Problem description and parameters
+        - Solution summary and metrics
+        - Map visualization
+        - Academic references
+        - Methodology description
+        """
+        
+    def save_session(
+        self,
+        problem_state: Dict[str, Any],
+        conversation_history: List[Dict],
+        filename: str
+    ) -> bytes:
+        """
+        Save complete session for reproducibility.
+        Includes all parameters, data references, and solution.
+        """
+```
+
+---
+
+### 7. CONFIGURATION (`config/settings.py`)
+
+```python
+import os
+from pathlib import Path
+
+class Settings:
+    """Application configuration"""
+    
+    # API Keys
+    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+    
+    # Model settings
+    CLAUDE_MODEL = "claude-sonnet-4-20250514"
+    MAX_TOKENS = 4096
+    
+    # Solver preferences
+    PREFERRED_SOLVER = "gurobi"  # Falls back to pulp if Gurobi unavailable
+    SOLVER_TIME_LIMIT = 300  # seconds
+    MIP_GAP = 0.01  # 1% optimality gap
+    
+    # Distance calculation
+    DEFAULT_DISTANCE_METRIC = "euclidean"
+    CRS_STANDARD = "EPSG:4326"  # WGS84 for lat/lon
+    
+    # File upload limits
+    MAX_UPLOAD_SIZE_MB = 50
+    ALLOWED_EXTENSIONS = [".geojson", ".json", ".csv", ".shp", ".zip"]
+    
+    # Visualization
+    DEFAULT_MAP_ZOOM = 12
+    FACILITY_MARKER_COLOR = "red"
+    DEMAND_MARKER_COLOR = "blue"
+    
+    # Academic
+    CITATION_STYLE = "APA"
+    
+    # Paths
+    BASE_DIR = Path(__file__).parent.parent
+    DATA_DIR = BASE_DIR / "data"
+    TEMP_DIR = BASE_DIR / "temp"
+    DOCS_DIR = BASE_DIR / "docs"
+    
+    @classmethod
+    def validate(cls):
+        """Validate configuration"""
+        if not cls.ANTHROPIC_API_KEY:
+            raise ValueError("ANTHROPIC_API_KEY not set")
+        
+        # Create directories if they don't exist
+        cls.DATA_DIR.mkdir(exist_ok=True)
+        cls.TEMP_DIR.mkdir(exist_ok=True)
+
+settings = Settings()
+```
+
+---
+
+### 8. REQUIREMENTS.TXT
+
+```txt
+# Core
+streamlit==1.31.0
+python-dotenv==1.0.0
+
+# Anthropic
+anthropic==0.18.1
+
+# Geospatial
+geopandas==0.14.3
+shapely==2.0.3
+folium==0.15.1
+streamlit-folium==0.18.0
+pyproj==3.6.1
+
+# Optimization
+spopt==0.5.0
+libpysal==4.9.2
+gurobipy==11.0.0  # Requires license, optional
+pulp==2.8.0
+scipy==1.12.0
+networkx==3.2.1
+
+# Data processing
+pandas==2.2.0
+numpy==1.26.4
+openpyxl==3.1.2
+
+# Visualization
+matplotlib==3.8.3
+seaborn==0.13.2
+plotly==5.19.0
+
+# PDF generation
+reportlab==4.1.0
+pypdf2==3.0.1
+
+# Testing
+pytest==8.0.2
+pytest-cov==4.1.0
+
+# Future enhancements
+osmnx==1.9.1  # For network distances
+contextily==1.5.2  # For basemaps
+```
+
+---
+
+### 9. TESTING STRUCTURE
+
+#### `tests/test_solvers.py`
+```python
+import unittest
+import geopandas as gpd
+from shapely.geometry import Point
+import numpy as np
+from solvers.registry import problem_registry
+
+class TestPMedianSolver(unittest.TestCase):
+    """Test P-Median solver implementation"""
+    
+    def setUp(self):
+        """Create synthetic test data"""
+        # Create demand points (grid pattern)
+        demand_coords = [(i, j) for i in range(5) for j in range(5)]
+        self.demand_gdf = gpd.GeoDataFrame(
+            {"demand": [1.0] * 25},
+            geometry=[Point(x, y) for x, y in demand_coords],
+            crs="EPSG:4326"
+        )
+        
+        # Create candidate sites (subset of grid)
+        candidate_coords = [(i, j) for i in range(0, 5, 2) for j in range(0, 5, 2)]
+        self.candidate_gdf = gpd.GeoDataFrame(
+            {"capacity": [10.0] * 9},
+            geometry=[Point(x, y) for x, y in candidate_coords],
+            crs="EPSG:4326"
+        )
+        
+        self.solver = problem_registry.get_problem("p-median")
+    
+    def test_metadata(self):
+        """Test that metadata is complete"""
+        metadata = self.solver.get_metadata()
+        self.assertIn("name", metadata)
+        self.assertIn("academic_refs", metadata)
+        self.assertTrue(len(metadata["academic_refs"]) > 0)
+    
+    def test_parameter_validation(self):
+        """Test parameter validation"""
+        # Valid parameters
+        valid, msg = self.solver.validate_parameters({"n_facilities": 3})
+        self.assertTrue(valid)
+        
+        # Invalid parameters
+        valid, msg = self.solver.validate_parameters({"n_facilities": 0})
+        self.assertFalse(valid)
+        self.assertIsNotNone(msg)
+    
+    def test_solve_simple(self):
+        """Test solving simple problem"""
+        solution = self.solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters={"n_facilities": 3},
+            constraints={},
+            distance_metric="euclidean"
+        )
+        
+        self.assertEqual(solution["status"], "optimal")
+        self.assertEqual(len(solution["selected_facilities"]), 3)
+        self.assertEqual(len(solution["assignments"]), 25)
+        self.assertGreater(solution["solution_time"], 0)
+    
+    def test_solve_with_constraints(self):
+        """Test solving with constraints"""
+        solution = self.solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters={"n_facilities": 3},
+            constraints={"must_include": [0]},  # Must include first candidate
+            distance_metric="euclidean"
+        )
+        
+        self.assertIn(0, solution["selected_facilities"])
+    
+    def test_explanation_generation(self):
+        """Test that explanation is generated"""
+        solution = self.solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters={"n_facilities": 3},
+            constraints={}
+        )
+        
+        explanation = self.solver.explain_solution(
+            solution=solution,
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            }
+        )
+        
+        self.assertIsInstance(explanation, str)
+        self.assertGreater(len(explanation), 50)
+
+class TestProblemRegistry(unittest.TestCase):
+    """Test problem registry functionality"""
+    
+    def test_problem_registration(self):
+        """Test that problems are registered"""
+        problems = problem_registry.list_problems()
+        self.assertGreater(len(problems), 0)
+    
+    def test_problem_retrieval(self):
+        """Test retrieving problem by name"""
+        solver = problem_registry.get_problem("p-median")
+        self.assertIsNotNone(solver)
+    
+    def test_problem_inference(self):
+        """Test problem type inference from text"""
+        # Test P-Median detection
+        result = problem_registry.infer_problem_type(
+            "I need to minimize the average distance to 5 facilities"
+        )
+        self.assertEqual(result, "p-median")
+        
+        # Test MCLP detection
+        result = problem_registry.infer_problem_type(
+            "I want to maximize coverage within 5km with 3 facilities"
+        )
+        self.assertEqual(result, "mclp")
+```
+
+#### `tests/test_data_processor.py`
+```python
+import unittest
+import tempfile
+from pathlib import Path
+import geopandas as gpd
+from shapely.geometry import Point
+from utils.data_processor import DataProcessor
+
+class TestDataProcessor(unittest.TestCase):
+    """Test data loading and processing"""
+    
+    def setUp(self):
+        self.processor = DataProcessor()
+        
+    def test_load_geojson(self):
+        """Test loading GeoJSON file"""
+        # Create temporary GeoJSON
+        gdf = gpd.GeoDataFrame(
+            {"name": ["A", "B"]},
+            geometry=[Point(0, 0), Point(1, 1)],
+            crs="EPSG:4326"
+        )
+        
+        with tempfile.NamedTemporaryFile(suffix=".geojson", delete=False) as f:
+            gdf.to_file(f.name, driver="GeoJSON")
+            temp_path = f.name
+        
+        try:
+            # Load file (simulate Streamlit uploaded file)
+            with open(temp_path, "rb") as f:
+                loaded_gdf = self.processor.load_file(f)
+            
+            self.assertEqual(len(loaded_gdf), 2)
+            self.assertTrue(loaded_gdf.crs is not None)
+        finally:
+            Path(temp_path).unlink()
+    
+    def test_data_validation(self):
+        """Test data validation"""
+        gdf = gpd.GeoDataFrame(
+            {"demand": [1, 2], "name": ["A", "B"]},
+            geometry=[Point(0, 0), Point(1, 1)],
+            crs="EPSG:4326"
+        )
+        
+        # Should pass with required field
+        valid, msg = self.processor.validate_data(gdf, ["demand"])
+        self.assertTrue(valid)
+        
+        # Should fail without required field
+        valid, msg = self.processor.validate_data(gdf, ["population"])
+        self.assertFalse(valid)
+        self.assertIsNotNone(msg)
+```
+
+---
+
+### 10. DOCUMENTATION
+
+#### `docs/architecture.md`
+```markdown
+# System Architecture
+
+## Overview
+Plugin-based spatial optimization system with conversational interface.
+
+## Component Diagram
+[Diagram showing: Streamlit UI -> Conversation Manager -> Claude API]
+[Diagram showing: Problem Registry -> Individual Solvers -> Optimization Libraries]
+
+## Data Flow
+1. User uploads geospatial data
+2. User describes problem in natural language
+3. Conversation Manager interprets via Claude API
+4. Problem Registry identifies appropriate solver
+5. Solver runs optimization
+6. Results displayed on map with metrics
+7. User can iterate and refine
+
+## Technology Stack
+- Frontend: Streamlit
+- AI: Anthropic Claude API
+- Optimization: spopt, gurobipy, PuLP
+- Geospatial: GeoPandas, Folium
+- Testing: pytest
+
+## Key Design Patterns
+- **Strategy Pattern**: Different solvers for different problem types
+- **Registry Pattern**: Central problem discovery and management
+- **Template Method**: Base solver class defines algorithm structure
+- **Factory Pattern**: Problem registry creates solver instances
+```
+
+#### `docs/adding_new_problems.md`
+```markdown
+# Adding New Spatial Optimization Problems
+
+## Quick Start
+
+### Step 1: Create Solver Class
+```python
+# solvers/my_problem_solver.py
+from .base_solver import SpatialOptimizationProblem
+
+class MyProblemSolver(SpatialOptimizationProblem):
+    def get_metadata(self) -> Dict[str, Any]:
+        return {
+            "name": "My Problem",
+            "short_name": "my-problem",
+            # ... complete metadata
+        }
+    
+    # Implement all required methods
+    # ...
+```
+
+### Step 2: Register Problem
+```python
+# In solvers/registry.py
+from .my_problem_solver import MyProblemSolver
+
+def _register_default_problems(self):
+    # ... existing registrations
+    self.register(MyProblemSolver)
+```
+
+### Step 3: Test
+```python
+# tests/test_my_problem.py
+class TestMyProblem(unittest.TestCase):
+    def test_solve(self):
+        solver = problem_registry.get_problem("my-problem")
+        solution = solver.solve(...)
+        self.assertEqual(solution["status"], "optimal")
+```
+
+### Step 4: Document
+Create `docs/problems/my_problem.md` with:
+- Mathematical formulation
+- Algorithm description
+- Academic references
+- Usage examples
+
+## Required Methods
+
+All solvers must implement:
+- `get_metadata()` - Problem information
+- `get_conversation_prompts()` - Conversational guidance
+- `get_required_data()` - Data requirements
+- `validate_parameters()` - Parameter checking
+- `solve()` - Optimization algorithm
+- `explain_solution()` - Human-readable explanation
+
+## Best Practices
+
+1. **Academic Rigor**: Include proper citations and references
+2. **Clear Formulation**: Document mathematical model clearly
+3. **Error Handling**: Validate inputs and handle edge cases
+4. **Performance**: Consider large-scale problem instances
+5. **Testing**: Create comprehensive test cases
+6. **Documentation**: Write clear usage examples
+
+## Example: Full Implementation
+
+See `solvers/p_median_solver.py` for complete reference implementation.
+```
+
+#### `docs/problems/p_median.md`
+```markdown
+# P-Median Problem
+
+## Mathematical Formulation
+
+**Objective**: Minimize total (or average) weighted distance from demand points to facilities.
+
+**Decision Variables**:
+- $x_j \in \{0,1\}$: 1 if facility located at candidate site $j$
+- $y_{ij} \in \{0,1\}$: 1 if demand point $i$ assigned to facility $j$
+
+**Objective Function**:
+$$\min \sum_{i \in I} \sum_{j \in J} d_{ij} w_i y_{ij}$$
+
+**Constraints**:
+1. Locate exactly $p$ facilities: $\sum_{j \in J} x_j = p$
+2. Each demand assigned to one facility: $\sum_{j \in J} y_{ij} = 1, \forall i \in I$
+3. Assignment only to open facilities: $y_{ij} \leq x_j, \forall i \in I, j \in J$
+
+## Complexity
+NP-hard (Kariv & Hakimi, 1979)
+
+## Applications
+- Warehouse location
+- Distribution center placement
+- Public facility siting (schools, libraries)
+- Emergency service location
+
+## Academic References
+
+1. Hakimi, S. L. (1964). Optimum locations of switching centers and the absolute centers and medians of a graph. *Operations Research*, 12(3), 450-459.
+
+2. ReVelle, C. S., & Swain, R. W. (1970). Central facilities location. *Geographical Analysis*, 2(1), 30-42.
+
+3. Kariv, O., & Hakimi, S. L. (1979). An algorithmic approach to network location problems. *SIAM Journal on Applied Mathematics*, 37(3), 513-538.
+
+## Implementation Notes
+
+### Algorithm
+- Uses Mixed Integer Programming (MIP) formulation
+- Solvers: Gurobi (preferred) or PuLP (open-source)
+- Typical solve time: <10 seconds for 100 demand points, 50 candidates
+
+### Distance Metrics
+- Euclidean: Default, fastest
+- Manhattan: Grid-based problems
+- Network: Real road distances (requires OSMnx)
+
+## Usage Example
+
+```python
+from solvers.registry import problem_registry
+
+# Get solver
+solver = problem_registry.get_problem("p-median")
+
+# Prepare data
+data = {
+    "demand_points": demand_gdf,  # GeoDataFrame with demand weights
+    "candidate_sites": candidate_gdf
+}
+
+# Solve
+solution = solver.solve(
+    data=data,
+    parameters={"n_facilities": 5, "objective": "total"},
+    constraints={},
+    distance_metric="euclidean"
+)
+
+print(f"Status: {solution['status']}")
+print(f"Objective: {solution['objective_value']:.2f}")
+print(f"Selected sites: {solution['selected_facilities']}")
+```
+
+## Variants
+
+- **Capacitated P-Median**: Facilities have capacity limits
+- **P-Median with Forbidden Pairs**: Certain demand-facility assignments prohibited
+- **Weighted P-Median**: Different weights for facilities
+- **Probabilistic P-Median**: Stochastic demand
+```
+
+---
+
+### 11. README.MD
+
+```markdown
+# Spatial Optimization Conversational Agent
+
+An academic research tool for solving facility location problems using conversational AI.
+
+## Features
+
+- 🗣️ **Conversational Interface**: Natural language interaction with Claude AI
+- 🗺️ **Interactive Maps**: Visualize problems and solutions with Folium
+- 🎯 **10+ Problem Types**: P-Median, P-Center, MCLP, LSCP, and more
+- 📊 **Rich Analytics**: Comprehensive metrics and sensitivity analysis
+- 🔬 **Academic Rigor**: Citations, mathematical formulations, methodology documentation
+- 🔌 **Extensible**: Easy to add new problem types
+
+## Installation
+
+```bash
+# Clone repository
+git clone <repository-url>
+cd spatial-optimization-agent
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Set up environment variables
+echo "ANTHROPIC_API_KEY=your_api_key_here" > .env
+```
+
+## Quick Start
+
+```bash
+streamlit run app.py
+```
+
+Then:
+1. Upload geospatial data (GeoJSON, Shapefile, or CSV)
+2. Describe your optimization problem in natural language
+3. Review the solution on the interactive map
+4. Iterate and refine as needed
+
+## Supported Problem Types
+
+- **P-Median**: Minimize average/total distance
+- **P-Center**: Minimize maximum distance (minimax)
+- **MCLP**: Maximize coverage within distance threshold
+- **LSCP**: Minimize facilities while covering all demand
+- **Capacitated P-Median**: P-Median with capacity constraints
+- **Backup Coverage**: Ensure primary + backup coverage
+- And more...
+
+## Project Structure
+
+```
+spatial-optimization-agent/
+├── app.py                 # Main Streamlit application
+├── solvers/               # Optimization problem solvers
+├── agent/                 # Claude API integration
+├── utils/                 # Data processing and visualization
+├── tests/                 # Unit tests
+└── docs/                  # Documentation
+```
+
+## Adding New Problems
+
+See [docs/adding_new_problems.md](docs/adding_new_problems.md) for detailed instructions.
+
+Quick summary:
+1. Create solver class extending `SpatialOptimizationProblem`
+2. Add one line to registry
+3. Write tests
+4. Document
+
+## Testing
+
+```bash
+pytest tests/ -v --cov=solvers --cov=utils
+```
+
+## Academic Use
+
+This tool is designed for academic research. All problem implementations include:
+- Mathematical formulations
+- Academic references (APA format)
+- Complexity analysis
+- Algorithm documentation
+
+When using this tool in research, please cite relevant papers (available in each solver's metadata).
+
+## License
+
+[Your chosen license]
+
+## Contributing
+
+Contributions welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+
+
+## Contact
+
+[Your contact information]
+```
+
+---
+
+### 12. .STREAMLIT/CONFIG.TOML
+
+```toml
+[theme]
+primaryColor = "#FF4B4B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"
+
+[server]
+maxUploadSize = 50
+enableXsrfProtection = true
+enableCORS = false
+
+[browser]
+gatherUsageStats = false
+```
+
+---
+
+### 13. .GITIGNORE
+
+```
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data
+data/
+temp/
+*.geojson
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+```
+
+---
+
+## IMPLEMENTATION PRIORITIES
+
+### Phase 1: MVP 
+1. **Core Infrastructure**
+   - Set up project structure
+   - Implement base_solver.py
+   - Implement registry.py
+   - Basic conversation_manager.py
+
+2. **Essential Solvers**
+   - P-Median (using spopt)
+   - P-Center (custom MIP)
+   - MCLP (using spopt)
+
+3. **Basic Streamlit App**
+   - File upload
+   - Chat interface
+   - Simple map visualization
+   - Basic metrics display
+
+### Phase 2: Enhancement 
+1. **Additional Solvers**
+   - LSCP
+   - Capacitated P-Median
+   - 2-3 more problem types
+
+2. **Advanced Visualization**
+   - Service area overlays
+   - Assignment lines
+   - Interactive legends
+   - Multiple solution comparison
+
+3. **Utilities**
+   - Distance calculator (all metrics)
+   - Export handler (GeoJSON, CSV)
+   - Data processor (all formats)
+
+### Phase 3: Polish 
+1. **Academic Features**
+   - Sensitivity analysis
+   - Methodology documentation
+
+2. **Testing & Documentation**
+   - Comprehensive test suite
+   - Complete documentation
+   - Example datasets
+   - Tutorial notebooks
+
+3. **Deployment**
+   - Performance optimization
+   - Error handling
+
+
+---
+
+## CRITICAL IMPLEMENTATION NOTES
+
+### Claude API Integration
+1. **Always include full conversation history** - Claude is stateless
+2. **Embed problem state in every request** - See conversation_manager.py pattern
+3. **Use streaming for better UX** (optional enhancement)
+4. **Handle rate limits** - Implement exponential backoff
+5. **Parse JSON actions carefully** - Claude may wrap in markdown
+
+### Streamlit Best Practices
+1. **Use session_state for all persistence**
+2. **Minimize reruns** - use callbacks where possible
+3. **Cache expensive operations** - use @st.cache_data
+4. **Handle file uploads properly** - store in session_state immediately
+5. **Use st.rerun() sparingly** - only when state changes require full refresh
+
+### Optimization Solvers
+1. **Always try Gurobi first**, fall back to PuLP
+2. **Set time limits** to prevent hanging
+3. **Validate data before solving** - check for empty datasets, invalid geometries
+4. **Store solution metadata** - algorithm, parameters, assumptions for reproducibility
+5. **Handle infeasibility gracefully** - explain why no solution exists
+
+### Geospatial Data
+1. **Always reproject to common CRS** before distance calculations
+2. **Validate geometries** - check for invalid shapes, self-intersections
+3. **Handle large datasets** - consider spatial indexing for >1000 points
+4. **Use appropriate distance metrics** - Euclidean for small areas, network for cities
+
+### Academic Requirements
+1. **Every solver must have academic references**
+2. **Document mathematical formulation clearly**
+3. **Include complexity analysis**
+4. **Provide reproducibility information** - save all parameters
+5. **Enable comparison across problem types** - standardized metrics
+
+---
+
+## TESTING REQUIREMENTS
+
+### Unit Tests
+- All solver methods (solve, validate, explain)
+- Data processing (loading, validation, preprocessing)
+- Distance calculations (all metrics)
+- Problem registry (registration, inference)
+
+### Integration Tests
+- End-to-end conversation flows
+- Data upload → solve → visualize pipeline
+- Export functionality
+
+### Test Data
+- Synthetic datasets (small, controlled)
+- Real-world examples (anonymized if needed)
+- Edge cases (empty data, infeasible problems)
+
+---
+
+## SUCCESS CRITERIA
+
+✅ **Functional MVP**:
+- Can solve P-Median, P-Center, MCLP problems
+- Conversational interface works smoothly
+- Maps display correctly
+- Results are accurate
+
+✅ **Academic Quality**:
+- Proper citations included
+- Mathematical formulations documented
+- Reproducible solutions
+- Clear methodology
+
+✅ **Extensibility**:
+- New problem can be added in <1 hour
+- No changes to core infrastructure needed
+- Tests pass for all problem types
+
+✅ **User Experience**:
+- Intuitive conversation flow
+- Clear visualizations
+- Helpful error messages
+- Fast response times (<10s for typical problems)
+
+---
+
+## NEXT STEPS AFTER COMPLETION
+
+2. **Create tutorial videos/notebooks**
+6. **Expand problem library** based on user feedback
+7. **Add network distance support** (OSMnx integration)
+8. **Multi-objective optimization**
+9. **Real-time data integration** (APIs for census, OSM)
+
+---
+
+## QUESTIONS TO ASK YOURSELF
+
+Before implementing:
+- [ ] Do I have Anthropic API key?
+- [ ] Do I have Gurobi license? (Can fall back to PuLP)
+- [ ] What test datasets will I use?
+- [ ] Who are my target users for feedback?
+
+During implementation:
+- [ ] Are all abstract methods implemented?
+- [ ] Does conversation flow make sense?
+- [ ] Are maps displaying correctly?
+- [ ] Are solutions accurate?
+
+
+END OF PROMPT
+

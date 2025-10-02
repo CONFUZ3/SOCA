@@ -1,0 +1,44 @@
+# Core
+streamlit==1.50.0              # latest as of Sep 2025 :contentReference[oaicite:0]{index=0}  
+python-dotenv==1.0.0           # still stable, no major update
+
+# Google Gemini
+google-generativeai>=0.8.0     # latest Gemini API SDK
+
+# Geospatial
+geopandas==1.1.1               # latest release on PyPI :contentReference[oaicite:1]{index=1}  
+shapely==2.1.2                 # latest stable for geometry operations :contentReference[oaicite:2]{index=2}  
+folium>=0.15.1                 # stay with your existing or allow minor updates  
+streamlit-folium>=0.18.0       # to ensure compatibility with new streamlit  
+pyproj>=3.6.1                  # allow minor upgrades, maintain compatibility with geopandas
+
+# Optimization
+spopt>=0.5.0                    # keep minimal constraint  
+libpysal>=4.9.2                 # allow newer patches  
+gurobipy>=11.0.0                # stay with major version 11 if your Gurobi license allows  
+pulp>=2.8.0                     # allow newer patches  
+scipy>=1.12.0                   # latest major you had  
+networkx>=3.2.1                 # allow newer minor updates
+
+# Data processing
+pandas>=2.2.0                    # allow upgrades but be cautious with breaking changes  
+numpy>=1.26.4                    # allow newer patches  
+openpyxl>=3.1.2                  # allow minor updates  
+
+# Visualization
+matplotlib>=3.8.3                # allow newer patches  
+seaborn>=0.13.2                  # allow newer  
+plotly>=5.19.0                   # allow minor upgrades  
+branca>=0.7.1                    # for folium compatibility  
+
+# PDF generation
+reportlab>=4.1.0                 # allow newer patches  
+pypdf2>=3.0.1                    # allow minor updates  
+
+# Testing
+pytest>=8.0.2                     # allow newer  
+pytest-cov>=4.1.0                # allow newer  
+
+# Future enhancements
+osmnx>=1.9.1                     # allow minor upgrades  
+contextily>=1.5.2                # allow newer patches  
