@@ -8,7 +8,7 @@ Build a Streamlit-based conversational agent that helps urban planners and city 
 
 ## TECH STACK
 - **Frontend**: Streamlit (Python)
-- **Conversational AI**: Anthropic Claude API (using Claude Computer Use SDK patterns)
+- **Conversational AI**: Google Gemini API
 - **Optimization**: spopt, PySAL, gurobipy, PuLP
 - **Geospatial**: GeoPandas, Shapely, Folium/streamlit-folium
 - **Distance Calculations**: NetworkX, OSMnx (future), scipy.spatial
@@ -33,7 +33,7 @@ spatial-optimization-agent/
 │   └── ...                         # Additional problem types
 ├── agent/
 │   ├── __init__.py
-│   ├── conversation_manager.py     # Claude API integration following SDK patterns
+│   ├── conversation_manager.py     # Gemini API integration following SDK patterns
 │   ├── prompts.py                  # System prompts and templates
 │   └── state_manager.py            # Conversation state management
 ├── utils/
@@ -285,184 +285,7 @@ problem_registry = ProblemRegistry()
 
 ### 3. CONVERSATION MANAGER (`agent/conversation_manager.py`)
 
-**CRITICAL**: Follow Anthropic's Claude SDK patterns and best practices.
-
-**Reference Documentation:**
-- Anthropic Python SDK: https://github.com/anthropics/anthropic-sdk-python
-- Computer Use Demo patterns for maintaining state
-- Message history management patterns
-
-**Implementation:**
-```python
-import anthropic
-from typing import List, Dict, Any, Optional
-import json
-
-class ConversationManager:
-    """
-    Manages conversation with Claude API following SDK best practices.
-    
-    Key Responsibilities:
-    - Maintain complete conversation history (Claude is stateless)
-    - Include problem state in every request
-    - Handle streaming responses (optional)
-    - Parse structured outputs (JSON when needed)
-    - Error handling and retry logic
-    """
-    
-    def __init__(self, api_key: str, problem_registry):
-        self.client = anthropic.Anthropic(api_key=api_key)
-        self.problem_registry = problem_registry
-        self.model = "claude-sonnet-4-20250514"
-        self.max_tokens = 4096
-    
-    def chat(
-        self,
-        user_message: str,
-        conversation_history: List[Dict[str, str]],
-        problem_state: Dict[str, Any],
-        uploaded_data_summary: Optional[Dict] = None
-    ) -> Dict[str, Any]:
-        """
-        Send message to Claude with full context.
-        
-        Returns:
-        {
-            "response": str,  # Claude's text response
-            "actions": List[Dict],  # Any actions to take (e.g., trigger optimization)
-            "updated_state": Dict  # Updated problem state
-        }
-        """
-        
-        # Build comprehensive context
-        system_prompt = self._build_system_prompt()
-        
-        # Prepare messages with full history + current state
-        messages = self._prepare_messages(
-            user_message,
-            conversation_history,
-            problem_state,
-            uploaded_data_summary
-        )
-        
-        # Call Claude API
-        try:
-            response = self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=system_prompt,
-                messages=messages
-            )
-            
-            # Parse response
-            return self._parse_response(response, problem_state)
-            
-        except anthropic.APIError as e:
-            return {
-                "response": f"I encountered an error: {str(e)}. Please try again.",
-                "actions": [],
-                "updated_state": problem_state
-            }
-    
-    def _build_system_prompt(self) -> str:
-        """
-        Constructs comprehensive system prompt with all problem types.
-        
-        Must include:
-        - Role definition (spatial optimization expert for academic research)
-        - Available problem types with full metadata
-        - Conversation guidelines
-        - Output format instructions (when to return JSON actions)
-        - Academic context and citation requirements
-        """
-        
-        problems_info = self.problem_registry.list_problems()
-        
-        prompt = f"""You are an expert spatial optimization assistant for academic research.
-You help urban planners and city administrators solve facility location problems.
-
-# Available Problem Types
-
-You can help solve {len(problems_info)} types of spatial optimization problems:
-
-"""
-        
-        for prob in problems_info:
-            prompt += f"""
-## {prob['name']} ({prob['short_name']})
-
-**Description:** {prob['description']}
-
-**Mathematical Formulation:**
-{prob.get('mathematical_formulation', 'See academic references')}
-
-**Use Cases:** {', '.join(prob['typical_use_cases'])}
-
-**Key References:**
-{chr(10).join(f'  - {ref}' for ref in prob['academic_refs'][:2])}
-
-**Detection Keywords:** {', '.join(prob['keywords'])}
-
----
-"""
-        
-        prompt += """
-
-# Your Responsibilities
-
-1. **Problem Identification**: Listen carefully and identify the appropriate problem type
-2. **Academic Rigor**: Provide technically accurate information with proper citations
-3. **Parameter Elicitation**: Ask targeted questions based on problem requirements
-4. **Data Guidance**: Help users understand what geospatial data they need
-5. **Solution Explanation**: Explain both the "what" and the "why" of solutions
-6. **Iterative Refinement**: Support what-if analysis and constraint modifications
-
-# Conversation Guidelines
-
-- Start broad: Let users describe challenges naturally
-- Confirm problem type before diving into parameters
-- Ask one question at a time (avoid overwhelming users)
-- Provide academic context when relevant
-- Be explicit about assumptions
-- Always maintain full conversation context
-
-# Output Format
-
-**Normal conversation**: Respond with natural language text
-
-**When ready to optimize**: Return JSON in this exact format:
-{
-  "action": "optimize",
-  "problem_type": "p-median",
-  "parameters": {...},
-  "constraints": {...}
-}
-
-**When user uploads data**: Acknowledge and summarize the data
-
-**When explaining solutions**: Use clear structure with metrics, rationale, and implications
-
-# Academic Context
-
-Users may request:
-- Mathematical formulations
-- Algorithm details
-- Computational complexity analysis
-- Literature references
-- Comparative analysis of problem types
-
-Always be prepared to discuss theoretical foundations while maintaining practical focus.
-
-# Critical Rules
-
-1. NEVER proceed to optimization without confirming problem type and parameters
-2. ALWAYS validate that required data has been uploaded
-3. INCLUDE full conversation context in your responses
-4. CITE academic sources when discussing methodology
-5. EXPLAIN trade-offs and limitations clearly
-"""
-        
-        return prompt
+Use the Google Gemini SDK with full conversation history and embedded problem state. See `agent/conversation_manager.py` in this repo for the implemented pattern.
     
     def _prepare_messages(
         self,
@@ -475,7 +298,7 @@ Always be prepared to discuss theoretical foundations while maintaining practica
         Prepares message array with full context.
         
         CRITICAL: Include COMPLETE conversation history and current state.
-        Claude has no memory between requests.
+        Gemini has no memory between requests.
         """
         
         messages = []
@@ -525,7 +348,7 @@ Objective Value: {problem_state['solution'].get('objective_value')}
         problem_state: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
-        Parses Claude's response and extracts actions.
+        Parses Gemini's response and extracts actions.
         
         Detects:
         - JSON action requests (optimization trigger)
@@ -632,7 +455,7 @@ def initialize_session_state():
             "solution_history": []
         }
     if "conversation_manager" not in st.session_state:
-        api_key = st.secrets.get("ANTHROPIC_API_KEY") or os.getenv("ANTHROPIC_API_KEY")
+        api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
         st.session_state.conversation_manager = ConversationManager(
             api_key=api_key,
             problem_registry=problem_registry
@@ -905,7 +728,7 @@ with col2:
 
 # Footer
 st.divider()
-st.caption("Academic Research Tool | Built with Streamlit + Anthropic Claude")
+st.caption("Academic Research Tool | Built with Streamlit + Google Gemini")
 ```
 
 ---
@@ -1109,10 +932,10 @@ class Settings:
     """Application configuration"""
     
     # API Keys
-    ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+    GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     
     # Model settings
-    CLAUDE_MODEL = "claude-sonnet-4-20250514"
+    GEMINI_MODEL = "gemini-2.0-flash-exp"
     MAX_TOKENS = 4096
     
     # Solver preferences
@@ -1145,8 +968,8 @@ class Settings:
     @classmethod
     def validate(cls):
         """Validate configuration"""
-        if not cls.ANTHROPIC_API_KEY:
-            raise ValueError("ANTHROPIC_API_KEY not set")
+        if not cls.GEMINI_API_KEY:
+            raise ValueError("GEMINI_API_KEY not set")
         
         # Create directories if they don't exist
         cls.DATA_DIR.mkdir(exist_ok=True)
@@ -1164,8 +987,8 @@ settings = Settings()
 streamlit==1.31.0
 python-dotenv==1.0.0
 
-# Anthropic
-anthropic==0.18.1
+# Google Gemini
+google-generativeai>=0.8.0
 
 # Geospatial
 geopandas==0.14.3
@@ -1407,13 +1230,13 @@ class TestDataProcessor(unittest.TestCase):
 Plugin-based spatial optimization system with conversational interface.
 
 ## Component Diagram
-[Diagram showing: Streamlit UI -> Conversation Manager -> Claude API]
+[Diagram showing: Streamlit UI -> Conversation Manager -> Gemini API]
 [Diagram showing: Problem Registry -> Individual Solvers -> Optimization Libraries]
 
 ## Data Flow
 1. User uploads geospatial data
 2. User describes problem in natural language
-3. Conversation Manager interprets via Claude API
+3. Conversation Manager interprets via Gemini API
 4. Problem Registry identifies appropriate solver
 5. Solver runs optimization
 6. Results displayed on map with metrics
@@ -1421,7 +1244,7 @@ Plugin-based spatial optimization system with conversational interface.
 
 ## Technology Stack
 - Frontend: Streamlit
-- AI: Anthropic Claude API
+- AI: Google Gemini API
 - Optimization: spopt, gurobipy, PuLP
 - Geospatial: GeoPandas, Folium
 - Testing: pytest
@@ -1602,7 +1425,7 @@ An academic research tool for solving facility location problems using conversat
 
 ## Features
 
-- 🗣️ **Conversational Interface**: Natural language interaction with Claude AI
+- 🗣️ **Conversational Interface**: Natural language interaction with Google Gemini
 - 🗺️ **Interactive Maps**: Visualize problems and solutions with Folium
 - 🎯 **10+ Problem Types**: P-Median, P-Center, MCLP, LSCP, and more
 - 📊 **Rich Analytics**: Comprehensive metrics and sensitivity analysis
@@ -1624,7 +1447,7 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Set up environment variables
-echo "ANTHROPIC_API_KEY=your_api_key_here" > .env
+echo "GEMINI_API_KEY=your_api_key_here" > .env
 ```
 
 ## Quick Start
@@ -1655,7 +1478,7 @@ Then:
 spatial-optimization-agent/
 ├── app.py                 # Main Streamlit application
 ├── solvers/               # Optimization problem solvers
-├── agent/                 # Claude API integration
+├── agent/                 # Gemini API integration
 ├── utils/                 # Data processing and visualization
 ├── tests/                 # Unit tests
 └── docs/                  # Documentation
@@ -1826,12 +1649,12 @@ Thumbs.db
 
 ## CRITICAL IMPLEMENTATION NOTES
 
-### Claude API Integration
-1. **Always include full conversation history** - Claude is stateless
+### Gemini API Integration
+1. **Always include full conversation history** - Gemini is stateless
 2. **Embed problem state in every request** - See conversation_manager.py pattern
 3. **Use streaming for better UX** (optional enhancement)
 4. **Handle rate limits** - Implement exponential backoff
-5. **Parse JSON actions carefully** - Claude may wrap in markdown
+5. **Parse JSON actions carefully** - Gemini may wrap in markdown
 
 ### Streamlit Best Practices
 1. **Use session_state for all persistence**
@@ -1922,7 +1745,7 @@ Thumbs.db
 ## QUESTIONS TO ASK YOURSELF
 
 Before implementing:
-- [ ] Do I have Anthropic API key?
+- [ ] Do I have Gemini API key?
 - [ ] Do I have Gurobi license? (Can fall back to PuLP)
 - [ ] What test datasets will I use?
 - [ ] Who are my target users for feedback?

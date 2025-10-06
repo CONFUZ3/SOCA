@@ -191,7 +191,7 @@ with st.sidebar:
 
 # Main content area
 st.title("Spatial Optimization Conversational Agent")
-st.caption("An academic research tool for facility location problems powered by Claude AI")
+st.caption("An academic research tool for facility location problems powered by Google Gemini")
 
 # Create two columns: chat and map
 col1, col2 = st.columns([1, 1])

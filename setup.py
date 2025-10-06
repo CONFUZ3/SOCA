@@ -64,7 +64,7 @@ def check_dependencies():
     
     required = [
         "streamlit",
-        "anthropic",
+        "google-generativeai",
         "geopandas",
         "folium",
         "pulp"

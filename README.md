@@ -1,6 +1,6 @@
 # Spatial Optimization Conversational Agent
 
-An academic research tool for solving facility location problems using conversational AI powered by Claude.
+An academic research tool for solving facility location problems using conversational AI powered by Google Gemini.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.31+-red.svg)
@@ -148,7 +148,7 @@ spoptv2/
 │   ├── mclp_solver.py              # MCLP implementation
 │   └── lscp_solver.py              # LSCP implementation
 ├── agent/
-│   ├── conversation_manager.py     # Claude API integration
+│   ├── conversation_manager.py     # Gemini API integration
 │   └── prompts.py                  # System prompts
 ├── utils/
 │   ├── data_processor.py           # Data loading and validation
@@ -237,7 +237,7 @@ See `docs/architecture.md` for detailed instructions.
 
 ### Common Issues
 
-**"ANTHROPIC_API_KEY not found"**
+**"GEMINI_API_KEY not found"**
 - Ensure you've set the API key in `.env` or `.streamlit/secrets.toml`
 
 **"Gurobi not available"**

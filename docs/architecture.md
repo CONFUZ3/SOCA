@@ -20,8 +20,8 @@ The Spatial Optimization Conversational Agent follows a modular, plugin-based ar
                   │
                   ▼
          ┌────────────────┐
-         │  Claude API    │
-         │  (Anthropic)   │
+         │  Gemini API    │
+         │   (Google)     │
          └────────┬───────┘
                   │
                   ▼
@@ -61,7 +61,7 @@ The Spatial Optimization Conversational Agent follows a modular, plugin-based ar
 **Key Features:**
 - Session state management for conversation history
 - Real-time map updates
-- Interactive chat with Claude AI
+- Interactive chat with Google Gemini
 - Responsive layout (two-column design)
 
 **State Management:**
@@ -84,7 +84,7 @@ session_state = {
 ### 2. Conversation Manager (`agent/conversation_manager.py`)
 
 **Responsibilities:**
-- Interface with Claude API
+- Interface with Gemini API
 - Maintain conversation context
 - Parse user intent
 - Extract structured actions (JSON)
@@ -95,10 +95,10 @@ session_state = {
 **Key Methods:**
 - `chat()`: Send message with full context
 - `_prepare_messages()`: Build message array with state
-- `_parse_response()`: Extract actions from Claude's response
+- `_parse_response()`: Extract actions from Gemini's response
 
 **Context Management:**
-- Includes full conversation history in every API call (Claude is stateless)
+- Includes full conversation history in every API call (Gemini is stateless)
 - Embeds current problem state in messages
 - Provides data summaries for awareness
 
@@ -210,19 +210,19 @@ User uploads data → DataProcessor → Validation → Session State
 
 ### 2. Problem Identification
 ```
-User describes problem → ConversationManager → Claude API
+User describes problem → ConversationManager → Gemini API
     → Problem Registry → Infer problem type → Update state
 ```
 
 ### 3. Parameter Collection
 ```
-Claude asks questions → User responds → Parameters extracted
+Gemini asks questions → User responds → Parameters extracted
     → Validate parameters → Update state
 ```
 
 ### 4. Optimization Trigger
 ```
-Claude returns JSON action → Extract problem_type & parameters
+Gemini returns JSON action → Extract problem_type & parameters
     → Get solver from registry → Prepare data → Solve
     → Update state with solution
 ```
@@ -251,7 +251,7 @@ Solution → Metrics dashboard → Streamlit metrics
 - Decoupled registration and usage
 
 ### 4. **Facade Pattern**
-- `ConversationManager` simplifies Claude API interaction
+- `ConversationManager` simplifies Gemini API interaction
 - Hides complexity of context management
 - Provides simple `chat()` interface
 
@@ -322,8 +322,8 @@ def _register_default_problems(self):
 - Larger datasets may need clustering
 - Layer control for selective display
 
-### Conversation Performance
-- Claude API calls: ~1-3 seconds
+- Conversation Performance
+- Gemini API calls: ~1-3 seconds
 - Full context included (no memory between calls)
 - Stateless design ensures consistency
 
@@ -409,7 +409,7 @@ CMD ["streamlit", "run", "app.py"]
 
 - Daskin, M. S. (2013). Network and discrete location: models, algorithms, and applications. John Wiley & Sons.
 - Streamlit Documentation: https://docs.streamlit.io
-- Anthropic Claude API: https://docs.anthropic.com
+- Google Gemini API: https://ai.google.dev
 - Gurobi Optimizer: https://www.gurobi.com/documentation
 - PuLP Documentation: https://coin-or.github.io/pulp
 

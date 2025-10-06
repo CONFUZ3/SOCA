@@ -31,11 +31,11 @@ class ConversationManager:
         uploaded_data_summary: Optional[Dict] = None
     ) -> Dict[str, Any]:
         """
-        Send message to Claude with full context.
+        Send message to Gemini with full context.
         
         Returns:
         {
-            "response": str,  # Claude's text response
+            "response": str,  # Gemini's text response
             "actions": List[Dict],  # Any actions to take (e.g., trigger optimization)
             "updated_state": Dict  # Updated problem state
         }
@@ -111,7 +111,7 @@ class ConversationManager:
         Prepares message array with full context.
         
         CRITICAL: Include COMPLETE conversation history and current state.
-        Claude has no memory between requests.
+        Gemini has no memory between requests.
         """
         
         messages = []
