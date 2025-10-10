@@ -145,15 +145,25 @@ class DataProcessor:
         if missing_fields:
             return False, f"Missing required fields: {', '.join(missing_fields)}"
         
+        # Check for null geometries first
+        if gdf.geometry.isna().any():
+            null_count = gdf.geometry.isna().sum()
+            return False, f"Found {null_count} null geometries"
+        
         # Check for valid geometry
         if not gdf.geometry.is_valid.all():
             invalid_count = (~gdf.geometry.is_valid).sum()
             return False, f"Found {invalid_count} invalid geometries"
         
-        # Check for null geometries
-        if gdf.geometry.isna().any():
-            null_count = gdf.geometry.isna().sum()
-            return False, f"Found {null_count} null geometries"
+        # Check for duplicate geometries
+        if gdf.geometry.duplicated().any():
+            duplicate_count = gdf.geometry.duplicated().sum()
+            logger.warning(f"Found {duplicate_count} duplicate geometries")
+        
+        # Check for extreme coordinate values
+        bounds = gdf.total_bounds
+        if bounds[0] < -180 or bounds[2] > 180 or bounds[1] < -90 or bounds[3] > 90:
+            logger.warning("Coordinates outside normal lat/lon ranges detected")
         
         return True, None
     
@@ -212,4 +222,129 @@ class DataProcessor:
             gdf[weight_column] = 1.0
             logger.info(f"Added default {weight_column} column with value 1.0")
         return gdf
+    
+    def identify_capacity_columns(self, gdf: gpd.GeoDataFrame) -> List[str]:
+        """Identify columns that might represent facility capacities (max demand each facility can serve)"""
+        capacity_columns = []
+        columns_lower = [col.lower() for col in gdf.columns]
+        
+        # Look for capacity-related column names (facility serving limits)
+        capacity_patterns = [
+            'capacity', 'cap', 'max_service', 'max_capacity', 'service_capacity',
+            'throughput', 'max_throughput', 'serving_capacity', 'max_load',
+            'facility_capacity', 'site_capacity', 'max_demand', 'demand_limit'
+        ]
+        
+        for col in gdf.columns:
+            col_lower = col.lower()
+            if any(pattern in col_lower for pattern in capacity_patterns):
+                # Check if the column contains numeric data
+                if pd.api.types.is_numeric_dtype(gdf[col]):
+                    capacity_columns.append(col)
+                    logger.info(f"Identified facility capacity column: {col}")
+        
+        return capacity_columns
+    
+    def identify_cost_columns(self, gdf: gpd.GeoDataFrame) -> List[str]:
+        """Identify columns that might represent facility costs"""
+        cost_columns = []
+        columns_lower = [col.lower() for col in gdf.columns]
+        
+        # Look for cost-related column names
+        cost_patterns = [
+            'cost', 'price', 'expense', 'budget', 'investment', 'capital',
+            'facility_cost', 'open_cost', 'establishment_cost', 'setup_cost'
+        ]
+        
+        for col in gdf.columns:
+            col_lower = col.lower()
+            if any(pattern in col_lower for pattern in cost_patterns):
+                # Check if the column contains numeric data
+                if pd.api.types.is_numeric_dtype(gdf[col]):
+                    cost_columns.append(col)
+                    logger.info(f"Identified cost column: {col}")
+        
+        return cost_columns
+    
+    def identify_demand_columns(self, gdf: gpd.GeoDataFrame) -> List[str]:
+        """Identify columns that might represent demand/weight values (population at each demand point)"""
+        demand_columns = []
+        columns_lower = [col.lower() for col in gdf.columns]
+        
+        # Look for demand-related column names (population/demand at each location)
+        demand_patterns = [
+            'demand', 'population', 'pop', 'weight', 'w', 'people', 'residents',
+            'customers', 'users', 'clients', 'visitors', 'traffic', 'volume',
+            'demand_value', 'pop_count', 'resident_count', 'service_demand'
+        ]
+        
+        for col in gdf.columns:
+            col_lower = col.lower()
+            if any(pattern in col_lower for pattern in demand_patterns):
+                # Check if the column contains numeric data
+                if pd.api.types.is_numeric_dtype(gdf[col]):
+                    demand_columns.append(col)
+                    logger.info(f"Identified demand/population column: {col}")
+        
+        return demand_columns
+    
+    def extract_capacity_data(self, gdf: gpd.GeoDataFrame) -> Optional[List[float]]:
+        """Extract capacity data from the most appropriate column"""
+        capacity_columns = self.identify_capacity_columns(gdf)
+        
+        if not capacity_columns:
+            return None
+        
+        # Use the first (most likely) capacity column
+        capacity_col = capacity_columns[0]
+        capacity_data = gdf[capacity_col].astype(float).tolist()
+        
+        # Validate that all values are positive
+        if any(val <= 0 for val in capacity_data):
+            logger.warning(f"Found non-positive capacity values in column {capacity_col}")
+            # Filter out non-positive values or set them to a default
+            capacity_data = [max(val, 1.0) for val in capacity_data]
+        
+        logger.info(f"Extracted capacity data from column '{capacity_col}': {len(capacity_data)} values")
+        return capacity_data
+    
+    def extract_cost_data(self, gdf: gpd.GeoDataFrame) -> Optional[List[float]]:
+        """Extract cost data from the most appropriate column"""
+        cost_columns = self.identify_cost_columns(gdf)
+        
+        if not cost_columns:
+            return None
+        
+        # Use the first (most likely) cost column
+        cost_col = cost_columns[0]
+        cost_data = gdf[cost_col].astype(float).tolist()
+        
+        # Validate that all values are non-negative
+        if any(val < 0 for val in cost_data):
+            logger.warning(f"Found negative cost values in column {cost_col}")
+            # Filter out negative values or set them to zero
+            cost_data = [max(val, 0.0) for val in cost_data]
+        
+        logger.info(f"Extracted cost data from column '{cost_col}': {len(cost_data)} values")
+        return cost_data
+    
+    def extract_demand_data(self, gdf: gpd.GeoDataFrame) -> Optional[List[float]]:
+        """Extract demand/population data from the most appropriate column"""
+        demand_columns = self.identify_demand_columns(gdf)
+        
+        if not demand_columns:
+            return None
+        
+        # Use the first (most likely) demand column
+        demand_col = demand_columns[0]
+        demand_data = gdf[demand_col].astype(float).tolist()
+        
+        # Validate that all values are non-negative
+        if any(val < 0 for val in demand_data):
+            logger.warning(f"Found negative demand values in column {demand_col}")
+            # Filter out negative values or set them to zero
+            demand_data = [max(val, 0.0) for val in demand_data]
+        
+        logger.info(f"Extracted demand/population data from column '{demand_col}': {len(demand_data)} values")
+        return demand_data
 

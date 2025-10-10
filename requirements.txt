@@ -39,6 +39,9 @@ pypdf2>=3.0.1                    # allow minor updates
 pytest>=8.0.2                     # allow newer  
 pytest-cov>=4.1.0                # allow newer  
 
+# Performance monitoring
+psutil>=5.9.0                    # system metrics monitoring
+
 # Future enhancements
 osmnx>=1.9.1                     # allow minor upgrades  
 contextily>=1.5.2                # allow newer patches  

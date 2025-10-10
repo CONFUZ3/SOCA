@@ -5,9 +5,17 @@ import geopandas as gpd
 from pathlib import Path
 import os
 import logging
+import time
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('spopt_app.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # Imports from our modules
@@ -21,7 +29,7 @@ from config.settings import settings
 # Page config
 st.set_page_config(
     page_title="Spatial Optimization Agent",
-    page_icon="🗺️",
+    page_icon=None,
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -49,9 +57,9 @@ def initialize_session_state():
         # Add welcome message
         st.session_state.messages.append({
             "role": "assistant",
-            "content": """Welcome to the Spatial Optimization Conversational Agent! 🗺️
+            "content": """Welcome to the Spatial Optimization Conversational Agent!
 
-I'm here to help you solve facility location problems using state-of-the-art optimization techniques powered by Google Gemini.
+I'm here to help you solve facility location problems using state-of-the-art optimization techniques.
 
 **To get started:**
 1. Upload your geospatial data (demand points and candidate sites) using the sidebar
@@ -86,7 +94,7 @@ What problem would you like to solve today?"""
             api_key = os.getenv("GEMINI_API_KEY")
         
         if not api_key:
-            st.error("⚠️ GEMINI_API_KEY not found. Please set it in .streamlit/secrets.toml or as an environment variable.")
+            st.error("GEMINI_API_KEY not found. Please set it in .streamlit/secrets.toml or as an environment variable.")
             st.stop()
         
         st.session_state.conversation_manager = ConversationManager(
@@ -107,13 +115,12 @@ initialize_session_state()
 
 # Sidebar
 with st.sidebar:
-    st.title("🗺️ Spatial Optimization")
-    st.markdown("### Academic Research Tool")
+    st.title("Spatial Optimization")
     
     st.divider()
     
     # File upload section
-    st.subheader("📁 Upload Data")
+    st.subheader("Upload Data")
     st.markdown("Upload geospatial data files (GeoJSON, Shapefile, CSV)")
     
     uploaded_files = st.file_uploader(
@@ -125,6 +132,7 @@ with st.sidebar:
     )
     
     if uploaded_files:
+        new_files_loaded = False
         for file in uploaded_files:
             if file.name not in st.session_state.problem_state["data"]:
                 with st.spinner(f"Processing {file.name}..."):
@@ -133,15 +141,57 @@ with st.sidebar:
                         gdf = st.session_state.data_processor.preprocess_data(gdf)
                         st.session_state.problem_state["data"][file.name] = gdf
                         st.success(f"✓ Loaded {file.name}: {len(gdf)} features")
+                        new_files_loaded = True
                     except Exception as e:
                         st.error(f"Error loading {file.name}: {str(e)}")
+
+        # Immediately notify the model about uploaded data and skip confirmations
+        if new_files_loaded and st.session_state.problem_state["data"]:
+            data_summary = {}
+            for name, gdf in st.session_state.problem_state["data"].items():
+                try:
+                    dtypes = {c: str(gdf[c].dtype) for c in gdf.columns if c != 'geometry'}
+                except Exception:
+                    dtypes = {}
+                
+                # Detect special columns
+                data_processor = st.session_state.data_processor
+                capacity_cols = data_processor.identify_capacity_columns(gdf)
+                cost_cols = data_processor.identify_cost_columns(gdf)
+                demand_cols = data_processor.identify_demand_columns(gdf)
+                
+                data_summary[name] = {
+                    "num_features": len(gdf),
+                    "geometry_type": gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown",
+                    "columns": [c for c in gdf.columns if c != 'geometry'],
+                    "dtypes": dtypes,
+                    "bounds": gdf.total_bounds.tolist() if len(gdf) > 0 else [],
+                    "capacity_columns": capacity_cols,
+                    "cost_columns": cost_cols,
+                    "demand_columns": demand_cols
+                }
+            try:
+                with st.spinner("Syncing uploaded data with AI..."):
+                    result = st.session_state.conversation_manager.notify_data_uploaded(
+                        conversation_history=st.session_state.messages,
+                        problem_state=st.session_state.problem_state,
+                        uploaded_data_summary=data_summary
+                    )
+                # Update state and chat history silently
+                st.session_state.problem_state = result["updated_state"]
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": result["response"]
+                })
+            except Exception as e:
+                st.warning(f"Could not sync uploaded data to AI: {e}")
     
     # Display loaded data summary
     if st.session_state.problem_state["data"]:
         st.divider()
-        st.subheader("📊 Loaded Data")
+        st.subheader("Loaded Data")
         for name, gdf in st.session_state.problem_state["data"].items():
-            with st.expander(f"📄 {name}"):
+            with st.expander(f"{name}"):
                 st.write(f"**Features:** {len(gdf)}")
                 st.write(f"**Geometry:** {gdf.geometry.type.unique()[0]}")
                 st.write(f"**Columns:** {', '.join([c for c in gdf.columns if c != 'geometry'])}")
@@ -149,22 +199,11 @@ with st.sidebar:
     
     st.divider()
     
-    # Problem registry info
-    st.subheader("📚 Available Problems")
-    problems = problem_registry.list_problems()
-    st.write(f"**{len(problems)}** problem types available")
-    
-    with st.expander("View All Problems"):
-        for prob in problems:
-            st.markdown(f"**{prob['name']}** (`{prob['short_name']}`)")
-            st.caption(prob['description'])
-            st.divider()
-    
-    st.divider()
+    # Removed Available Problems section from UI
     
     # Current problem state
     if st.session_state.problem_state["problem_type"]:
-        st.subheader("🎯 Current Problem")
+        st.subheader("Current Problem")
         st.info(st.session_state.problem_state["problem_type"])
         
         if st.session_state.problem_state["parameters"]:
@@ -177,7 +216,7 @@ with st.sidebar:
     
     # Clear conversation button
     st.divider()
-    if st.button("🔄 Reset Conversation"):
+    if st.button("Reset Conversation"):
         st.session_state.messages = []
         st.session_state.problem_state = {
             "problem_type": None,
@@ -191,13 +230,12 @@ with st.sidebar:
 
 # Main content area
 st.title("Spatial Optimization Conversational Agent")
-st.caption("An academic research tool for facility location problems powered by Google Gemini")
 
 # Create two columns: chat and map
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.subheader("💬 Conversation")
+    st.subheader("Conversation")
     
     # Chat container
     chat_container = st.container(height=500)
@@ -216,15 +254,29 @@ with col1:
         # Get data summary for context
         data_summary = None
         if st.session_state.problem_state["data"]:
-            data_summary = {
-                name: {
+            data_summary = {}
+            for name, gdf in st.session_state.problem_state["data"].items():
+                try:
+                    dtypes = {c: str(gdf[c].dtype) for c in gdf.columns if c != 'geometry'}
+                except Exception:
+                    dtypes = {}
+                
+                # Detect special columns
+                data_processor = st.session_state.data_processor
+                capacity_cols = data_processor.identify_capacity_columns(gdf)
+                cost_cols = data_processor.identify_cost_columns(gdf)
+                demand_cols = data_processor.identify_demand_columns(gdf)
+                
+                data_summary[name] = {
                     "num_features": len(gdf),
                     "geometry_type": gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown",
                     "columns": [c for c in gdf.columns if c != 'geometry'],
-                    "bounds": gdf.total_bounds.tolist() if len(gdf) > 0 else []
+                    "dtypes": dtypes,
+                    "bounds": gdf.total_bounds.tolist() if len(gdf) > 0 else [],
+                    "capacity_columns": capacity_cols,
+                    "cost_columns": cost_cols,
+                    "demand_columns": demand_cols
                 }
-                for name, gdf in st.session_state.problem_state["data"].items()
-            }
         
         # Call conversation manager
         with st.spinner("Thinking..."):
@@ -277,16 +329,70 @@ with col1:
                                     data_dict["demand_points"] = gdf
                                 elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
                                     data_dict["candidate_sites"] = gdf
-                                elif "demand_points" not in data_dict:
-                                    # Assume first dataset is demand
-                                    data_dict["demand_points"] = gdf
-                                elif "candidate_sites" not in data_dict:
-                                    # Assume second dataset is candidates
-                                    data_dict["candidate_sites"] = gdf
                             
-                            # Add default weights if needed
+                            # Fallback: if we still don't have both types, make educated guesses
+                            if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
+                                # If we have exactly 2 datasets, assume first is demand, second is candidates
+                                data_files = list(st.session_state.problem_state["data"].items())
+                                if len(data_files) == 2:
+                                    data_dict["demand_points"] = data_files[0][1]
+                                    data_dict["candidate_sites"] = data_files[1][1]
+                                elif len(data_files) == 1:
+                                    # Single dataset - assume it's demand points
+                                    data_dict["demand_points"] = data_files[0][1]
+                            elif "demand_points" not in data_dict:
+                                # We have candidates but no demand - use first remaining dataset as demand
+                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
+                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
+                                if remaining_files:
+                                    data_dict["demand_points"] = remaining_files[0][1]
+                            elif "candidate_sites" not in data_dict:
+                                # We have demand but no candidates - use first remaining dataset as candidates
+                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
+                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
+                                if remaining_files:
+                                    data_dict["candidate_sites"] = remaining_files[0][1]
+                            
+                            # Auto-detect and add variant-specific parameters from data
+                            parameters = action.get("parameters", {}).copy()
+                            
+                            # Check if capacitated variant and no capacities provided
+                            if parameters.get("variant") == "capacitated" and "capacities" not in parameters:
+                                # First try to get capacity data from candidate sites
+                                if "candidate_sites" in data_dict:
+                                    capacity_data = data_processor.extract_capacity_data(data_dict["candidate_sites"])
+                                    if capacity_data:
+                                        parameters["capacities"] = capacity_data
+                                        logger.info(f"Auto-detected capacity data from candidate sites: {len(capacity_data)} values")
+                                    else:
+                                        # If no capacity data in candidate sites, calculate based on demand dataset population
+                                        if "demand_points" in data_dict:
+                                            demand_population = data_processor.extract_demand_data(data_dict["demand_points"])
+                                            if demand_population:
+                                                total_demand = sum(demand_population)
+                                                n_facilities = parameters.get("n_facilities", len(data_dict["candidate_sites"]))
+                                                # Distribute total demand among facilities
+                                                avg_capacity = total_demand / n_facilities
+                                                # Create capacity array for all candidate sites
+                                                capacity_data = [avg_capacity] * len(data_dict["candidate_sites"])
+                                                parameters["capacities"] = capacity_data
+                                                logger.info(f"Calculated capacity data based on demand population: {len(capacity_data)} values, avg capacity: {avg_capacity:.2f}")
+                                            else:
+                                                logger.warning("Capacitated variant requested but no population data found in demand dataset")
+                                        else:
+                                            logger.warning("Capacitated variant requested but no demand points data available")
+                            
+                            # Check if budget variant and no costs provided
+                            if parameters.get("variant") == "budget" and "facility_costs" not in parameters:
+                                if "candidate_sites" in data_dict:
+                                    cost_data = data_processor.extract_cost_data(data_dict["candidate_sites"])
+                                    if cost_data:
+                                        parameters["facility_costs"] = cost_data
+                                        logger.info(f"Auto-detected cost data: {len(cost_data)} values")
+                            
+                            # Add default weights if needed (use a non-conflicting column name)
                             if "demand_points" in data_dict:
-                                data_dict["demand_points"] = data_processor.add_default_weights(data_dict["demand_points"])
+                                data_dict["demand_points"] = data_processor.add_default_weights(data_dict["demand_points"], weight_column='default_weight')
                             
                             # Validate required data
                             required_data = problem_solver.get_required_data()
@@ -297,18 +403,36 @@ with col1:
                                 st.error(error_msg)
                                 st.session_state.messages.append({
                                     "role": "assistant",
-                                    "content": f"❌ {error_msg}. Please upload the required data files."
+                                    "content": f"{error_msg}. Please upload the required data files."
                                 })
                                 st.rerun()
                                 continue
                             
-                            # Solve
-                            solution = problem_solver.solve(
-                                data=data_dict,
-                                parameters=action.get("parameters", {}),
-                                constraints=action.get("constraints", {}),
-                                distance_metric=action.get("distance_metric", "euclidean")
-                            )
+                            # Solve with performance monitoring
+                            logger.info(f"App: Solving with parameters: {parameters}")
+                            start_time = time.time()
+                            
+                            try:
+                                solution = problem_solver.solve(
+                                    data=data_dict,
+                                    parameters=parameters,
+                                    constraints=action.get("constraints", {}),
+                                    distance_metric=action.get("distance_metric", "euclidean")
+                                )
+                                
+                                solve_time = time.time() - start_time
+                                logger.info(f"Optimization completed in {solve_time:.2f} seconds")
+                                
+                                # Log performance metrics
+                                if solution.get('status') in ['optimal', 'feasible']:
+                                    logger.info(f"Solution status: {solution.get('status')}")
+                                    logger.info(f"Objective value: {solution.get('objective_value', 'N/A')}")
+                                    logger.info(f"Selected facilities: {len(solution.get('selected_facilities', []))}")
+                                    
+                            except Exception as solve_error:
+                                solve_time = time.time() - start_time
+                                logger.error(f"Optimization failed after {solve_time:.2f} seconds: {solve_error}")
+                                raise
                             
                             st.session_state.problem_state["solution"] = solution
                             st.session_state.problem_state["solution_history"].append(solution)
@@ -324,12 +448,12 @@ with col1:
                                 # Add explanation to chat
                                 st.session_state.messages.append({
                                     "role": "assistant",
-                                    "content": f"✅ **Optimization Complete!**\n\n{explanation}"
+                                    "content": f"**Optimization Complete.**\n\n{explanation}"
                                 })
                                 
                                 st.success("Optimization completed! Check the map for results.")
                             else:
-                                error_msg = f"❌ Optimization failed: {solution.get('error', 'Unknown error')}"
+                                error_msg = f"Optimization failed: {solution.get('error', 'Unknown error')}"
                                 st.session_state.messages.append({
                                     "role": "assistant",
                                     "content": error_msg
@@ -337,7 +461,7 @@ with col1:
                                 st.error(error_msg)
                         
                         except Exception as e:
-                            error_msg = f"❌ Optimization error: {str(e)}"
+                            error_msg = f"Optimization error: {str(e)}"
                             st.session_state.messages.append({
                                 "role": "assistant",
                                 "content": error_msg
@@ -348,7 +472,7 @@ with col1:
         st.rerun()
 
 with col2:
-    st.subheader("🗺️ Visualization")
+    st.subheader("Visualization")
     
     # Map display
     if st.session_state.problem_state["data"] or st.session_state.problem_state["solution"]:
@@ -359,6 +483,21 @@ with col2:
                 problem_solver = problem_registry.get_problem(st.session_state.problem_state["problem_type"])
                 if problem_solver:
                     viz_config = problem_solver.get_visualization_config()
+            
+            # Optional UI toggle to show service areas when radius is available
+            try:
+                current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
+                params = st.session_state.problem_state.get("parameters", {})
+                sol = st.session_state.problem_state.get("solution", {}) or {}
+                metrics = sol.get("metrics", {})
+                service_radius = params.get("service_radius") or metrics.get("service_radius")
+                if service_radius is not None and current_problem in ["mclp", "lscp"]:
+                    show_radius = st.checkbox("Show service radius", value=True, key="show_service_radius")
+                    if viz_config is None:
+                        viz_config = {}
+                    viz_config["show_service_areas"] = bool(show_radius)
+            except Exception:
+                pass
             
             # Map data to expected format for visualizer
             data_processor = st.session_state.data_processor
@@ -398,7 +537,7 @@ with col2:
         # Metrics dashboard
         if st.session_state.problem_state["solution"]:
             st.divider()
-            st.subheader("📈 Solution Metrics")
+            st.subheader("Solution Metrics")
             
             solution = st.session_state.problem_state["solution"]
             
@@ -429,7 +568,7 @@ with col2:
                     )
                 
                 # Additional metrics
-                with st.expander("📊 Detailed Metrics"):
+                with st.expander("Detailed Metrics"):
                     for key, value in metrics.items():
                         if isinstance(value, (int, float)):
                             st.write(f"**{key.replace('_', ' ').title()}:** {value:.2f}")
@@ -438,12 +577,12 @@ with col2:
                 
                 # Export options
                 st.divider()
-                st.subheader("💾 Export Solution")
+                st.subheader("Export Solution")
                 
                 export_col1, export_col2, export_col3 = st.columns(3)
                 
                 with export_col1:
-                    if st.button("📄 Export GeoJSON"):
+                    if st.button("Export GeoJSON"):
                         try:
                             geojson_data = st.session_state.export_handler.export_solution_geojson(
                                 solution, st.session_state.problem_state["data"]
@@ -458,7 +597,7 @@ with col2:
                             st.error(f"Export error: {e}")
                 
                 with export_col2:
-                    if st.button("📊 Export CSV"):
+                    if st.button("Export CSV"):
                         try:
                             csv_data = st.session_state.export_handler.export_solution_csv(solution)
                             st.download_button(
@@ -471,7 +610,7 @@ with col2:
                             st.error(f"Export error: {e}")
                 
                 with export_col3:
-                    if st.button("📝 Generate PDF Report"):
+                    if st.button("Generate PDF Report"):
                         try:
                             problem_metadata = {}
                             if st.session_state.problem_state["problem_type"]:
@@ -500,10 +639,10 @@ with col2:
                     st.error(solution['error'])
     
     else:
-        st.info("👆 Upload data or start a conversation to see visualizations")
+        st.info("Upload data or start a conversation to see visualizations")
         
         # Show example
-        with st.expander("📖 Quick Start Guide"):
+        with st.expander("Quick Start Guide"):
             st.markdown("""
             **Step 1: Upload Data**
             - Upload demand points (e.g., population centers)
@@ -525,9 +664,9 @@ with col2:
 st.divider()
 col_f1, col_f2, col_f3 = st.columns(3)
 with col_f1:
-    st.caption("🔬 Academic Research Tool")
+    st.caption("Spatial Optimization Agent")
 with col_f2:
-    st.caption(f"🤖 Powered by Google Gemini")
+    st.caption(f"Powered by Google Gemini")
 with col_f3:
-    st.caption(f"📚 {len(problems)} Problem Types Available")
+    st.caption("")
 

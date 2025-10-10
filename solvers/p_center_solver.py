@@ -160,7 +160,11 @@ Where:
                 "objective_value": solution['objective_value'],
                 "selected_facilities": solution['selected_facilities'],
                 "assignments": solution['assignments'],
-                "metrics": metrics,
+                "metrics": {
+                    **metrics,
+                    "objective_value": float(solution['objective_value']),
+                    "objective_name": "max_distance"
+                },
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
                 "academic_metadata": {

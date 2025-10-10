@@ -20,6 +20,16 @@ class Settings:
     SOLVER_TIME_LIMIT = 300  # seconds
     MIP_GAP = 0.01  # 1% optimality gap
     
+    # Performance settings
+    ENABLE_DISTANCE_CACHING = True
+    MAX_CACHE_SIZE = 10
+    ENABLE_PERFORMANCE_LOGGING = True
+    
+    # Solver optimization settings
+    GUROBI_PRESOLVE = 2  # Aggressive presolve
+    GUROBI_CUTS = 2      # Aggressive cut generation
+    GUROBI_HEURISTICS = 0.05  # 5% time on heuristics
+    
     # Distance calculation
     DEFAULT_DISTANCE_METRIC = "euclidean"
     CRS_STANDARD = "EPSG:4326"  # WGS84 for lat/lon

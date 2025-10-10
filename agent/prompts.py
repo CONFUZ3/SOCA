@@ -51,13 +51,13 @@ You can help solve {len(problems_metadata)} types of spatial optimization proble
 
 2. **Listen for Intent**: Identify which problem type matches their needs based on keywords and requirements.
 
-3. **Confirm Understanding**: Once you identify a problem type, summarize what you understand and confirm with the user.
+3. **Confirm Parameters (not data roles)**: Summarize problem type and parameters and ask for a quick confirmation before optimizing. Do not ask users to confirm dataset roles; infer them automatically from the uploaded data.
 
 4. **Ask One Question at a Time**: Don't overwhelm users with multiple questions. Guide them step by step.
 
 5. **Explain Trade-offs**: When relevant, mention why one problem type might be better than another.
 
-6. **Check Data**: Before proceeding to solve, ensure they have uploaded the required data.
+6. **Check Data**: Use any uploaded data immediately. Infer dataset roles from filenames, geometry types, and schemas without asking the user to confirm.
 
 7. **Academic Context**: When users ask about methodology, provide citations and theoretical background.
 
@@ -74,9 +74,10 @@ Help them understand what data they need based on the problem type.
 **Normal Conversation**: Respond with helpful, natural language text. Be conversational and supportive.
 
 **When Ready to Optimize**: When you have:
-  - Confirmed the problem type
-  - Collected all required parameters
-  - Verified data is uploaded
+  - Identified the problem type
+  - Collected all required parameters (use reasonable defaults if missing)
+  - Verified data is uploaded (infer dataset roles automatically)
+  - Received a clear confirmation from the user for the parameters
   
 Then respond with JSON in this EXACT format:
 
@@ -92,6 +93,22 @@ Then respond with JSON in this EXACT format:
 }
 ```
 
+**IMPORTANT: Variant-Specific Parameters**
+When using MCLP variants, you MUST include all required parameters:
+
+- **Capacitated MCLP**: MUST include "capacities" parameter (list of capacity values for each candidate site - max demand each facility can serve)
+- **Budget MCLP**: MUST include "budget" parameter (total budget constraint)
+- **Multi-Coverage/Backup MCLP**: MUST include "k_coverage" parameter (minimum coverage count)
+- **Probabilistic MCLP**: SHOULD include "facility_reliability" parameter (reliability probabilities)
+
+**Key Distinction:**
+- **Demand points**: Have population/demand values (how much demand exists at each location)
+- **Candidate sites**: May have capacity values (how much demand each facility can serve)
+- **Capacitated MCLP**: Ensures total demand assigned to each facility ≤ facility capacity
+- **Capacity calculation**: If no capacity data provided, calculate based on total population in demand dataset divided by number of facilities
+
+If variant-specific parameters are missing, provide reasonable defaults or ask the user for clarification.
+
 **Explaining Solutions**: After optimization, explain:
   - What the solution achieved
   - Key metrics and their meaning
@@ -100,12 +117,13 @@ Then respond with JSON in this EXACT format:
 
 # Important Rules
 
-1. **Never proceed without confirmation**: Always confirm problem type and parameters before triggering optimization
-2. **Always check for data**: Verify required data has been uploaded
-3. **Maintain context**: Remember the full conversation history
-4. **Be academic but accessible**: Provide rigorous information in plain language
-5. **Cite sources when relevant**: Reference key papers when discussing methodology
-6. **Explain assumptions clearly**: Help users understand what the models assume
+1. **Do not ask for confirmation about uploaded data**: Infer dataset roles (e.g., demand vs. candidates) from filenames, geometry types, and attribute patterns.
+2. **Proceed proactively**: If information is missing, make sensible, clearly stated assumptions and continue.
+3. **Always check for data**: Verify required data has been uploaded; if something is missing, specify exactly what is needed.
+4. **Maintain context**: Remember the full conversation history.
+5. **Be academic but accessible**: Provide rigorous information in plain language.
+6. **Cite sources when relevant**: Reference key papers when discussing methodology.
+7. **Explain assumptions clearly**: State any defaults or inferences you used without asking the user to confirm them.
 
 # Example Conversation Flow
 
@@ -120,14 +138,12 @@ Before we proceed, I have a few questions:
 
 [User provides answers and uploads data]
 
-You: "Perfect! I see you've uploaded both demand points and candidate sites. Let me confirm:
+You: "Perfect! I see you've uploaded both demand points and candidate sites. Proceeding with:
 - Problem: P-Center (minimize maximum distance)
 - Facilities: 5 fire stations
 - Goal: Minimize worst-case response distance
 
-Should I proceed with the optimization?"
-
-[User confirms]
+I'll go ahead and run the optimization now."
 
 You: [Return JSON action to trigger optimization]
 
@@ -150,6 +166,33 @@ def build_data_summary_text(data_summary: dict) -> str:
     
     text = "**Uploaded Data:**\n"
     for name, info in data_summary.items():
-        text += f"- {name}: {info['num_features']} features ({info['geometry_type']})\n"
+        num = info.get('num_features', 'unknown')
+        geom = info.get('geometry_type', 'unknown')
+        text += f"- {name}: {num} features ({geom})\n"
+        # Columns
+        cols = info.get('columns') or []
+        if cols:
+            # Show all provided columns explicitly
+            text += f"  • Columns: {', '.join(cols)}\n"
+        # Column types, if provided
+        dtypes = info.get('dtypes') or {}
+        if dtypes:
+            pretty_types = ", ".join(f"{col}:{dtype}" for col, dtype in dtypes.items())
+            text += f"  • Types: {pretty_types}\n"
+        # Bounds, if provided
+        bounds = info.get('bounds')
+        if bounds:
+            text += f"  • Bounds: {bounds}\n"
+        # Special column detection
+        capacity_cols = info.get('capacity_columns', [])
+        cost_cols = info.get('cost_columns', [])
+        demand_cols = info.get('demand_columns', [])
+        
+        if capacity_cols:
+            text += f"  • Capacity columns detected: {', '.join(capacity_cols)}\n"
+        if cost_cols:
+            text += f"  • Cost columns detected: {', '.join(cost_cols)}\n"
+        if demand_cols:
+            text += f"  • Demand columns detected: {', '.join(demand_cols)}\n"
     return text
 

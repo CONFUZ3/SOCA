@@ -51,7 +51,7 @@ Where:
                 "Distribution center optimization"
             ],
             "keywords": [
-                "p-median", "minimize distance", "minimize average distance", 
+                "p-median", "minimize distance", "minimize average distance", "average distance",
                 "minimize total distance", "minimize cost", "access optimization",
                 "facility location", "median", "distribution"
             ],
@@ -158,8 +158,8 @@ Where:
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
             
-            # Get demand weights
-            demand_weights = self._extract_weights(demand_gdf)
+            # Get demand weights (population or provided demand column)
+            demand_weights = self._extract_weights(demand_gdf, parameters)
             
             # Calculate distance matrix
             dist_calc = DistanceCalculator()
@@ -210,18 +210,46 @@ Where:
                 "solution_time": time.time() - start_time
             }
     
-    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame) -> np.ndarray:
-        """Extract demand weights from GeoDataFrame"""
-        # Look for weight columns
-        weight_cols = ['demand', 'weight', 'population', 'pop']
-        
-        for col in weight_cols:
-            if col in demand_gdf.columns:
-                weights = demand_gdf[col].values
-                if np.all(weights > 0):
-                    return weights
-        
-        # Default to uniform weights
+    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame, parameters: Dict[str, Any]) -> np.ndarray:
+        """Extract demand weights from GeoDataFrame, preferring population columns and explicit parameter."""
+        # 1) Explicit parameter takes precedence
+        try:
+            explicit_col = parameters.get('demand_weight_column') if parameters else None
+            if explicit_col:
+                for c in demand_gdf.columns:
+                    if c.lower() == str(explicit_col).lower():
+                        values = demand_gdf[c].astype(float).to_numpy()
+                        if np.any(values < 0):
+                            raise ValueError(f"Demand weight column '{c}' contains negative values")
+                        return values
+        except Exception as e:
+            logger.warning(f"Failed to use explicit demand_weight_column: {e}")
+
+        # 2) Case-insensitive exact matches of common names
+        common_exact = ['population', 'pop', 'demand', 'weight']
+        lower_cols = {c.lower(): c for c in demand_gdf.columns}
+        for key in common_exact:
+            if key in lower_cols:
+                c = lower_cols[key]
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    pass
+
+        # 3) Substring heuristic
+        substr_keys = ['population', 'pop', 'weight', 'demand']
+        for c in demand_gdf.columns:
+            lc = c.lower()
+            if any(k in lc for k in substr_keys):
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    continue
+
         logger.info("No weight column found, using uniform weights of 1.0")
         return np.ones(len(demand_gdf))
     

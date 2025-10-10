@@ -11,6 +11,19 @@ logger = logging.getLogger(__name__)
 class MapVisualizer:
     """Creates interactive Folium maps with solutions"""
     
+    def _looks_like_lonlat(self, gdf: gpd.GeoDataFrame) -> bool:
+        try:
+            xs = [geom.x for geom in gdf.geometry]
+            ys = [geom.y for geom in gdf.geometry]
+            if not xs or not ys:
+                return False
+            return (
+                min(xs) >= -180 and max(xs) <= 180 and
+                min(ys) >= -90 and max(ys) <= 90
+            )
+        except Exception:
+            return False
+
     def create_map(
         self,
         data: Dict[str, gpd.GeoDataFrame],
@@ -282,6 +295,12 @@ class MapVisualizer:
     ):
         """Add service area circles around facilities"""
         service_layer = folium.FeatureGroup(name='Service Areas')
+        # Convert radius to meters if layer is geographic (lat/lon).
+        # This matches utils.distance_calculator.calculate_coverage_matrix behavior.
+        if (facility_gdf.crs and facility_gdf.crs.is_geographic) or (facility_gdf.crs is None and self._looks_like_lonlat(facility_gdf)):
+            radius_meters = float(radius) * 1000.0
+        else:
+            radius_meters = float(radius)
         
         for idx in selected_indices:
             if idx >= len(facility_gdf):
@@ -292,7 +311,7 @@ class MapVisualizer:
             
             folium.Circle(
                 location=coords,
-                radius=radius,
+                radius=radius_meters,
                 color=viz_config.get('service_area_color', 'blue'),
                 fill=True,
                 fillOpacity=viz_config.get('service_area_opacity', 0.2),

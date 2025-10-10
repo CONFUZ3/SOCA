@@ -284,7 +284,7 @@ class TestDistanceCalculator(unittest.TestCase):
         )
         
         self.assertEqual(dist_matrix.shape, (3, 2))
-        self.assertGreater(dist_matrix.min(), 0)
+        self.assertGreaterEqual(dist_matrix.min(), 0)  # Allow zero for coincident points
     
     def test_manhattan_distance(self):
         """Test Manhattan distance calculation"""
