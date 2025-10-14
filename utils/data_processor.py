@@ -37,15 +37,54 @@ class DataProcessor:
         content = file.read()
         if isinstance(content, bytes):
             content = content.decode('utf-8')
-        
-        # Parse JSON and create GeoDataFrame
-        gdf = gpd.read_file(content)
-        
-        # Ensure CRS is set
+
+        # Parse JSON safely and construct GeoDataFrame from features
+        try:
+            geojson_obj = json.loads(content)
+        except Exception as exc:
+            logger.error(f"Failed to parse GeoJSON: {exc}")
+            raise
+
+        # Build GeoDataFrame from features when possible
+        try:
+            if 'features' in geojson_obj:
+                gdf = gpd.GeoDataFrame.from_features(geojson_obj['features'])
+            else:
+                # Fallback: write to a temporary file for geopandas to read
+                with tempfile.NamedTemporaryFile(suffix='.geojson', delete=False, mode='w', encoding='utf-8') as tmp:
+                    tmp.write(content)
+                    tmp_path = tmp.name
+                try:
+                    gdf = gpd.read_file(tmp_path)
+                finally:
+                    Path(tmp_path).unlink(missing_ok=True)
+        except Exception as exc:
+            logger.error(f"Failed creating GeoDataFrame from GeoJSON: {exc}")
+            raise
+
+        # Ensure CRS is set; prefer embedded CRS if present
         if gdf.crs is None:
-            gdf.set_crs("EPSG:4326", inplace=True)
-            logger.info("No CRS found, assuming EPSG:4326 (WGS84)")
-        
+            # Try to infer CRS from GeoJSON if present
+            crs_from_geojson = None
+            try:
+                crs_from_geojson = geojson_obj.get('crs')
+            except Exception:
+                crs_from_geojson = None
+            if crs_from_geojson:
+                try:
+                    # GeoJSON crs may be in legacy format; attempt to parse 'properties.name'
+                    name = crs_from_geojson.get('properties', {}).get('name') if isinstance(crs_from_geojson, dict) else None
+                    if name:
+                        gdf.set_crs(name, inplace=True)
+                    else:
+                        gdf.set_crs("EPSG:4326", inplace=True)
+                except Exception:
+                    gdf.set_crs("EPSG:4326", inplace=True)
+                    logger.info("Failed to use CRS from GeoJSON; assuming EPSG:4326")
+            else:
+                gdf.set_crs("EPSG:4326", inplace=True)
+                logger.info("No CRS found, assuming EPSG:4326 (WGS84)")
+
         return gdf
     
     def _load_csv(self, file: BinaryIO) -> gpd.GeoDataFrame:
@@ -60,6 +99,15 @@ class DataProcessor:
             raise ValueError("Could not identify coordinate columns in CSV. Expected columns like 'lat/lon', 'latitude/longitude', 'x/y'")
         
         lon_col, lat_col = coord_cols
+
+        # Coerce to numeric and drop invalid rows
+        df[lon_col] = pd.to_numeric(df[lon_col], errors='coerce')
+        df[lat_col] = pd.to_numeric(df[lat_col], errors='coerce')
+        before = len(df)
+        df = df.dropna(subset=[lon_col, lat_col])
+        dropped = before - len(df)
+        if dropped:
+            logger.warning(f"Dropped {dropped} rows with invalid coordinate values in CSV")
         
         # Create GeoDataFrame
         gdf = gpd.GeoDataFrame(
@@ -92,15 +140,8 @@ class DataProcessor:
                 
                 gdf = gpd.read_file(shp_files[0])
         else:
-            # Direct .shp file (need associated files)
-            with tempfile.NamedTemporaryFile(suffix='.shp', delete=False) as tmp:
-                tmp.write(file.read())
-                tmp_path = tmp.name
-            
-            try:
-                gdf = gpd.read_file(tmp_path)
-            finally:
-                Path(tmp_path).unlink(missing_ok=True)
+            # Direct .shp file uploads are not supported because sidecar files are required
+            raise ValueError("Please upload shapefiles as a .zip containing .shp, .dbf, .shx, and related files")
         
         return gdf
     
@@ -196,14 +237,30 @@ class DataProcessor:
         if gdf.crs is None:
             logger.warning("No CRS found, assuming EPSG:4326")
             gdf.set_crs("EPSG:4326", inplace=True)
-        elif gdf.crs != "EPSG:4326":
-            logger.info(f"Converting from {gdf.crs} to EPSG:4326")
-            gdf = gdf.to_crs("EPSG:4326")
+        else:
+            try:
+                # Compare via EPSG integer when possible
+                epsg_code = gdf.crs.to_epsg()
+                if epsg_code != 4326:
+                    logger.info(f"Converting from {gdf.crs} to EPSG:4326")
+                    gdf = gdf.to_crs(4326)
+            except Exception:
+                # Fallback to string comparison
+                if str(gdf.crs) not in ("EPSG:4326", "epsg:4326"):
+                    logger.info(f"Converting from {gdf.crs} to EPSG:4326")
+                    gdf = gdf.to_crs("EPSG:4326")
         
-        # Clean invalid geometries
+        # Clean invalid geometries conservatively based on geometry type
         if not gdf.geometry.is_valid.all():
-            logger.warning("Cleaning invalid geometries")
-            gdf.geometry = gdf.geometry.buffer(0)
+            geom_types = set(gdf.geometry.geom_type.unique())
+            if {'Polygon', 'MultiPolygon'} & geom_types:
+                logger.warning("Cleaning invalid polygon geometries with buffer(0)")
+                gdf.loc[~gdf.geometry.is_valid, 'geometry'] = gdf.loc[~gdf.geometry.is_valid, 'geometry'].buffer(0)
+            else:
+                # For non-polygon types, drop invalid rows rather than mutate geometry
+                invalid_count = (~gdf.geometry.is_valid).sum()
+                logger.warning(f"Dropping {invalid_count} invalid non-polygon geometries")
+                gdf = gdf[gdf.geometry.is_valid]
         
         # Remove null geometries
         if gdf.geometry.isna().any():
@@ -297,7 +354,12 @@ class DataProcessor:
         
         # Use the first (most likely) capacity column
         capacity_col = capacity_columns[0]
-        capacity_data = gdf[capacity_col].astype(float).tolist()
+        coerced = pd.to_numeric(gdf[capacity_col], errors='coerce')
+        num_invalid = coerced.isna().sum()
+        if num_invalid:
+            logger.warning(f"Coerced {num_invalid} non-numeric capacity values to NaN in column {capacity_col}; filling with 1.0")
+        coerced = coerced.fillna(1.0)
+        capacity_data = coerced.astype(float).tolist()
         
         # Validate that all values are positive
         if any(val <= 0 for val in capacity_data):
@@ -317,7 +379,12 @@ class DataProcessor:
         
         # Use the first (most likely) cost column
         cost_col = cost_columns[0]
-        cost_data = gdf[cost_col].astype(float).tolist()
+        coerced = pd.to_numeric(gdf[cost_col], errors='coerce')
+        num_invalid = coerced.isna().sum()
+        if num_invalid:
+            logger.warning(f"Coerced {num_invalid} non-numeric cost values to NaN in column {cost_col}; filling with 0.0")
+        coerced = coerced.fillna(0.0)
+        cost_data = coerced.astype(float).tolist()
         
         # Validate that all values are non-negative
         if any(val < 0 for val in cost_data):
@@ -337,7 +404,12 @@ class DataProcessor:
         
         # Use the first (most likely) demand column
         demand_col = demand_columns[0]
-        demand_data = gdf[demand_col].astype(float).tolist()
+        coerced = pd.to_numeric(gdf[demand_col], errors='coerce')
+        num_invalid = coerced.isna().sum()
+        if num_invalid:
+            logger.warning(f"Coerced {num_invalid} non-numeric demand values to NaN in column {demand_col}; filling with 0.0")
+        coerced = coerced.fillna(0.0)
+        demand_data = coerced.astype(float).tolist()
         
         # Validate that all values are non-negative
         if any(val < 0 for val in demand_data):

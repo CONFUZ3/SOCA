@@ -56,11 +56,20 @@ Where:
                 "facility location", "median", "distribution"
             ],
             "variants": [
-                "Capacitated P-Median",
-                "P-Median with forbidden pairs",
-                "Weighted P-Median",
-                "Probabilistic P-Median"
-            ]
+                "base",
+                "capacitated",
+                "budget",
+                "max_distance"
+            ],
+            "parameters": {
+                "n_facilities": {"type": "int", "required": True},
+                "objective": {"type": "choice", "choices": ["total", "average"], "required": False},
+                "variant": {"type": "choice", "choices": ["base", "capacitated", "budget", "max_distance"], "required": False},
+                "capacities": {"type": "list[float]", "required": False},
+                "facility_costs": {"type": "list[float]", "required": False},
+                "budget": {"type": "float", "required": False},
+                "max_assignment_distance": {"type": "float", "required": False}
+            }
         }
     
     def get_conversation_prompts(self) -> Dict[str, Any]:
@@ -127,6 +136,17 @@ Where:
             if params["objective"] not in ["total", "average"]:
                 return False, "objective must be either 'total' or 'average'"
         
+        # Variant validation
+        variant = params.get("variant", "base")
+        if variant not in ["base", "capacitated", "budget", "max_distance"]:
+            return False, "variant must be one of: base, capacitated, budget, max_distance"
+        if variant == "budget":
+            if "budget" not in params or not isinstance(params.get("budget"), (int, float)) or params.get("budget") < 0:
+                return False, "budget variant requires non-negative 'budget' parameter"
+        if variant == "max_distance":
+            if "max_assignment_distance" not in params or params.get("max_assignment_distance") is None or params.get("max_assignment_distance") <= 0:
+                return False, "max_distance variant requires positive 'max_assignment_distance'"
+        
         return True, None
     
     def solve(
@@ -153,6 +173,11 @@ Where:
             # Get parameters
             p = parameters['n_facilities']
             objective_type = parameters.get('objective', 'total')
+            variant = parameters.get('variant', 'base')
+            capacities = parameters.get('capacities') if isinstance(parameters.get('capacities'), (list, np.ndarray)) else None
+            facility_costs = parameters.get('facility_costs') if isinstance(parameters.get('facility_costs'), (list, np.ndarray)) else None
+            budget = parameters.get('budget') if isinstance(parameters.get('budget'), (int, float)) else None
+            max_assign_dist = parameters.get('max_assignment_distance') if isinstance(parameters.get('max_assignment_distance'), (int, float)) else None
             
             # Validate p
             if p > len(candidate_gdf):
@@ -166,10 +191,26 @@ Where:
             distance_matrix = dist_calc.calculate_distance_matrix(
                 demand_gdf, candidate_gdf, metric=distance_metric
             )
+            # For max-distance variant, compute a mask where assignments allowed
+            distance_mask = None
+            if variant == 'max_distance' and max_assign_dist is not None:
+                try:
+                    distance_mask = (distance_matrix <= float(max_assign_dist)).astype(int)
+                except Exception:
+                    distance_mask = None
             
             # Solve using optimization
             solution = self._solve_mip(
-                distance_matrix, demand_weights, p, constraints
+                distance_matrix=distance_matrix,
+                demand_weights=demand_weights,
+                p=p,
+                constraints=constraints,
+                variant=variant,
+                objective_type=objective_type,
+                capacities=np.array(capacities, dtype=float) if capacities is not None else None,
+                facility_costs=np.array(facility_costs, dtype=float) if facility_costs is not None else None,
+                budget=float(budget) if budget is not None else None,
+                distance_mask=distance_mask
             )
             
             # Calculate metrics
@@ -179,6 +220,25 @@ Where:
                 solution['assignments'],
                 objective_type
             )
+
+            # Variant-specific metrics
+            try:
+                if variant == 'budget' and facility_costs is not None:
+                    sel = solution.get('selected_facilities', [])
+                    metrics['budget_used'] = float(sum(float(facility_costs[j]) for j in sel if 0 <= j < len(facility_costs)))
+                if variant == 'capacitated' and capacities is not None:
+                    sel = solution.get('selected_facilities', [])
+                    served_weight_by_fac = {j: 0.0 for j in sel}
+                    for i, j in solution.get('assignments', {}).items():
+                        if j in served_weight_by_fac:
+                            served_weight_by_fac[j] += float(demand_weights[i])
+                    util = {}
+                    for j in sel:
+                        cap = float(capacities[j]) if 0 <= j < len(capacities) else 0.0
+                        util[j] = (served_weight_by_fac.get(j, 0.0) / cap) if cap > 0 else None
+                    metrics['capacity_utilization'] = util
+            except Exception:
+                pass
             
             solution_time = time.time() - start_time
             
@@ -195,7 +255,7 @@ Where:
                     "references": self.get_metadata()['academic_refs'][:2],
                     "assumptions": [
                         "Each demand point is assigned to exactly one facility",
-                        "Facilities have unlimited capacity",
+                        "Facilities have unlimited capacity" if parameters.get('variant', 'base') != 'capacitated' else "Facilities have capacity limits",
                         f"Distance metric: {distance_metric}",
                         "Travel occurs along straight lines" if distance_metric == "euclidean" else f"Distance calculation: {distance_metric}"
                     ]
@@ -258,7 +318,13 @@ Where:
         distance_matrix: np.ndarray,
         demand_weights: np.ndarray,
         p: int,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        variant: str,
+        objective_type: str,
+        capacities: Optional[np.ndarray],
+        facility_costs: Optional[np.ndarray],
+        budget: Optional[float],
+        distance_mask: Optional[np.ndarray]
     ) -> Dict[str, Any]:
         """Solve using Mixed Integer Programming"""
         n_demand, n_candidates = distance_matrix.shape
@@ -267,17 +333,29 @@ Where:
         try:
             import gurobipy as gp
             from gurobipy import GRB
-            return self._solve_gurobi(distance_matrix, demand_weights, p, constraints)
+            return self._solve_gurobi(
+                distance_matrix, demand_weights, p, constraints,
+                variant, objective_type, capacities, facility_costs, budget, distance_mask
+            )
         except ImportError:
             logger.info("Gurobi not available, using PuLP")
-            return self._solve_pulp(distance_matrix, demand_weights, p, constraints)
+            return self._solve_pulp(
+                distance_matrix, demand_weights, p, constraints,
+                variant, objective_type, capacities, facility_costs, budget, distance_mask
+            )
     
     def _solve_gurobi(
         self,
         distance_matrix: np.ndarray,
         demand_weights: np.ndarray,
         p: int,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        variant: str,
+        objective_type: str,
+        capacities: Optional[np.ndarray],
+        facility_costs: Optional[np.ndarray],
+        budget: Optional[float],
+        distance_mask: Optional[np.ndarray]
     ) -> Dict[str, Any]:
         """Solve using Gurobi"""
         import gurobipy as gp
@@ -289,17 +367,29 @@ Where:
         model = gp.Model("p-median")
         model.setParam('OutputFlag', 0)  # Suppress output
         model.setParam('TimeLimit', 300)  # 5 minute time limit
+        model.setParam('MIPGap', 0.01)
         
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")  # facility location
         y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")  # assignment
         
-        # Objective: minimize weighted distance
-        obj = gp.quicksum(
-            distance_matrix[i, j] * demand_weights[i] * y[i, j]
-            for i in range(n_demand)
-            for j in range(n_candidates)
-        )
+        # Objective: minimize weighted distance (total or average)
+        if objective_type == "average":
+            # For average distance, we minimize total weighted distance divided by total weight
+            # Since total weight is constant, this is equivalent to minimizing total weighted distance
+            total_weight = sum(demand_weights)
+            obj = gp.quicksum(
+                distance_matrix[i, j] * demand_weights[i] * y[i, j]
+                for i in range(n_demand)
+                for j in range(n_candidates)
+            ) / total_weight if total_weight > 0 else 0
+        else:  # objective_type == "total"
+            # For total distance, minimize total weighted distance
+            obj = gp.quicksum(
+                distance_matrix[i, j] * demand_weights[i] * y[i, j]
+                for i in range(n_demand)
+                for j in range(n_candidates)
+            )
         model.setObjective(obj, GRB.MINIMIZE)
         
         # Constraint: locate exactly p facilities
@@ -317,6 +407,34 @@ Where:
             for j in range(n_candidates):
                 model.addConstr(y[i, j] <= x[j], f"open_facility_{i}_{j}")
         
+        # Max-distance: forbid assignments beyond threshold
+        if variant == 'max_distance' and distance_mask is not None:
+            for i in range(n_demand):
+                for j in range(n_candidates):
+                    if distance_mask[i, j] == 0:
+                        model.addConstr(y[i, j] == 0, f"maxdist_forbid_{i}_{j}")
+
+        # Capacitated variant
+        if variant == 'capacitated' and capacities is not None:
+            if len(capacities) != n_candidates:
+                raise ValueError("capacities length must match number of candidate sites")
+            for j in range(n_candidates):
+                model.addConstr(
+                    gp.quicksum(demand_weights[i] * y[i, j] for i in range(n_demand)) <= float(capacities[j]) * x[j],
+                    f"capacity_{j}"
+                )
+
+        # Budget variant
+        if variant == 'budget':
+            if budget is None:
+                raise ValueError("budget variant requires 'budget'")
+            if facility_costs is None or len(facility_costs) != n_candidates:
+                raise ValueError("facility_costs length must match number of candidate sites for budget variant")
+            model.addConstr(
+                gp.quicksum(float(facility_costs[j]) * x[j] for j in range(n_candidates)) <= float(budget),
+                "budget_limit"
+            )
+
         # Add custom constraints
         must_include = constraints.get('must_include', [])
         for j in must_include:
@@ -341,16 +459,30 @@ Where:
                         assignments[i] = j
                         break
             
+            # Calculate the actual total weighted distance from assignments
+            total_weighted_distance = 0.0
+            for i, j in assignments.items():
+                total_weighted_distance += distance_matrix[i, j] * demand_weights[i]
+            
+            # Return the objective value that corresponds to what was actually optimized
+            if objective_type == "average":
+                total_weight = sum(demand_weights)
+                objective_value = total_weighted_distance / total_weight if total_weight > 0 else 0
+            else:  # objective_type == "total"
+                objective_value = total_weighted_distance
+            
             return {
                 'status': 'optimal' if model.status == GRB.OPTIMAL else 'feasible',
-                'objective_value': model.objVal,
+                'objective_value': objective_value,  # Return the actual objective that was optimized
                 'selected_facilities': selected,
                 'assignments': assignments,
                 'solver_details': {
                     'solver': 'gurobi',
                     'gap': model.MIPGap,
                     'iterations': model.IterCount,
-                    'formulation': 'P-Median MIP'
+                    'formulation': f'P-Median MIP ({variant})',
+                    'total_weighted_distance': total_weighted_distance,  # Always include total for reference
+                    'solver_objective_value': model.objVal  # Keep the solver's objective value for reference
                 }
             }
         else:
@@ -367,7 +499,13 @@ Where:
         distance_matrix: np.ndarray,
         demand_weights: np.ndarray,
         p: int,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        variant: str,
+        objective_type: str,
+        capacities: Optional[np.ndarray],
+        facility_costs: Optional[np.ndarray],
+        budget: Optional[float],
+        distance_mask: Optional[np.ndarray]
     ) -> Dict[str, Any]:
         """Solve using PuLP"""
         import pulp
@@ -383,12 +521,30 @@ Where:
             ((i, j) for i in range(n_demand) for j in range(n_candidates)),
             cat='Binary')
         
-        # Objective
-        prob += pulp.lpSum([
-            distance_matrix[i, j] * demand_weights[i] * y[(i, j)]
-            for i in range(n_demand)
-            for j in range(n_candidates)
-        ])
+        # Objective: minimize weighted distance (total or average)
+        if objective_type == "average":
+            # For average distance, we minimize total weighted distance divided by total weight
+            # Since total weight is constant, this is equivalent to minimizing total weighted distance
+            total_weight = sum(demand_weights)
+            if total_weight > 0:
+                prob += pulp.lpSum([
+                    distance_matrix[i, j] * demand_weights[i] * y[(i, j)]
+                    for i in range(n_demand)
+                    for j in range(n_candidates)
+                ]) / total_weight
+            else:
+                prob += pulp.lpSum([
+                    distance_matrix[i, j] * demand_weights[i] * y[(i, j)]
+                    for i in range(n_demand)
+                    for j in range(n_candidates)
+                ])
+        else:  # objective_type == "total"
+            # For total distance, minimize total weighted distance
+            prob += pulp.lpSum([
+                distance_matrix[i, j] * demand_weights[i] * y[(i, j)]
+                for i in range(n_demand)
+                for j in range(n_candidates)
+            ])
         
         # Constraints
         prob += pulp.lpSum([x[j] for j in range(n_candidates)]) == p, "p_facilities"
@@ -399,6 +555,21 @@ Where:
         for i in range(n_demand):
             for j in range(n_candidates):
                 prob += y[(i, j)] <= x[j], f"open_{i}_{j}"
+                if variant == 'max_distance' and distance_mask is not None and distance_mask[i, j] == 0:
+                    prob += y[(i, j)] == 0
+        
+        if variant == 'capacitated' and capacities is not None:
+            if len(capacities) != n_candidates:
+                raise ValueError("capacities length must match number of candidate sites")
+            for j in range(n_candidates):
+                prob += pulp.lpSum([demand_weights[i] * y[(i, j)] for i in range(n_demand)]) <= float(capacities[j]) * x[j]
+        
+        if variant == 'budget':
+            if budget is None:
+                raise ValueError("budget variant requires 'budget'")
+            if facility_costs is None or len(facility_costs) != n_candidates:
+                raise ValueError("facility_costs length must match number of candidate sites for budget variant")
+            prob += pulp.lpSum([float(facility_costs[j]) * x[j] for j in range(n_candidates)]) <= float(budget), "budget_limit"
         
         # Custom constraints
         must_include = constraints.get('must_include', [])
@@ -424,14 +595,28 @@ Where:
                         assignments[i] = j
                         break
             
+            # Calculate the actual total weighted distance from assignments
+            total_weighted_distance = 0.0
+            for i, j in assignments.items():
+                total_weighted_distance += distance_matrix[i, j] * demand_weights[i]
+            
+            # Return the objective value that corresponds to what was actually optimized
+            if objective_type == "average":
+                total_weight = sum(demand_weights)
+                objective_value = total_weighted_distance / total_weight if total_weight > 0 else 0
+            else:  # objective_type == "total"
+                objective_value = total_weighted_distance
+            
             return {
                 'status': 'optimal',
-                'objective_value': pulp.value(prob.objective),
+                'objective_value': objective_value,  # Return the actual objective that was optimized
                 'selected_facilities': selected,
                 'assignments': assignments,
                 'solver_details': {
                     'solver': 'pulp',
-                    'formulation': 'P-Median MIP'
+                    'formulation': 'P-Median MIP',
+                    'total_weighted_distance': total_weighted_distance,  # Always include total for reference
+                    'solver_objective_value': pulp.value(prob.objective)  # Keep the solver's objective value for reference
                 }
             }
         else:
@@ -477,7 +662,8 @@ Where:
         self,
         solution: Dict[str, Any],
         data: Dict[str, gpd.GeoDataFrame],
-        detail_level: str = "standard"
+        detail_level: str = "standard",
+        objective_type: str = "total"
     ) -> str:
         """Generate human-readable explanation"""
         if solution.get('status') == 'error':
@@ -496,10 +682,11 @@ Where:
             return f"Located {n_facilities} facilities with average distance {avg_dist:.2f}."
         
         elif detail_level == "standard":
+            objective_desc = "total weighted distance" if objective_type == "total" else "average weighted distance"
             return f"""
 **P-Median Solution Summary**
 
-✅ Successfully located {n_facilities} facilities to minimize total weighted distance.
+✅ Successfully located {n_facilities} facilities to minimize {objective_desc}.
 
 **Key Metrics:**
 - Total Weighted Distance: {total_dist:.2f}

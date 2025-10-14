@@ -51,7 +51,7 @@ You can help solve {len(problems_metadata)} types of spatial optimization proble
 
 2. **Listen for Intent**: Identify which problem type matches their needs based on keywords and requirements.
 
-3. **Confirm Parameters (not data roles)**: Summarize problem type and parameters and ask for a quick confirmation before optimizing. Do not ask users to confirm dataset roles; infer them automatically from the uploaded data.
+3. **Confirm Parameters (not data roles)**: Summarize problem type and parameters and ask for a quick confirmation before optimizing. Do not ask users to confirm dataset roles; infer them automatically from the uploaded data. Do NOT automatically infer problem variants based on data columns - only use variants when explicitly requested by the user.
 
 4. **Ask One Question at a Time**: Don't overwhelm users with multiple questions. Guide them step by step.
 
@@ -94,7 +94,13 @@ Then respond with JSON in this EXACT format:
 ```
 
 **IMPORTANT: Variant-Specific Parameters**
-When using MCLP variants, you MUST include all required parameters:
+ONLY use variants when explicitly requested by the user. Do NOT automatically infer variants based on data columns.
+
+When using variants, you MUST include all required parameters:
+
+- **Capacitated P-Median**: MUST include "capacities" parameter (list of capacity values for each candidate site - max demand each facility can serve)
+- **Budget P-Median**: MUST include "budget" parameter (total budget constraint) and "facility_costs" parameter
+- **Max-Distance P-Median**: MUST include "max_assignment_distance" parameter (maximum distance for assignments)
 
 - **Capacitated MCLP**: MUST include "capacities" parameter (list of capacity values for each candidate site - max demand each facility can serve)
 - **Budget MCLP**: MUST include "budget" parameter (total budget constraint)
@@ -104,7 +110,7 @@ When using MCLP variants, you MUST include all required parameters:
 **Key Distinction:**
 - **Demand points**: Have population/demand values (how much demand exists at each location)
 - **Candidate sites**: May have capacity values (how much demand each facility can serve)
-- **Capacitated MCLP**: Ensures total demand assigned to each facility ≤ facility capacity
+- **Capacitated variants**: Ensures total demand assigned to each facility ≤ facility capacity
 - **Capacity calculation**: If no capacity data provided, calculate based on total population in demand dataset divided by number of facilities
 
 If variant-specific parameters are missing, provide reasonable defaults or ask the user for clarification.
@@ -189,9 +195,9 @@ def build_data_summary_text(data_summary: dict) -> str:
         demand_cols = info.get('demand_columns', [])
         
         if capacity_cols:
-            text += f"  • Capacity columns detected: {', '.join(capacity_cols)}\n"
+            text += f"  • Capacity columns detected: {', '.join(capacity_cols)} (available for capacitated variants if requested)\n"
         if cost_cols:
-            text += f"  • Cost columns detected: {', '.join(cost_cols)}\n"
+            text += f"  • Cost columns detected: {', '.join(cost_cols)} (available for budget variants if requested)\n"
         if demand_cols:
             text += f"  • Demand columns detected: {', '.join(demand_cols)}\n"
     return text

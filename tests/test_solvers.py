@@ -76,6 +76,53 @@ class TestPMedianSolver(unittest.TestCase):
         self.assertEqual(len(solution["assignments"]), 25)
         self.assertGreater(solution["solution_time"], 0)
         self.assertIn("metrics", solution)
+
+    def test_solve_capacitated(self):
+        solver = problem_registry.get_problem("p-median")
+        params = {"n_facilities": 3, "variant": "capacitated", "capacities": [10.0]*len(self.candidate_gdf)}
+        solution = solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters=params,
+            constraints={},
+            distance_metric="euclidean"
+        )
+        self.assertIn(solution["status"], ["optimal", "feasible"])
+        self.assertEqual(len(solution["assignments"]), len(self.demand_gdf))
+
+    def test_solve_budget(self):
+        solver = problem_registry.get_problem("p-median")
+        facility_costs = [1.0 for _ in range(len(self.candidate_gdf))]
+        params = {"n_facilities": 3, "variant": "budget", "facility_costs": facility_costs, "budget": 3.0}
+        solution = solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters=params,
+            constraints={},
+            distance_metric="euclidean"
+        )
+        self.assertIn(solution["status"], ["optimal", "feasible"])
+        self.assertEqual(len(solution["selected_facilities"]), 3)
+
+    def test_solve_max_distance(self):
+        solver = problem_registry.get_problem("p-median")
+        # Set a tight max distance to force localized assignments
+        params = {"n_facilities": 3, "variant": "max_distance", "max_assignment_distance": 3.0}
+        solution = solver.solve(
+            data={
+                "demand_points": self.demand_gdf,
+                "candidate_sites": self.candidate_gdf
+            },
+            parameters=params,
+            constraints={},
+            distance_metric="euclidean"
+        )
+        # Could be infeasible if mask removes all options for some demand; allow feasible/infeasible
+        self.assertIn(solution["status"], ["optimal", "feasible", "infeasible"]) 
     
     def test_explanation_generation(self):
         """Test that explanation is generated"""

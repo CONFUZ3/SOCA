@@ -306,8 +306,22 @@ with col1:
         
         # Handle actions (e.g., optimization trigger)
         if result["actions"]:
-            for action in result["actions"]:
+            logger.info(f"App: Processing {len(result['actions'])} action(s): {[a.get('action', 'unknown') for a in result['actions']]}")
+            
+            # Track processed actions to prevent duplicates
+            processed_actions = set()
+            
+            for i, action in enumerate(result["actions"]):
                 if action["action"] == "optimize":
+                    # Create a unique key for this action to prevent duplicates
+                    action_key = f"{action.get('problem_type', 'unknown')}_{action.get('parameters', {}).get('n_facilities', 'unknown')}_{action.get('parameters', {}).get('service_radius', 'unknown')}"
+                    
+                    if action_key in processed_actions:
+                        logger.warning(f"App: Skipping duplicate optimization action: {action_key}")
+                        continue
+                    
+                    processed_actions.add(action_key)
+                    logger.info(f"App: Processing optimization action {i+1}/{len(result['actions'])}: {action_key}")
                     with st.spinner("Running optimization..."):
                         try:
                             # Get problem solver
@@ -356,6 +370,7 @@ with col1:
                             # Auto-detect and add variant-specific parameters from data
                             parameters = action.get("parameters", {}).copy()
                             
+                            # Only auto-detect data if variant is explicitly requested by user
                             # Check if capacitated variant and no capacities provided
                             if parameters.get("variant") == "capacitated" and "capacities" not in parameters:
                                 # First try to get capacity data from candidate sites
@@ -383,12 +398,18 @@ with col1:
                                             logger.warning("Capacitated variant requested but no demand points data available")
                             
                             # Check if budget variant and no costs provided
+                            # Only auto-detect costs if variant is explicitly set to budget
                             if parameters.get("variant") == "budget" and "facility_costs" not in parameters:
                                 if "candidate_sites" in data_dict:
                                     cost_data = data_processor.extract_cost_data(data_dict["candidate_sites"])
                                     if cost_data:
                                         parameters["facility_costs"] = cost_data
                                         logger.info(f"Auto-detected cost data: {len(cost_data)} values")
+                                    else:
+                                        logger.warning("Budget variant requested but no cost data found in candidate sites")
+                                        # Remove budget variant if no cost data available
+                                        parameters["variant"] = "base" if parameters.get("problem_type") == "p-median" else "classical"
+                                        logger.info(f"Reverted to {'base' if parameters.get('problem_type') == 'p-median' else 'classical'} variant due to missing cost data")
                             
                             # Add default weights if needed (use a non-conflicting column name)
                             if "demand_points" in data_dict:
@@ -442,7 +463,8 @@ with col1:
                                 explanation = problem_solver.explain_solution(
                                     solution=solution,
                                     data=data_dict,
-                                    detail_level="standard"
+                                    detail_level="standard",
+                                    objective_type=parameters.get("objective", "total")
                                 )
                                 
                                 # Add explanation to chat

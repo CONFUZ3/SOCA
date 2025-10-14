@@ -2,6 +2,7 @@ import google.generativeai as genai
 from typing import List, Dict, Any, Optional
 import json
 import logging
+import numpy as np
 from .prompts import build_system_prompt, build_data_summary_text
 
 logger = logging.getLogger(__name__)
@@ -240,7 +241,7 @@ class ConversationManager:
                             logger.warning(f"Variant parameter validation failed: {validation_error}")
                             # Try to add default parameters for missing variant requirements
                             action_data = self._add_default_variant_parameters(action_data)
-                        # Gate on explicit parameter confirmation from the user
+                        # Always require explicit confirmation before optimization
                         is_confirmed = bool(action_data.get('confirm')) or bool(problem_state.get('parameters_confirmed'))
                         if not is_confirmed and self._is_affirmative(last_user_message or ""):
                             is_confirmed = True
@@ -252,18 +253,26 @@ class ConversationManager:
                         logger.info(f"Conversation Manager: Action parameters: {action_data.get('parameters', {})}")
 
                         if is_confirmed:
-                            actions.append(action_data)
-                            text_response = "I'm ready to solve your problem. Let me run the optimization..."
+                            # Only add action if we don't already have one
+                            if len(actions) == 0:
+                                actions.append(action_data)
+                                text_response = "I'm ready to solve your problem. Let me run the optimization..."
+                            else:
+                                logger.warning("Skipping duplicate action - action already exists in actions list")
+                                text_response = "I'm ready to solve your problem. Let me run the optimization..."
                         else:
-                            # Ask for confirmation of parameters without asking about data roles
+                            # Ask for confirmation of parameters - always require explicit confirmation
                             summary = json.dumps({
                                 "problem_type": problem_state.get('problem_type'),
                                 "parameters": problem_state.get('parameters', {}),
                                 "constraints": problem_state.get('constraints', {})
                             }, indent=2)
                             text_response = (
-                                "Please confirm these parameters before I optimize (data roles have already been inferred):\n\n"
-                                f"```json\n{summary}\n```\n\nReply with 'yes' to proceed or update any values."
+                                "Please confirm these parameters before I optimize:\n\n"
+                                f"```json\n{summary}\n```\n\n"
+                                "**Important:** I will only run the optimization after you explicitly confirm with 'yes' or 'proceed'. "
+                                "You can modify any parameters by simply stating the changes (e.g., 'change n_facilities to 5' or 'set budget to 1000'). "
+                                "Please review the parameters carefully and reply with 'yes' to proceed or specify any changes."
                             )
                             problem_state['pending_action'] = action_data
                             problem_state['parameters_confirmed'] = False
@@ -279,13 +288,22 @@ class ConversationManager:
                 pass
         
         # Try to extract state updates from conversation (heuristic)
+        # Process both assistant response and user message for parameter updates
         updated_state = self._extract_state_updates(text_response, problem_state)
+        if last_user_message:
+            user_updates = self._extract_state_updates(last_user_message, updated_state)
+            updated_state.update(user_updates)
 
         # If the user has just confirmed and a pending action exists, pass it through
-        if updated_state.get('parameters_confirmed') and updated_state.get('pending_action'):
+        # BUT only if we haven't already added an action from the JSON parsing above
+        if updated_state.get('parameters_confirmed') and updated_state.get('pending_action') and len(actions) == 0:
             actions.append(updated_state['pending_action'])
             # Clear pending action after promoting it
             updated_state.pop('pending_action', None)
+        
+        # Log final actions for debugging
+        if actions:
+            logger.info(f"Conversation Manager: Returning {len(actions)} action(s): {[a.get('action', 'unknown') for a in actions]}")
         
         return {
             "response": text_response,
@@ -339,29 +357,57 @@ class ConversationManager:
         
         # Check for facility count mentions
         import re
-        facility_match = re.search(r'(\d+)\s+facilities?', response_lower)
-        if facility_match:
-            n_facilities = int(facility_match.group(1))
-            if 'parameters' not in updated_state:
-                updated_state['parameters'] = {}
-            updated_state['parameters']['n_facilities'] = n_facilities
+        facility_patterns = [
+            r'(\d+)\s+facilities?',
+            r'n_facilities[:\s=]+(\d+)',
+            r'number\s+of\s+facilities[:\s=]+(\d+)',
+            r'locate\s+(\d+)\s+facilities?',
+            r'place\s+(\d+)\s+facilities?',
+            r'(\d+)\s+sites?',
+            r'(\d+)\s+stations?',
+            r'(\d+)\s+centers?',
+            r'change\s+n_facilities\s+to\s+(\d+)',
+            r'set\s+n_facilities\s+to\s+(\d+)',
+            r'n_facilities\s+to\s+(\d+)'
+        ]
+        for pattern in facility_patterns:
+            facility_match = re.search(pattern, response_lower)
+            if facility_match:
+                n_facilities = int(facility_match.group(1))
+                if 'parameters' not in updated_state:
+                    updated_state['parameters'] = {}
+                updated_state['parameters']['n_facilities'] = n_facilities
+                break
         
         # Check for service radius mentions
-        radius_match = re.search(r'radius\s+of\s+(\d+\.?\d*)', response_lower)
-        if radius_match:
-            service_radius = float(radius_match.group(1))
-            if 'parameters' not in updated_state:
-                updated_state['parameters'] = {}
-            updated_state['parameters']['service_radius'] = service_radius
+        radius_patterns = [
+            r'radius\s+of\s+(\d+\.?\d*)',
+            r'service_radius[:\s=]+(\d+\.?\d*)',
+            r'service\s+radius[:\s=]+(\d+\.?\d*)',
+            r'distance\s+threshold[:\s=]+(\d+\.?\d*)',
+            r'maximum\s+distance[:\s=]+(\d+\.?\d*)',
+            r'max\s+distance[:\s=]+(\d+\.?\d*)',
+            r'within\s+(\d+\.?\d*)\s+(km|miles?|meters?)',
+            r'(\d+\.?\d*)\s+(km|miles?|meters?)\s+radius'
+        ]
+        for pattern in radius_patterns:
+            radius_match = re.search(pattern, response_lower)
+            if radius_match:
+                service_radius = float(radius_match.group(1))
+                if 'parameters' not in updated_state:
+                    updated_state['parameters'] = {}
+                updated_state['parameters']['service_radius'] = service_radius
+                break
 
-        # Detect MCLP variant mentions
+        # Detect variant mentions - only from explicit user requests, not data descriptions
+        # Only set variant if user explicitly mentions wanting that variant
         variants = [
-            ("budget", ["budget"]),
-            ("capacitated", ["capacitated", "capacity", "capacities"]),
-            ("probabilistic", ["probabilistic", "reliability", "failure"]),
-            ("multi_coverage", ["multi-coverage", "multi coverage", "k-coverage", "k coverage"]),
-            ("backup", ["backup"]) ,
-            ("classical", ["classical"]) 
+            ("budget", ["budget variant", "budget constraint", "budget problem"]),
+            ("capacitated", ["capacitated variant", "capacity constraint", "capacity problem", "facility capacity"]),
+            ("probabilistic", ["probabilistic variant", "reliability problem"]),
+            ("multi_coverage", ["multi-coverage variant", "k-coverage variant"]),
+            ("backup", ["backup variant"]) ,
+            ("classical", ["classical variant", "standard variant"]) 
         ]
         for variant_key, keywords in variants:
             if any(kw in response_lower for kw in keywords):
@@ -370,13 +416,38 @@ class ConversationManager:
                 updated_state['parameters']['variant'] = variant_key
                 break
 
-        # Extract budget if mentioned
-        budget_match = re.search(r'budget\s*(of|=)?\s*(\d+\.?\d*)', response_lower)
-        if budget_match:
-            budget_val = float(budget_match.group(2))
-            if 'parameters' not in updated_state:
-                updated_state['parameters'] = {}
-            updated_state['parameters']['budget'] = budget_val
+        # Extract budget if mentioned - but only if user is explicitly requesting budget variant
+        # Check if user is talking about budget variant first
+        budget_variant_mentioned = any(phrase in response_lower for phrase in [
+            'budget variant', 'budget constraint', 'budget problem', 'budget optimization',
+            'with budget', 'budget limit', 'cost constraint', 'budget constraint'
+        ])
+        
+        if budget_variant_mentioned:
+            budget_patterns = [
+                r'budget\s*(of|=|:)?\s*(\d+\.?\d*)',
+                r'budget[:\s=]+(\d+\.?\d*)',
+                r'total\s+budget[:\s=]+(\d+\.?\d*)',
+                r'cost\s+limit[:\s=]+(\d+\.?\d*)',
+                r'maximum\s+cost[:\s=]+(\d+\.?\d*)',
+                r'change\s+budget\s+to\s+(\d+\.?\d*)',
+                r'set\s+budget\s+to\s+(\d+\.?\d*)',
+                r'budget\s+to\s+(\d+\.?\d*)'
+            ]
+            for pattern in budget_patterns:
+                budget_match = re.search(pattern, response_lower)
+                if budget_match:
+                    # Handle different group patterns
+                    if len(budget_match.groups()) >= 2 and budget_match.group(2):
+                        budget_val = float(budget_match.group(2))
+                    else:
+                        budget_val = float(budget_match.group(1))
+                    if 'parameters' not in updated_state:
+                        updated_state['parameters'] = {}
+                    updated_state['parameters']['budget'] = budget_val
+                    # DO NOT automatically set variant - only set if explicitly requested by user
+                    # The variant should only be set when the user explicitly mentions "budget variant" or similar
+                    break
 
         # Extract k-coverage like "k=2" or "at least 2 facilities"
         k_match = re.search(r'k\s*=?\s*(\d+)', response_lower)
@@ -405,17 +476,56 @@ class ConversationManager:
             else:
                 updated_state['parameters']['capacities'].append(capacity_val)
 
-        # Extract budget information
-        budget_match = re.search(r'budget\s*(of|=)?\s*(\d+\.?\d*)', response_lower)
-        if budget_match:
-            budget_val = float(budget_match.group(2))
-            if 'parameters' not in updated_state:
+        # Extract max assignment distance for P-Median variants
+        max_dist_patterns = [
+            r'max_assignment_distance[:\s=]+(\d+\.?\d*)',
+            r'max\s+assignment\s+distance[:\s=]+(\d+\.?\d*)',
+            r'maximum\s+assignment\s+distance[:\s=]+(\d+\.?\d*)',
+            r'assignment\s+distance\s+limit[:\s=]+(\d+\.?\d*)',
+            r'max\s+travel\s+distance[:\s=]+(\d+\.?\d*)',
+            r'maximum\s+travel\s+distance[:\s=]+(\d+\.?\d*)'
+        ]
+        for pattern in max_dist_patterns:
+            max_dist_match = re.search(pattern, response_lower)
+            if max_dist_match:
+                max_dist_val = float(max_dist_match.group(1))
+                if 'parameters' not in updated_state:
+                    updated_state['parameters'] = {}
+                updated_state['parameters']['max_assignment_distance'] = max_dist_val
+                break
+        
+        # Handle parameter clearing/reset requests
+        if any(word in response_lower for word in ['clear', 'reset', 'remove', 'delete']):
+            if 'parameters' in response_lower:
+                # Clear all parameters
                 updated_state['parameters'] = {}
-            updated_state['parameters']['budget'] = budget_val
+                logger.info("User requested to clear all parameters")
+            elif 'variant' in response_lower:
+                # Clear variant
+                if 'parameters' in updated_state:
+                    updated_state['parameters'].pop('variant', None)
+                logger.info("User requested to clear variant")
+        
+        # Handle specific parameter removal
+        if 'remove' in response_lower or 'delete' in response_lower:
+            if 'n_facilities' in response_lower and 'parameters' in updated_state:
+                updated_state['parameters'].pop('n_facilities', None)
+            if 'budget' in response_lower and 'parameters' in updated_state:
+                updated_state['parameters'].pop('budget', None)
+            if 'service_radius' in response_lower and 'parameters' in updated_state:
+                updated_state['parameters'].pop('service_radius', None)
         
         # If model text indicates confirmation (rare), set flag
         if self._is_affirmative(response_text):
             updated_state['parameters_confirmed'] = True
+        
+        # Final safeguard: Remove budget parameter if no budget variant is explicitly set
+        if 'parameters' in updated_state and 'budget' in updated_state['parameters']:
+            variant = updated_state['parameters'].get('variant', 'base')
+            if variant not in ['budget']:
+                logger.warning(f"Removing accidentally extracted budget parameter - variant is '{variant}', not 'budget'")
+                updated_state['parameters'].pop('budget', None)
+        
         return updated_state
 
     def _is_affirmative(self, text: str) -> bool:
@@ -431,7 +541,22 @@ class ConversationManager:
         problem_type = action.get('problem_type', '').lower()
         parameters = action.get('parameters', {})
         
-        if problem_type == 'mclp':
+        if problem_type == 'p-median':
+            variant = parameters.get('variant', 'base')
+            
+            if variant == 'capacitated':
+                if 'capacities' not in parameters:
+                    return "Capacitated P-Median requires 'capacities' parameter"
+            elif variant == 'budget':
+                if 'budget' not in parameters:
+                    return "Budget P-Median requires 'budget' parameter"
+                if 'facility_costs' not in parameters:
+                    return "Budget P-Median requires 'facility_costs' parameter"
+            elif variant == 'max_distance':
+                if 'max_assignment_distance' not in parameters:
+                    return "Max-distance P-Median requires 'max_assignment_distance' parameter"
+        
+        elif problem_type == 'mclp':
             variant = parameters.get('variant', 'classical')
             
             if variant == 'capacitated':
@@ -451,7 +576,43 @@ class ConversationManager:
         problem_type = action.get('problem_type', '').lower()
         parameters = action.get('parameters', {})
         
-        if problem_type == 'mclp':
+        if problem_type == 'p-median':
+            variant = parameters.get('variant', 'base')
+            
+            if variant == 'capacitated' and 'capacities' not in parameters:
+                # Add default capacities - this will be handled by the solver
+                logger.info("Adding default capacities for capacitated P-Median variant")
+                # The solver will handle default capacity calculation
+                
+            elif variant == 'budget' and 'budget' not in parameters:
+                # Only add default budget if facility_costs are also available
+                if 'facility_costs' in parameters and parameters['facility_costs']:
+                    # Calculate a reasonable budget based on facility costs
+                    facility_costs = parameters['facility_costs']
+                    if isinstance(facility_costs, (list, np.ndarray)) and len(facility_costs) > 0:
+                        # Set budget to allow selecting at least n_facilities
+                        n_facilities = parameters.get('n_facilities', 5)
+                        sorted_costs = sorted(facility_costs)
+                        # Budget should be enough to select the cheapest n_facilities
+                        default_budget = sum(sorted_costs[:n_facilities]) * 1.1  # 10% buffer
+                        parameters['budget'] = default_budget
+                        logger.info(f"Adding default budget of {default_budget} for budget P-Median variant based on facility costs")
+                    else:
+                        # No facility costs available, remove budget variant
+                        logger.warning("Cannot add budget variant without facility_costs, reverting to base variant")
+                        parameters['variant'] = 'base'
+                else:
+                    # No facility costs available, remove budget variant
+                    logger.warning("Cannot add budget variant without facility_costs, reverting to base variant")
+                    parameters['variant'] = 'base'
+                
+            elif variant == 'max_distance' and 'max_assignment_distance' not in parameters:
+                # Add default max assignment distance
+                default_distance = 10.0  # Default maximum assignment distance
+                parameters['max_assignment_distance'] = default_distance
+                logger.info(f"Adding default max_assignment_distance of {default_distance} for max-distance P-Median variant")
+        
+        elif problem_type == 'mclp':
             variant = parameters.get('variant', 'classical')
             
             if variant == 'capacitated' and 'capacities' not in parameters:
@@ -460,11 +621,26 @@ class ConversationManager:
                 # The solver will handle default capacity calculation
                 
             elif variant == 'budget' and 'budget' not in parameters:
-                # Add default budget based on number of facilities
-                n_facilities = parameters.get('n_facilities', 5)
-                default_budget = n_facilities * 1000  # Default cost per facility
-                parameters['budget'] = default_budget
-                logger.info(f"Adding default budget of {default_budget} for budget MCLP variant")
+                # Only add default budget if facility_costs are also available
+                if 'facility_costs' in parameters and parameters['facility_costs']:
+                    # Calculate a reasonable budget based on facility costs
+                    facility_costs = parameters['facility_costs']
+                    if isinstance(facility_costs, (list, np.ndarray)) and len(facility_costs) > 0:
+                        # Set budget to allow selecting at least n_facilities
+                        n_facilities = parameters.get('n_facilities', 5)
+                        sorted_costs = sorted(facility_costs)
+                        # Budget should be enough to select the cheapest n_facilities
+                        default_budget = sum(sorted_costs[:n_facilities]) * 1.1  # 10% buffer
+                        parameters['budget'] = default_budget
+                        logger.info(f"Adding default budget of {default_budget} for budget MCLP variant based on facility costs")
+                    else:
+                        # No facility costs available, remove budget variant
+                        logger.warning("Cannot add budget variant without facility_costs, reverting to classical variant")
+                        parameters['variant'] = 'classical'
+                else:
+                    # No facility costs available, remove budget variant
+                    logger.warning("Cannot add budget variant without facility_costs, reverting to classical variant")
+                    parameters['variant'] = 'classical'
                 
             elif variant in ['multi_coverage', 'backup'] and 'k_coverage' not in parameters:
                 # Add default k_coverage
@@ -499,6 +675,34 @@ class ConversationManager:
         # Normalize variant
         if 'variant' in params and isinstance(params['variant'], str):
             params['variant'] = params['variant'].lower().replace('-', '_').strip()
+        
+        # CRITICAL FIX: Prevent automatic variant inference
+        # Only allow variants if explicitly requested by user or if variant-specific parameters are provided
+        variant = params.get('variant')
+        if variant and variant != 'base' and variant != 'classical':
+            # Check if this variant was explicitly requested by looking for variant-specific parameters
+            # If no variant-specific parameters are present, reset to base/classical
+            if pt == 'p-median':
+                if variant == 'budget' and 'budget' not in params and 'facility_costs' not in params:
+                    logger.warning(f"Removing auto-inferred budget variant for P-Median - no budget parameters provided")
+                    params['variant'] = 'base'
+                elif variant == 'capacitated' and 'capacities' not in params:
+                    logger.warning(f"Removing auto-inferred capacitated variant for P-Median - no capacity parameters provided")
+                    params['variant'] = 'base'
+                elif variant == 'max_distance' and 'max_assignment_distance' not in params:
+                    logger.warning(f"Removing auto-inferred max_distance variant for P-Median - no max_assignment_distance parameter provided")
+                    params['variant'] = 'base'
+            elif pt == 'mclp':
+                if variant == 'budget' and 'budget' not in params:
+                    logger.warning(f"Removing auto-inferred budget variant for MCLP - no budget parameter provided")
+                    params['variant'] = 'classical'
+                elif variant == 'capacitated' and 'capacities' not in params:
+                    logger.warning(f"Removing auto-inferred capacitated variant for MCLP - no capacity parameters provided")
+                    params['variant'] = 'classical'
+                elif variant in ['multi_coverage', 'backup'] and 'k_coverage' not in params:
+                    logger.warning(f"Removing auto-inferred {variant} variant for MCLP - no k_coverage parameter provided")
+                    params['variant'] = 'classical'
+        
         normalized['parameters'] = params
         return normalized
 

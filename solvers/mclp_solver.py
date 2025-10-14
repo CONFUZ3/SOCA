@@ -268,6 +268,33 @@ Where:
     # ============================================================================
     # SHARED INFRASTRUCTURE METHODS
     # ============================================================================
+    def _normalize_reliability(self, reliability: Optional[Any], n_candidates: int) -> np.ndarray:
+        """Return a length-n reliability array in [0,1].
+
+        Accepts None, scalar, list, or numpy array. If None, returns ones.
+        If scalar provided, broadcasts to length n. If array-like provided,
+        validates length and value range.
+        """
+        if reliability is None:
+            return np.ones(n_candidates, dtype=float)
+        # Convert to numpy array if not already
+        if np.isscalar(reliability):
+            val = float(reliability)
+            if not (0.0 <= val <= 1.0):
+                raise ValueError("facility_reliability scalar must be between 0 and 1")
+            return np.full(n_candidates, val, dtype=float)
+        arr = np.asarray(reliability, dtype=float)
+        if arr.ndim == 0:
+            # 0-d array: treat as scalar
+            val = float(arr)
+            if not (0.0 <= val <= 1.0):
+                raise ValueError("facility_reliability scalar must be between 0 and 1")
+            return np.full(n_candidates, val, dtype=float)
+        if arr.shape[0] != n_candidates:
+            raise ValueError("Length of facility_reliability must match number of candidate sites")
+        if np.any((arr < 0.0) | (arr > 1.0)):
+            raise ValueError("facility_reliability values must be between 0 and 1")
+        return arr
     
     def _prepare_shared_data(
         self,
@@ -565,9 +592,6 @@ Where:
         p = int(parameters['n_facilities'])
         reliability = parameters.get('facility_reliability')
         
-        if reliability is not None:
-            reliability = np.asarray(reliability, dtype=float)
-        
         return self._solve_mip(
             coverage_matrix=shared_data['coverage_matrix'],
             demand_weights=shared_data['demand_weights'],
@@ -731,10 +755,7 @@ Where:
                 continue
             if variant == "probabilistic":
                 # Linear upper bound using reliability r_j: z_i <= sum r_j x_j
-                if reliability is None:
-                    rel = np.ones(n_candidates)
-                else:
-                    rel = reliability
+                rel = self._normalize_reliability(reliability, n_candidates)
                 model.addConstr(z[i] <= gp.quicksum(float(rel[j]) * x[j] for j in covering_facilities), f"prob_cover_{i}")
             elif variant == "multi_coverage" or variant == "backup":
                 # Require at least k facilities to claim coverage
@@ -893,7 +914,7 @@ Where:
                 prob += z[i] == 0
                 continue
             if variant == "probabilistic":
-                rel = reliability if reliability is not None else np.ones(n_candidates)
+                rel = self._normalize_reliability(reliability, n_candidates)
                 prob += z[i] <= pulp.lpSum([float(rel[j]) * x[j] for j in covering_facilities])
             elif variant == "multi_coverage" or variant == "backup":
                 prob += pulp.lpSum([x[j] for j in covering_facilities]) >= int(k_coverage) * z[i]
@@ -1206,9 +1227,8 @@ Where:
 
         if variant == "probabilistic":
             # Report average and min reliability of selected facilities
-            if reliability is None:
-                reliability = np.ones(coverage_matrix.shape[1])
-            selected_reliability = np.array([float(reliability[j]) for j in selected_facilities]) if selected_facilities else np.array([])
+            rel_arr = self._normalize_reliability(reliability, coverage_matrix.shape[1])
+            selected_reliability = np.array([float(rel_arr[j]) for j in selected_facilities]) if selected_facilities else np.array([])
             metrics["avg_selected_reliability"] = float(np.mean(selected_reliability)) if selected_reliability.size > 0 else 0.0
             metrics["min_selected_reliability"] = float(np.min(selected_reliability)) if selected_reliability.size > 0 else 0.0
             metrics["max_selected_reliability"] = float(np.max(selected_reliability)) if selected_reliability.size > 0 else 0.0
