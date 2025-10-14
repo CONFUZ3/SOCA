@@ -1,6 +1,6 @@
 # Spatial Optimization Conversational Agent
 
-An academic research tool for solving facility location problems using conversational AI powered by Google Gemini.
+A tool for solving facility location problems using conversational AI powered by Google Gemini.
 
 ![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.31+-red.svg)
@@ -15,9 +15,10 @@ This application combines cutting-edge optimization algorithms with natural lang
 - 🗣️ **Conversational Interface**: Describe your problem in natural language - no coding required
 - 🗺️ **Interactive Visualization**: See your solutions on beautiful interactive maps
 - 🎯 **Multiple Problem Types**: P-Median, P-Center, MCLP, LSCP, and more
+- 🧩 **Advanced Variants**: P-Median (capacitated, budget, max-distance), MCLP (budget, capacitated, probabilistic, multi-coverage, backup)
 - 📊 **Rich Analytics**: Comprehensive metrics and performance indicators
-- 🔬 **Academic Rigor**: Full citations, mathematical formulations, and methodology documentation
 - 🔌 **Extensible Architecture**: Easy to add new problem types
+- 🤖 **Smart Data Inference**: Auto-detects dataset roles and extracts capacities/costs/demand columns when variants require them
 - 💾 **Export Capabilities**: GeoJSON, CSV, PDF reports, and more
 
 ## 🚀 Quick Start
@@ -109,6 +110,12 @@ Simply describe what you want to achieve:
 
 **Example**: "Locate 5 libraries to minimize average distance for residents"
 
+**Variants**:
+- Base: minimize total/average distance
+- Capacitated: enforce facility capacity limits via `capacities`
+- Budget: select facilities under `budget` with `facility_costs`
+- Max-distance: forbid assignments beyond `max_assignment_distance`
+
 ### P-Center Problem
 **Objective**: Minimize maximum distance (minimax/equity)
 
@@ -122,6 +129,13 @@ Simply describe what you want to achieve:
 **Use cases**: Retail placement, emergency coverage, facility budgeting
 
 **Example**: "Maximize population served within 5km using 4 health clinics"
+
+**Variants**:
+- Classical: maximize covered demand within `service_radius` using `n_facilities`
+- Budget: maximize coverage subject to `budget` (optional `facility_costs`)
+- Capacitated: respect `capacities`; fractional service supported
+- Probabilistic: coverage scaled by `facility_reliability` in [0,1]
+- Multi-coverage/Backup: require at least `k_coverage` facilities per demand
 
 ### Location Set Covering Problem (LSCP)
 **Objective**: Minimize facilities needed for full coverage
@@ -148,10 +162,10 @@ spoptv2/
 │   ├── mclp_solver.py              # MCLP implementation
 │   └── lscp_solver.py              # LSCP implementation
 ├── agent/
-│   ├── conversation_manager.py     # Gemini API integration
+│   ├── conversation_manager.py     # Gemini API integration (action gating, data sync)
 │   └── prompts.py                  # System prompts
 ├── utils/
-│   ├── data_processor.py           # Data loading and validation
+│   ├── data_processor.py           # Data loading/validation; auto-detect costs/capacities/demand
 │   ├── distance_calculator.py      # Distance matrix computation
 │   ├── visualizer.py               # Map generation
 │   └── export_handler.py           # Export functionality
@@ -191,6 +205,11 @@ pytest tests/ -v
 # With coverage
 pytest tests/ -v --cov=solvers --cov=utils --cov=agent
 ```
+
+### Scenario tests to try
+- P-Median max-distance with `max_assignment_distance`
+- MCLP budget with `budget` and candidate `cost` column
+- MCLP capacitated with candidate `capacity` column or inferred defaults
 
 ## 🔧 Configuration
 
@@ -244,6 +263,14 @@ See `docs/architecture.md` for detailed instructions.
 - This is fine! The system will automatically use PuLP as a fallback
 - For better performance on large problems, install Gurobi with a license
 
+**"Unexpected variant requirements"**
+- Some variants require extra parameters:
+  - P-Median budget: `budget` and `facility_costs`
+  - P-Median max-distance: `max_assignment_distance`
+  - MCLP capacitated: `capacities` (auto-inferred if missing)
+  - MCLP multi-coverage/backup: `k_coverage`
+  - MCLP probabilistic: optional `facility_reliability`
+
 **"No module named 'geopandas'"**
 - Run `pip install -r requirements.txt` to install all dependencies
 
@@ -259,7 +286,6 @@ MIT License - see LICENSE file for details
 
 - Google Gemini for conversational AI
 - Gurobi/PuLP for optimization engines
-- spopt and PySAL for spatial optimization algorithms
 - Streamlit for the web framework
 - OpenStreetMap for base maps
 
@@ -267,17 +293,7 @@ MIT License - see LICENSE file for details
 
 For questions, issues, or contributions:
 - Open an issue on GitHub
-- Email: [your-email@example.com]
-
-## 🗺️ Roadmap
-
-- [ ] Network distance calculations using OSMnx
-- [ ] Capacitated facility location problems
-- [ ] Multi-objective optimization
-- [ ] Real-time data integration (Census API, etc.)
-- [ ] Stochastic optimization models
-- [ ] Time-dependent problems
-- [ ] 3D visualization options
+- Email: [mahad.imran29@gmail.com]
 
 ---
 

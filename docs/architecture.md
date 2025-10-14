@@ -89,6 +89,8 @@ session_state = {
 - Parse user intent
 - Extract structured actions (JSON)
 - Update problem state
+ - Enforce explicit confirmation gating before running optimizations
+ - Handle data-upload sync to infer dataset roles without interrupting the user
 
 **Design Pattern:** Facade pattern for AI interactions
 
@@ -96,11 +98,13 @@ session_state = {
 - `chat()`: Send message with full context
 - `_prepare_messages()`: Build message array with state
 - `_parse_response()`: Extract actions from Gemini's response
+ - `notify_data_uploaded()`: Sync uploaded data summaries to the model and request role inference
 
 **Context Management:**
 - Includes full conversation history in every API call (Gemini is stateless)
 - Embeds current problem state in messages
 - Provides data summaries for awareness
+ - Requires explicit confirmation before executing any optimize action (parameters summarized in JSON)
 
 ### 3. Problem Registry (`solvers/registry.py`)
 
@@ -159,7 +163,7 @@ Each solver implements `SpatialOptimizationProblem`:
 **P-Median Solver** (`solvers/p_median_solver.py`)
 - Minimize total/average weighted distance
 - MIP formulation with Gurobi/PuLP
-- Supports custom constraints
+- Supports custom constraints and variants: base, capacitated, budget, max-distance
 
 **P-Center Solver** (`solvers/p_center_solver.py`)
 - Minimize maximum distance (minimax)
@@ -169,7 +173,7 @@ Each solver implements `SpatialOptimizationProblem`:
 **MCLP Solver** (`solvers/mclp_solver.py`)
 - Maximize coverage within threshold
 - Coverage matrix pre-computation
-- Fixed number of facilities
+- Variants: classical, budget, capacitated (fractional service), probabilistic, multi-coverage, backup
 
 **LSCP Solver** (`solvers/lscp_solver.py`)
 - Minimize facilities for full coverage
@@ -183,6 +187,7 @@ Each solver implements `SpatialOptimizationProblem`:
 - Validate geometries and required fields
 - CRS standardization
 - Data type identification
+ - Intelligent column detection: capacity/cost/demand extraction for variants
 
 **Distance Calculator** (`utils/distance_calculator.py`)
 - Compute distance matrices
@@ -208,6 +213,8 @@ Each solver implements `SpatialOptimizationProblem`:
 User uploads data → DataProcessor → Validation → Session State
 ```
 
+Additionally, the app automatically syncs an aggregated data summary to the AI to infer dataset roles (demand vs candidate sites) without user confirmation.
+
 ### 2. Problem Identification
 ```
 User describes problem → ConversationManager → Gemini API
@@ -223,6 +230,7 @@ Gemini asks questions → User responds → Parameters extracted
 ### 4. Optimization Trigger
 ```
 Gemini returns JSON action → Extract problem_type & parameters
+    → Present JSON summary and require explicit confirmation
     → Get solver from registry → Prepare data → Solve
     → Update state with solution
 ```

@@ -28,6 +28,10 @@ This will:
 - Set up configuration files
 - Start the application
 
+Notes:
+- The app uses a confirmation step before running any optimization. You’ll be shown a JSON summary and must confirm.
+- Uploaded data is automatically summarized and synced to the AI to infer dataset roles (demand vs candidate sites) without asking you to confirm.
+
 ### Option 2: Manual Setup
 
 1. **Create virtual environment:**
@@ -106,13 +110,18 @@ Start a conversation! Try these examples:
 **LSCP (Minimize Facilities):**
 > "What's the minimum number of ambulance stations to cover everyone within 10 minutes?"
 
+**Variants you can request:**
+- P-Median: "capacitated" (requires `capacities`), "budget" (requires `budget` and `facility_costs`), "max-distance" (requires `max_assignment_distance`)
+- MCLP: "budget" (requires `budget`, optional `facility_costs`), "capacitated" (requires `capacities`, auto-inferred if missing), "probabilistic" (optional `facility_reliability`), "multi-coverage"/"backup" (requires `k_coverage`)
+
 ### 3. Follow the Conversation
 
 The AI will:
 - Confirm the problem type
 - Ask for parameters
 - Verify your data
-- Run the optimization
+- Show a JSON summary and wait for your explicit confirmation
+- Run the optimization after you confirm
 - Explain the results
 
 ### 4. View Results
@@ -120,6 +129,7 @@ The AI will:
 - **Map**: See selected facilities and demand assignments
 - **Metrics**: Analyze performance indicators
 - **Export**: Download results in GeoJSON, CSV, or PDF
+- **Service Radius Toggle**: For MCLP/LSCP, optionally show service areas when a radius is present
 
 ## Example Session
 
