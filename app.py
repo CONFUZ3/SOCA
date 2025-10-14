@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import logging
 import time
+import inspect
 
 # Set up logging
 logging.basicConfig(
@@ -460,12 +461,16 @@ with col1:
                             
                             # Generate explanation
                             if solution.get('status') != 'error':
-                                explanation = problem_solver.explain_solution(
-                                    solution=solution,
-                                    data=data_dict,
-                                    detail_level="standard",
-                                    objective_type=parameters.get("objective", "total")
-                                )
+                                # Build kwargs based on solver signature to avoid unexpected kwargs
+                                explain_sig = inspect.signature(problem_solver.explain_solution)
+                                explain_kwargs = {
+                                    "solution": solution,
+                                    "data": data_dict,
+                                    "detail_level": "standard",
+                                }
+                                if "objective_type" in explain_sig.parameters:
+                                    explain_kwargs["objective_type"] = parameters.get("objective", "total")
+                                explanation = problem_solver.explain_solution(**explain_kwargs)
                                 
                                 # Add explanation to chat
                                 st.session_state.messages.append({
