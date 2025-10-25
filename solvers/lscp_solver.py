@@ -127,8 +127,25 @@ Where:
             
             service_radius = parameters['service_radius']
             
-            # Calculate coverage matrix
+            # Calculate coverage matrix with user-friendly unit conversion
             dist_calc = DistanceCalculator()
+            
+            # Get unit conversion info and suggestions for user
+            unit_info = dist_calc.get_unit_info(service_radius, demand_gdf)
+            
+            # Check if user confirmation is needed
+            user_unit_hint = None
+            if unit_info.get('needs_user_confirmation', False):
+                logger.info(f"Unit confirmation needed: {unit_info['user_message']}")
+                # In a real app, this would trigger a user interface for confirmation
+                # For now, we'll use the auto-detected conversion but log the need for confirmation
+                # Extract the recommended unit from suggestions
+                suggestions = unit_info.get('suggestions', {})
+                if 'suggestions' in suggestions and suggestions['suggestions']:
+                    recommended = next((s for s in suggestions['suggestions'] if s.get('recommended', False)), None)
+                    if recommended:
+                        user_unit_hint = recommended.get('unit', 'km')
+            
             coverage_matrix = dist_calc.calculate_coverage_matrix(
                 demand_gdf, candidate_gdf,
                 threshold=service_radius,
@@ -174,6 +191,7 @@ Where:
                 "metrics": metrics,
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
+                "user_unit_hint": user_unit_hint,  # Pass unit hint for visualization
                 "academic_metadata": {
                     "algorithm_used": "Mixed Integer Programming (Set Cover)",
                     "references": self.get_metadata()['academic_refs'][:2],

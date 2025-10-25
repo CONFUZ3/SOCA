@@ -63,9 +63,14 @@ def initialize_session_state():
 I'm here to help you solve facility location problems using state-of-the-art optimization techniques.
 
 **To get started:**
-1. Upload your geospatial data (demand points and candidate sites) using the sidebar
+1. Upload your geospatial data using the sidebar
+   - **Demand points** (required): Locations with population/demand
+   - **Candidate sites** (optional): Potential facility locations
 2. Describe your optimization problem in natural language
 3. I'll guide you through the process and help you find the optimal solution
+
+**New Feature: Automatic Candidate Site Generation**
+If you only upload demand data (no candidate sites), I'll automatically generate 100 random candidate sites within your demand extent. You can adjust the count and set a random seed for reproducibility in the sidebar.
 
 **I can help you with:**
 - P-Median: Minimize average/total distance
@@ -197,6 +202,55 @@ with st.sidebar:
                 st.write(f"**Geometry:** {gdf.geometry.type.unique()[0]}")
                 st.write(f"**Columns:** {', '.join([c for c in gdf.columns if c != 'geometry'])}")
                 st.write(f"**CRS:** {gdf.crs}")
+        
+        # Check if we have demand data but no candidate sites
+        has_demand = False
+        has_candidates = False
+        
+        for name, gdf in st.session_state.problem_state["data"].items():
+            data_type = st.session_state.data_processor.identify_data_type(gdf)
+            if data_type == "demand_points" or "demand" in name.lower():
+                has_demand = True
+            elif data_type == "candidate_sites" or any(word in name.lower() for word in ['candidate', 'site', 'facility']):
+                has_candidates = True
+        
+        # Show candidate generation controls if we have demand but no candidates
+        if has_demand and not has_candidates:
+            st.divider()
+            st.subheader("Candidate Site Generation")
+            st.info("No candidate sites detected - will generate random sites within demand extent")
+            
+            # Initialize session state for generation controls
+            if "generated_sites_count" not in st.session_state:
+                st.session_state.generated_sites_count = 100
+            if "generated_sites_seed" not in st.session_state:
+                st.session_state.generated_sites_seed = None
+            
+            # Number of sites control
+            st.session_state.generated_sites_count = st.number_input(
+                "Number of candidate sites",
+                min_value=10,
+                max_value=500,
+                value=st.session_state.generated_sites_count,
+                help="Number of random candidate sites to generate within demand extent"
+            )
+            
+            # Random seed control
+            seed_input = st.text_input(
+                "Random seed (optional)",
+                value=str(st.session_state.generated_sites_seed) if st.session_state.generated_sites_seed is not None else "",
+                help="Enter a number for reproducible results, or leave empty for random generation"
+            )
+            
+            # Parse seed input
+            if seed_input.strip():
+                try:
+                    st.session_state.generated_sites_seed = int(seed_input.strip())
+                except ValueError:
+                    st.warning("Invalid seed value. Please enter a number or leave empty.")
+                    st.session_state.generated_sites_seed = None
+            else:
+                st.session_state.generated_sites_seed = None
     
     st.divider()
     
@@ -368,6 +422,41 @@ with col1:
                                 if remaining_files:
                                     data_dict["candidate_sites"] = remaining_files[0][1]
                             
+                            # Generate candidate sites if we have demand but no candidates
+                            if "demand_points" in data_dict and "candidate_sites" not in data_dict:
+                                logger.info("No candidate sites found - generating random sites within demand extent")
+                                try:
+                                    # Get generation parameters from session state
+                                    num_sites = st.session_state.get("generated_sites_count", 100)
+                                    random_seed = st.session_state.get("generated_sites_seed", None)
+                                    
+                                    # Generate candidate sites
+                                    generated_candidates = data_processor.generate_candidate_sites(
+                                        data_dict["demand_points"], 
+                                        num_sites=num_sites, 
+                                        random_seed=random_seed
+                                    )
+                                    data_dict["candidate_sites"] = generated_candidates
+                                    # Persist generated candidates so they appear on the map and in state
+                                    try:
+                                        st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates
+                                    except Exception as persist_error:
+                                        logger.warning(f"Could not persist generated candidate sites to session state: {persist_error}")
+                                    
+                                    logger.info(f"Generated {num_sites} candidate sites with seed {random_seed}")
+                                    
+                                    # Add info message to chat
+                                    seed_info = f" (seed: {random_seed})" if random_seed is not None else ""
+                                    st.session_state.messages.append({
+                                        "role": "assistant",
+                                        "content": f"Generated {num_sites} random candidate sites within demand extent{seed_info}."
+                                    })
+                                    
+                                except Exception as gen_error:
+                                    logger.error(f"Failed to generate candidate sites: {gen_error}")
+                                    st.error(f"Failed to generate candidate sites: {gen_error}")
+                                    continue
+                            
                             # Auto-detect and add variant-specific parameters from data
                             parameters = action.get("parameters", {}).copy()
                             
@@ -525,6 +614,42 @@ with col2:
                     viz_config["show_service_areas"] = bool(show_radius)
             except Exception:
                 pass
+
+            # Generate candidate sites once for visualization if missing and persist
+            try:
+                data_items = st.session_state.problem_state["data"]
+                data_processor = st.session_state.data_processor
+                # Detect presence of demand and absence of any candidate sites in state
+                has_demand_viz = False
+                has_candidates_viz = False
+                for fname, fgdf in data_items.items():
+                    dtype = data_processor.identify_data_type(fgdf)
+                    if dtype == "demand_points" or "demand" in fname.lower():
+                        has_demand_viz = True
+                    if dtype == "candidate_sites" or any(w in fname.lower() for w in ["candidate", "site", "facility"]):
+                        has_candidates_viz = True
+
+                # Only generate if no candidates exist and none previously generated/persisted
+                if has_demand_viz and not has_candidates_viz and "generated_candidates" not in data_items:
+                    # Use first demand dataset to derive extent
+                    demand_gdf_viz = None
+                    for fname, fgdf in data_items.items():
+                        dtype = data_processor.identify_data_type(fgdf)
+                        if dtype == "demand_points" or "demand" in fname.lower():
+                            demand_gdf_viz = fgdf
+                            break
+                    if demand_gdf_viz is not None and len(demand_gdf_viz) > 0:
+                        num_sites = st.session_state.get("generated_sites_count", 100)
+                        random_seed = st.session_state.get("generated_sites_seed", None)
+                        generated_candidates_viz = data_processor.generate_candidate_sites(
+                            demand_gdf_viz,
+                            num_sites=num_sites,
+                            random_seed=random_seed
+                        )
+                        # Persist once for reuse (and so map renders them)
+                        st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates_viz
+            except Exception as viz_gen_err:
+                logger.warning(f"Could not auto-generate candidate sites for visualization: {viz_gen_err}")
             
             # Map data to expected format for visualizer
             data_processor = st.session_state.data_processor
@@ -544,13 +669,19 @@ with col2:
                     # Assume second dataset is candidates
                     mapped_data["candidate_sites"] = gdf
             
+            # Prepare parameters with user unit hint from solution
+            parameters = st.session_state.problem_state.get("parameters", {}).copy()
+            solution = st.session_state.problem_state["solution"]
+            if solution and "user_unit_hint" in solution:
+                parameters["user_unit_hint"] = solution["user_unit_hint"]
+            
             # Create map
             map_obj = st.session_state.map_visualizer.create_map(
                 data=mapped_data,
-                solution=st.session_state.problem_state["solution"],
+                solution=solution,
                 problem_type=st.session_state.problem_state["problem_type"],
                 viz_config=viz_config,
-                parameters=st.session_state.problem_state.get("parameters", {}),
+                parameters=parameters,
                 constraints=st.session_state.problem_state.get("constraints", {})
             )
             
@@ -672,8 +803,11 @@ with col2:
         with st.expander("Quick Start Guide"):
             st.markdown("""
             **Step 1: Upload Data**
-            - Upload demand points (e.g., population centers)
-            - Upload candidate sites (e.g., potential facility locations)
+            - Upload demand points (e.g., population centers) - **Required**
+            - Upload candidate sites (e.g., potential facility locations) - **Optional**
+            
+            **New: Automatic Candidate Generation**
+            If you only upload demand data, the system will automatically generate 100 random candidate sites within your demand extent. Adjust the count and seed in the sidebar.
             
             **Step 2: Describe Your Problem**
             Examples:

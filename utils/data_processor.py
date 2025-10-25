@@ -419,4 +419,58 @@ class DataProcessor:
         
         logger.info(f"Extracted demand/population data from column '{demand_col}': {len(demand_data)} values")
         return demand_data
+    
+    def generate_candidate_sites(
+        self, 
+        demand_gdf: gpd.GeoDataFrame, 
+        num_sites: int = 100, 
+        random_seed: Optional[int] = None
+    ) -> gpd.GeoDataFrame:
+        """
+        Generate random candidate sites within the extent of demand data.
+        
+        Args:
+            demand_gdf: Demand points GeoDataFrame to use for extent
+            num_sites: Number of candidate sites to generate (default: 100)
+            random_seed: Optional random seed for reproducibility
+            
+        Returns:
+            GeoDataFrame with generated candidate sites
+        """
+        import numpy as np
+        
+        if len(demand_gdf) == 0:
+            raise ValueError("Demand dataset is empty, cannot generate candidate sites")
+        
+        # Set random seed if provided
+        if random_seed is not None:
+            np.random.seed(random_seed)
+            logger.info(f"Using random seed {random_seed} for candidate site generation")
+        
+        # Get bounding box of demand data
+        bounds = demand_gdf.total_bounds  # minx, miny, maxx, maxy
+        minx, miny, maxx, maxy = bounds
+        
+        # Generate random coordinates within bounding box
+        random_x = np.random.uniform(minx, maxx, num_sites)
+        random_y = np.random.uniform(miny, maxy, num_sites)
+        
+        # Create GeoDataFrame with generated points
+        from shapely.geometry import Point
+        
+        geometry = [Point(x, y) for x, y in zip(random_x, random_y)]
+        
+        candidate_gdf = gpd.GeoDataFrame(
+            {
+                'generated': True,  # Mark as generated
+                'site_id': range(num_sites),
+                'x': random_x,
+                'y': random_y
+            },
+            geometry=geometry,
+            crs=demand_gdf.crs  # Use same CRS as demand data
+        )
+        
+        logger.info(f"Generated {num_sites} candidate sites within demand extent: {bounds}")
+        return candidate_gdf
 

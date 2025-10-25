@@ -68,7 +68,8 @@ Where:
                 "capacities": {"type": "list[float]", "required": False},
                 "facility_costs": {"type": "list[float]", "required": False},
                 "budget": {"type": "float", "required": False},
-                "max_assignment_distance": {"type": "float", "required": False}
+                "max_assignment_distance": {"type": "float", "required": False},
+                "service_radius": {"type": "float", "required": False, "description": "Maximum service radius for assignment validation"}
             }
         }
     
@@ -98,7 +99,8 @@ Where:
             "constraint_suggestions": [
                 "Would you like to specify any facilities that must be included?",
                 "Are there any candidate sites that should be excluded?",
-                "Do you want to set a maximum distance threshold?"
+                "Do you want to set a maximum distance threshold?",
+                "Do you want to validate assignments against a service radius?"
             ],
             "explanation_template": "The P-Median solution locates {n_facilities} facilities to minimize the {objective} weighted distance. Total objective value: {obj_value:.2f}. Average distance: {avg_dist:.2f}."
         }
@@ -213,6 +215,11 @@ Where:
                 distance_mask=distance_mask
             )
             
+            # Validate assignments against service radius if provided
+            validation_results = self._validate_assignments(
+                distance_matrix, solution['assignments'], parameters
+            )
+            
             # Calculate metrics
             metrics = self._calculate_metrics(
                 distance_matrix, demand_weights, 
@@ -220,6 +227,10 @@ Where:
                 solution['assignments'],
                 objective_type
             )
+            
+            # Add validation results to metrics
+            if validation_results:
+                metrics.update(validation_results)
 
             # Variant-specific metrics
             try:
@@ -628,6 +639,58 @@ Where:
                 'solver_details': {'solver': 'pulp', 'status': prob.status}
             }
     
+    def _validate_assignments(
+        self,
+        distance_matrix: np.ndarray,
+        assignments: Dict[int, int],
+        parameters: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Validate assignments against service radius constraints.
+        Returns validation results including violations and warnings.
+        """
+        validation_results = {}
+        
+        # Check for service radius parameter
+        service_radius = parameters.get('service_radius')
+        max_assignment_distance = parameters.get('max_assignment_distance')
+        
+        if service_radius is None and max_assignment_distance is None:
+            return validation_results
+        
+        # Use the appropriate threshold
+        threshold = service_radius if service_radius is not None else max_assignment_distance
+        
+        violations = []
+        violation_distances = []
+        
+        for demand_idx, facility_idx in assignments.items():
+            if demand_idx < distance_matrix.shape[0] and facility_idx < distance_matrix.shape[1]:
+                distance = distance_matrix[demand_idx, facility_idx]
+                if distance > threshold:
+                    violations.append({
+                        'demand_idx': demand_idx,
+                        'facility_idx': facility_idx,
+                        'distance': distance,
+                        'threshold': threshold,
+                        'excess': distance - threshold
+                    })
+                    violation_distances.append(distance)
+        
+        if violations:
+            validation_results['assignment_violations'] = violations
+            validation_results['violation_count'] = len(violations)
+            validation_results['max_violation_distance'] = max(violation_distances) if violation_distances else 0
+            validation_results['avg_violation_distance'] = sum(violation_distances) / len(violation_distances) if violation_distances else 0
+            
+            # Log warnings for violations
+            logger.warning(f"Found {len(violations)} assignment violations exceeding service radius {threshold}")
+            for violation in violations[:5]:  # Log first 5 violations
+                logger.warning(f"Demand {violation['demand_idx']} -> Facility {violation['facility_idx']}: "
+                              f"distance {violation['distance']:.2f} > threshold {violation['threshold']:.2f}")
+        
+        return validation_results
+
     def _calculate_metrics(
         self,
         distance_matrix: np.ndarray,

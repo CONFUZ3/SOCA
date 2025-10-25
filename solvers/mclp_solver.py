@@ -204,6 +204,18 @@ Where:
             # Validate inputs and prepare shared data
             shared_data = self._prepare_shared_data(data, parameters, distance_metric)
             
+            # Get user unit hint for visualization consistency
+            user_unit_hint = None
+            if 'unit_info' in shared_data:
+                unit_info = shared_data['unit_info']
+                if unit_info.get('needs_user_confirmation', False):
+                    # Extract the recommended unit from suggestions
+                    suggestions = unit_info.get('suggestions', {})
+                    if 'suggestions' in suggestions and suggestions['suggestions']:
+                        recommended = next((s for s in suggestions['suggestions'] if s.get('recommended', False)), None)
+                        if recommended:
+                            user_unit_hint = recommended.get('unit', 'km')
+            
             variant = parameters.get('variant', 'classical')
             logger.info(f"MCLP Solver: Using variant '{variant}' with parameters: {parameters}")
             
@@ -244,6 +256,7 @@ Where:
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
                 "variant_used": variant,
+                "user_unit_hint": user_unit_hint,  # Pass unit hint for visualization
                 "academic_metadata": {
                     "algorithm_used": "Mixed Integer Programming (MIP)",
                     "references": self.get_metadata()['academic_refs'][:2],
@@ -322,8 +335,18 @@ Where:
         # Get demand weights
         demand_weights = self._extract_weights(demand_gdf, parameters)
         
-        # Calculate coverage and distance matrices
+        # Calculate coverage and distance matrices with user-friendly unit conversion
         dist_calc = DistanceCalculator()
+        
+        # Get unit conversion info and suggestions for user
+        unit_info = dist_calc.get_unit_info(service_radius, demand_gdf)
+        
+        # Check if user confirmation is needed
+        if unit_info.get('needs_user_confirmation', False):
+            logger.info(f"Unit confirmation needed: {unit_info['user_message']}")
+            # In a real app, this would trigger a user interface for confirmation
+            # For now, we'll use the auto-detected conversion but log the need for confirmation
+        
         coverage_matrix = dist_calc.calculate_coverage_matrix(
             demand_gdf, candidate_gdf, 
             threshold=service_radius,
@@ -346,7 +369,8 @@ Where:
             'demand_weights': demand_weights,
             'service_radius': service_radius,
             'facility_costs': facility_costs,
-            'capacities': capacities
+            'capacities': capacities,
+            'unit_info': unit_info  # Include unit info for user hint extraction
         }
     
     def _solve_variant(

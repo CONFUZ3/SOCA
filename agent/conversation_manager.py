@@ -321,13 +321,42 @@ class ConversationManager:
         Notify the model that new data has been uploaded and ask it to
         infer dataset roles without requesting user confirmation.
         """
+        # Check if we have demand data but no candidate sites
+        has_demand = False
+        has_candidates = False
+        
+        for name, data_info in uploaded_data_summary.items():
+            # Check if this looks like demand data
+            if (data_info.get('demand_columns') or 
+                'demand' in name.lower() or 
+                any(word in name.lower() for word in ['population', 'people', 'residents'])):
+                has_demand = True
+            # Check if this looks like candidate data
+            elif (any(word in name.lower() for word in ['candidate', 'site', 'facility', 'location']) or
+                  data_info.get('capacity_columns') or
+                  data_info.get('cost_columns')):
+                has_candidates = True
+        
         notice = (
             "System notice: New data uploaded. Please infer dataset roles "
             "(e.g., demand vs. candidate sites) based on filenames, geometry types, "
             "and schemas. Proceed without asking the user to confirm these inferences. "
             "Do NOT infer or set the optimization problem type; wait for the user to specify it. "
+        )
+        
+        # Add candidate generation notice if needed
+        if has_demand and not has_candidates:
+            notice += (
+                "IMPORTANT: No candidate sites detected. The system will automatically "
+                "generate 100 random candidate sites within the demand extent when optimization runs. "
+                "Users can adjust the count and set a random seed in the sidebar. "
+                "Inform the user about this automatic generation feature. "
+            )
+        
+        notice += (
             "Summarize your data-role inferences and suggest what parameters the user might provide next."
         )
+        
         return self.chat(
             user_message=notice,
             conversation_history=conversation_history,
