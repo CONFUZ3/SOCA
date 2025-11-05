@@ -5,6 +5,7 @@ import geopandas as gpd
 import numpy as np
 from typing import Dict, List, Optional, Any
 import logging
+import base64
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +32,24 @@ class MapVisualizer:
         problem_type: Optional[str] = None,
         viz_config: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
-        constraints: Optional[Dict[str, Any]] = None
+        constraints: Optional[Dict[str, Any]] = None,
+        raster_data: Optional[Dict[str, Any]] = None
     ) -> folium.Map:
         """
         Create comprehensive map visualization.
         
         Layers:
         - Base map (OpenStreetMap)
+        - Raster overlay (optional satellite imagery)
         - Demand points (blue circles)
         - Candidate sites (gray circles)
         - Selected facilities (red stars)
         - Assignment lines (demand to facility)
         - Service areas (coverage circles/polygons)
         - Legend
+        
+        Args:
+            raster_data: Optional dictionary of raster overlays to display as basemap
         """
         try:
             # Default visualization config
@@ -83,6 +89,14 @@ class MapVisualizer:
                 zoom_start=zoom,
                 tiles='OpenStreetMap'
             )
+            
+            # Add raster overlays first (so they appear as basemap)
+            if raster_data:
+                for raster_name, raster_info in raster_data.items():
+                    try:
+                        self._add_raster_overlay(m, raster_info, raster_name)
+                    except Exception as e:
+                        logger.warning(f"Could not add raster overlay {raster_name}: {e}")
             
             # Add data layers
             demand_gdf = data.get('demand_points')
@@ -620,4 +634,47 @@ class MapVisualizer:
             return 12
         else:
             return 13
+    
+    def _add_raster_overlay(
+        self,
+        map_obj: folium.Map,
+        raster_info: Dict[str, Any],
+        raster_name: str
+    ):
+        """
+        Add raster overlay to map using Folium ImageOverlay.
+        
+        Args:
+            map_obj: Folium map object
+            raster_info: Dictionary with 'bounds', 'image_bytes', and other metadata
+            raster_name: Name of the raster file
+        """
+        try:
+            # Get bounds in format [[south, west], [north, east]]
+            bounds = raster_info['bounds']
+            
+            # Convert image bytes to base64 data URI for Folium
+            image_bytes = raster_info['image_bytes']
+            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+            image_data_uri = f"data:image/png;base64,{image_base64}"
+            
+            # Create ImageOverlay
+            # Note: Folium ImageOverlay expects bounds as [[south, west], [north, east]]
+            overlay = folium.raster_layers.ImageOverlay(
+                image=image_data_uri,
+                bounds=bounds,
+                name=raster_name,
+                opacity=0.7,  # Slightly transparent so basemap shows through if needed
+                interactive=True,
+                cross_origin=False,
+                zindex=1  # Below vector data but above basemap
+            )
+            
+            overlay.add_to(map_obj)
+            
+            logger.info(f"Added raster overlay {raster_name} with bounds {bounds}")
+            
+        except Exception as e:
+            logger.error(f"Error adding raster overlay {raster_name}: {e}", exc_info=True)
+            raise
 

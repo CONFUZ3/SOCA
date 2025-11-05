@@ -11,6 +11,7 @@ shapely==2.1.2                 # latest stable for geometry operations :contentR
 folium>=0.15.1                 # stay with your existing or allow minor updates  
 streamlit-folium>=0.18.0       # to ensure compatibility with new streamlit  
 pyproj>=3.6.1                  # allow minor upgrades, maintain compatibility with geopandas
+rasterio>=1.3.0                # for raster/satellite imagery support
 
 # Optimization
 spopt>=0.5.0                    # keep minimal constraint  
@@ -23,7 +24,8 @@ networkx>=3.2.1                 # allow newer minor updates
 # Data processing
 pandas>=2.2.0                    # allow upgrades but be cautious with breaking changes  
 numpy>=1.26.4                    # allow newer patches  
-openpyxl>=3.1.2                  # allow minor updates  
+openpyxl>=3.1.2                  # allow minor updates
+Pillow>=10.0.0                   # for raster image processing  
 
 # Visualization
 matplotlib>=3.8.3                # allow newer patches  
