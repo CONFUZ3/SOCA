@@ -91,6 +91,9 @@ What problem would you like to solve today?"""
             "solution_history": []
         }
     
+    if "raster_data" not in st.session_state:
+        st.session_state.raster_data = {}  # Store raster overlays separately from vector data
+    
     if "conversation_manager" not in st.session_state:
         # Get API key
         api_key = None
@@ -191,6 +194,46 @@ with st.sidebar:
                 })
             except Exception as e:
                 st.warning(f"Could not sync uploaded data to AI: {e}")
+    
+    # Raster/satellite imagery upload section
+    st.divider()
+    st.subheader("Upload Satellite Imagery")
+    st.markdown("Upload raster files (GeoTIFF) to use as basemap overlay")
+    
+    uploaded_raster = st.file_uploader(
+        "Choose raster file",
+        type=["tif", "tiff", "geotiff"],
+        accept_multiple_files=False,
+        help="Upload a GeoTIFF raster file to use as basemap overlay",
+        key="raster_uploader"
+    )
+    
+    if uploaded_raster:
+        if uploaded_raster.name not in st.session_state.raster_data:
+            with st.spinner(f"Processing raster {uploaded_raster.name}..."):
+                try:
+                    raster_info = st.session_state.data_processor.load_raster_file(uploaded_raster)
+                    st.session_state.raster_data[uploaded_raster.name] = raster_info
+                    st.success(f"✓ Loaded raster {uploaded_raster.name}: {raster_info['width']}x{raster_info['height']} pixels")
+                except Exception as e:
+                    st.error(f"Error loading raster {uploaded_raster.name}: {str(e)}")
+                    logger.error(f"Raster loading error: {e}", exc_info=True)
+        else:
+            st.info(f"Raster {uploaded_raster.name} already loaded")
+    
+    # Display loaded raster info
+    if st.session_state.raster_data:
+        st.divider()
+        st.subheader("Loaded Raster")
+        for name, raster_info in st.session_state.raster_data.items():
+            with st.expander(f"{name}"):
+                st.write(f"**Size:** {raster_info['width']}x{raster_info['height']} pixels")
+                st.write(f"**CRS:** {raster_info['crs']}")
+                bounds = raster_info['bounds']
+                st.write(f"**Bounds:** [{bounds[0][0]:.6f}, {bounds[0][1]:.6f}] to [{bounds[1][0]:.6f}, {bounds[1][1]:.6f}]")
+                if st.button(f"Remove {name}", key=f"remove_raster_{name}"):
+                    del st.session_state.raster_data[name]
+                    st.rerun()
     
     # Display loaded data summary
     if st.session_state.problem_state["data"]:
@@ -675,14 +718,15 @@ with col2:
             if solution and "user_unit_hint" in solution:
                 parameters["user_unit_hint"] = solution["user_unit_hint"]
             
-            # Create map
+            # Create map with optional raster overlay
             map_obj = st.session_state.map_visualizer.create_map(
                 data=mapped_data,
                 solution=solution,
                 problem_type=st.session_state.problem_state["problem_type"],
                 viz_config=viz_config,
                 parameters=parameters,
-                constraints=st.session_state.problem_state.get("constraints", {})
+                constraints=st.session_state.problem_state.get("constraints", {}),
+                raster_data=st.session_state.get("raster_data", {})
             )
             
             # Display map

@@ -1,11 +1,13 @@
 import geopandas as gpd
 import pandas as pd
 from pathlib import Path
-from typing import Optional, List, Tuple, BinaryIO
+from typing import Optional, List, Tuple, BinaryIO, Dict, Any
 import json
 import tempfile
 import zipfile
 import logging
+import numpy as np
+from io import BytesIO
 
 logger = logging.getLogger(__name__)
 
@@ -473,4 +475,147 @@ class DataProcessor:
         
         logger.info(f"Generated {num_sites} candidate sites within demand extent: {bounds}")
         return candidate_gdf
+    
+    def load_raster_file(self, file: BinaryIO) -> Dict[str, Any]:
+        """
+        Load raster file (GeoTIFF) and return metadata and processed image for map display.
+        
+        Args:
+            file: Binary file object (GeoTIFF/TIF)
+            
+        Returns:
+            Dictionary containing:
+                - 'bounds': [[south, west], [north, east]] in WGS84
+                - 'image_bytes': PNG bytes for Folium ImageOverlay
+                - 'crs': CRS string
+                - 'original_bounds': Original bounds in raster CRS
+                - 'filename': Original filename
+        """
+        try:
+            import rasterio
+            from rasterio.warp import transform_bounds
+            from PIL import Image
+        except ImportError as e:
+            raise ImportError(f"Required libraries for raster support not installed: {e}. Please install rasterio and Pillow.")
+        
+        file_name = getattr(file, 'name', 'uploaded_raster.tif')
+        
+        # Save uploaded file to temporary location for rasterio
+        with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_file:
+            tmp_file.write(file.read())
+            tmp_path = tmp_file.name
+        
+        try:
+            # Open raster with rasterio
+            with rasterio.open(tmp_path) as src:
+                # Read raster data
+                raster_data = src.read()
+                
+                # Get CRS and bounds
+                src_crs = src.crs
+                src_bounds = src.bounds  # left, bottom, right, top
+                
+                # Transform bounds to WGS84 (EPSG:4326) for Folium
+                if src_crs and src_crs.to_string() != 'EPSG:4326':
+                    bounds_4326 = transform_bounds(
+                        src_crs,
+                        'EPSG:4326',
+                        src_bounds.left,
+                        src_bounds.bottom,
+                        src_bounds.right,
+                        src_bounds.top
+                    )
+                    # bounds_4326 is (minx, miny, maxx, maxy)
+                    bounds = [
+                        [bounds_4326[1], bounds_4326[0]],  # [south, west]
+                        [bounds_4326[3], bounds_4326[2]]   # [north, east]
+                    ]
+                else:
+                    # Already in WGS84
+                    bounds = [
+                        [src_bounds.bottom, src_bounds.left],  # [south, west]
+                        [src_bounds.top, src_bounds.right]     # [north, east]
+                    ]
+                
+                # Process raster for visualization
+                # Handle multi-band rasters (RGB, RGBA, or single band)
+                if raster_data.shape[0] == 1:
+                    # Single band - convert to grayscale
+                    band = raster_data[0]
+                    # Normalize to 0-255
+                    band_min = np.nanmin(band)
+                    band_max = np.nanmax(band)
+                    if band_max > band_min:
+                        band_normalized = ((band - band_min) / (band_max - band_min) * 255).astype(np.uint8)
+                    else:
+                        band_normalized = np.zeros_like(band, dtype=np.uint8)
+                    # Convert to RGB
+                    image_array = np.stack([band_normalized, band_normalized, band_normalized], axis=2)
+                elif raster_data.shape[0] == 3:
+                    # RGB - normalize each band
+                    image_array = np.zeros((raster_data.shape[1], raster_data.shape[2], 3), dtype=np.uint8)
+                    for i in range(3):
+                        band = raster_data[i]
+                        band_min = np.nanmin(band)
+                        band_max = np.nanmax(band)
+                        if band_max > band_min:
+                            band_normalized = ((band - band_min) / (band_max - band_min) * 255).astype(np.uint8)
+                        else:
+                            band_normalized = np.zeros_like(band, dtype=np.uint8)
+                        image_array[:, :, i] = band_normalized
+                elif raster_data.shape[0] == 4:
+                    # RGBA - use first 3 bands for RGB
+                    image_array = np.zeros((raster_data.shape[1], raster_data.shape[2], 3), dtype=np.uint8)
+                    for i in range(3):
+                        band = raster_data[i]
+                        band_min = np.nanmin(band)
+                        band_max = np.nanmax(band)
+                        if band_max > band_min:
+                            band_normalized = ((band - band_min) / (band_max - band_min) * 255).astype(np.uint8)
+                        else:
+                            band_normalized = np.zeros_like(band, dtype=np.uint8)
+                        image_array[:, :, i] = band_normalized
+                else:
+                    # More than 4 bands - use first 3
+                    logger.warning(f"Raster has {raster_data.shape[0]} bands, using first 3 for RGB visualization")
+                    image_array = np.zeros((raster_data.shape[1], raster_data.shape[2], 3), dtype=np.uint8)
+                    for i in range(3):
+                        band = raster_data[i]
+                        band_min = np.nanmin(band)
+                        band_max = np.nanmax(band)
+                        if band_max > band_min:
+                            band_normalized = ((band - band_min) / (band_max - band_min) * 255).astype(np.uint8)
+                        else:
+                            band_normalized = np.zeros_like(band, dtype=np.uint8)
+                        image_array[:, :, i] = band_normalized
+                
+                # Convert numpy array to PIL Image
+                # Flip vertically because rasterio uses (0,0) at top-left but image display expects bottom-left
+                image_array_flipped = np.flipud(image_array)
+                pil_image = Image.fromarray(image_array_flipped, mode='RGB')
+                
+                # Convert to PNG bytes
+                img_bytes_io = BytesIO()
+                pil_image.save(img_bytes_io, format='PNG')
+                image_bytes = img_bytes_io.getvalue()
+                
+                result = {
+                    'bounds': bounds,
+                    'image_bytes': image_bytes,
+                    'crs': str(src_crs) if src_crs else 'EPSG:4326',
+                    'original_bounds': [src_bounds.left, src_bounds.bottom, src_bounds.right, src_bounds.top],
+                    'filename': file_name,
+                    'width': src.width,
+                    'height': src.height
+                }
+                
+                logger.info(f"Loaded raster file {file_name}: {src.width}x{src.height}, CRS: {src_crs}, bounds: {bounds}")
+                return result
+                
+        finally:
+            # Clean up temporary file
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception as e:
+                logger.warning(f"Could not delete temporary raster file {tmp_path}: {e}")
 
