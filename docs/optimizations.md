@@ -26,6 +26,13 @@ The application has been optimized for:
 - Optimized CBC solver parameters
 - Consistent solution quality across solvers
 
+#### GA Fallback (Heuristic)
+- For `p-median`, when exact solving exceeds a time limit (default 60s), the solver switches to a pure-Python Genetic Algorithm and returns its solution.
+- Parameters (pass into solver parameters):
+  - `fallback_time_limit_seconds` (float, default 60.0): exact phase limit
+  - `ga_time_budget_seconds` (float, default 60.0): GA runtime budget
+- Results retain the standard format. `solver_details.solver` is `ga` when used, and `solver_details.fallback_reason` is `time_limit`.
+
 ### 2. Distance Calculation Caching
 
 #### Implementation

@@ -5,6 +5,8 @@ import numpy as np
 import time
 import logging
 
+from utils.heuristics.genetic_solver import GAConfig, LSCPGeneticSolver
+
 logger = logging.getLogger(__name__)
 
 class LSCPSolver(SpatialOptimizationProblem):
@@ -152,6 +154,10 @@ Where:
                 metric=distance_metric
             )
             
+            distance_matrix = dist_calc.calculate_distance_matrix(
+                demand_gdf, candidate_gdf, metric=distance_metric
+            )
+            
             # Check feasibility
             uncoverable = []
             for i in range(len(demand_gdf)):
@@ -166,13 +172,47 @@ Where:
                     "solution_time": time.time() - start_time
                 }
             
-            # Solve
-            solution = self._solve_mip(coverage_matrix, constraints)
+            fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
+            ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
             
-            # Calculate distance matrix for metrics
-            distance_matrix = dist_calc.calculate_distance_matrix(
-                demand_gdf, candidate_gdf, metric=distance_metric
+            mip_start = time.time()
+            solution = self._solve_mip(
+                coverage_matrix,
+                constraints,
+                time_limit_seconds=fallback_time_limit
             )
+            mip_elapsed = time.time() - mip_start
+            
+            timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
+            if timed_out_flag or (
+                fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
+            ):
+                incumbent_mask = None
+                if solution.get('selected_facilities'):
+                    incumbent_mask = np.zeros(coverage_matrix.shape[1], dtype=np.int8)
+                    for idx in solution['selected_facilities']:
+                        if 0 <= idx < coverage_matrix.shape[1]:
+                            incumbent_mask[idx] = 1
+                ga_cfg = GAConfig(time_limit_seconds=ga_time_budget)
+                ga_solver = LSCPGeneticSolver(ga_cfg)
+                ga_result = ga_solver.solve(
+                    coverage_matrix=coverage_matrix,
+                    distance_matrix=distance_matrix,
+                    time_budget_seconds=ga_time_budget,
+                    initial_solution=incumbent_mask
+                )
+                ga_details = {
+                    **ga_result.get("solver_details", {}),
+                    "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
+                    "fallback_reason": "time_limit"
+                }
+                solution = {
+                    "status": ga_result.get("status", "feasible"),
+                    "objective_value": len(ga_result["selected_facilities"]),
+                    "selected_facilities": ga_result["selected_facilities"],
+                    "assignments": ga_result["assignments"],
+                    "solver_details": ga_details
+                }
             
             # Calculate metrics
             metrics = self._calculate_metrics(
@@ -215,19 +255,21 @@ Where:
     def _solve_mip(
         self,
         coverage_matrix: np.ndarray,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         try:
             import gurobipy as gp
             from gurobipy import GRB
-            return self._solve_gurobi(coverage_matrix, constraints)
+            return self._solve_gurobi(coverage_matrix, constraints, time_limit_seconds)
         except ImportError:
-            return self._solve_pulp(coverage_matrix, constraints)
+            return self._solve_pulp(coverage_matrix, constraints, time_limit_seconds)
     
     def _solve_gurobi(
         self,
         coverage_matrix: np.ndarray,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
@@ -236,7 +278,10 @@ Where:
         
         model = gp.Model("lscp")
         model.setParam('OutputFlag', 0)
-        model.setParam('TimeLimit', 300)
+        if time_limit_seconds is not None:
+            model.setParam('TimeLimit', float(time_limit_seconds))
+        else:
+            model.setParam('TimeLimit', 300)
         
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")
@@ -274,7 +319,8 @@ Where:
         
         model.optimize()
         
-        if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
+        timed_out = (model.status == GRB.TIME_LIMIT)
+        if model.status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             selected = [j for j in range(n_candidates) if x[j].X > 0.5]
             
             # Determine assignments
@@ -293,7 +339,8 @@ Where:
                 'solver_details': {
                     'solver': 'gurobi',
                     'gap': model.MIPGap,
-                    'formulation': 'LSCP Set Cover MIP'
+                    'formulation': 'LSCP Set Cover MIP',
+                    'timed_out': bool(timed_out)
                 }
             }
         else:
@@ -307,7 +354,8 @@ Where:
     def _solve_pulp(
         self,
         coverage_matrix: np.ndarray,
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         import pulp
         
@@ -342,7 +390,9 @@ Where:
         if max_facilities:
             prob += pulp.lpSum([x[j] for j in range(n_candidates)]) <= max_facilities
         
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=float(time_limit_seconds) if time_limit_seconds is not None else None)
+        prob.solve(solver)
+        timed_out = bool(time_limit_seconds is not None and prob.status not in (pulp.LpStatusOptimal, pulp.LpStatusInfeasible))
         
         if prob.status == pulp.LpStatusOptimal:
             selected = [j for j in range(n_candidates) if pulp.value(x[j]) > 0.5]
@@ -358,14 +408,19 @@ Where:
                 'objective_value': len(selected),
                 'selected_facilities': selected,
                 'assignments': assignments,
-                'solver_details': {'solver': 'pulp', 'formulation': 'LSCP Set Cover MIP'}
+                'solver_details': {
+                    'solver': 'pulp',
+                    'formulation': 'LSCP Set Cover MIP',
+                    'timed_out': timed_out
+                }
             }
         else:
             return {
                 'status': 'infeasible',
                 'objective_value': None,
                 'selected_facilities': [],
-                'assignments': {}
+                'assignments': {},
+                'solver_details': {'solver': 'pulp', 'timed_out': timed_out}
             }
     
     def _calculate_metrics(
