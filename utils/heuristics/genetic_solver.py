@@ -56,7 +56,9 @@ class _BinaryGeneticOptimizer:
             raise ValueError("Number of genes must be positive")
 
         time_budget = float(time_limit or self.config.time_limit_seconds or 0)
+        logger.info(f"GA: Starting optimization with time budget: {time_budget:.2f} seconds, max generations: {self.config.max_generations}")
         pop = self._initialize_population(initial_solution)
+        logger.info(f"GA: Initialized population of size {pop.shape[0]} with {self.n_genes} genes")
 
         best_individual: Optional[np.ndarray] = None
         best_objective = np.inf
@@ -70,8 +72,10 @@ class _BinaryGeneticOptimizer:
 
         while generation < self.config.max_generations:
             now = time.time()
-            if time_budget and (now - start) >= time_budget:
+            elapsed = now - start
+            if time_budget and elapsed >= time_budget:
                 timed_out = True
+                logger.info(f"GA: Time budget reached at generation {generation}, elapsed: {elapsed:.2f}s")
                 break
 
             objectives = np.empty(pop.shape[0], dtype=float)
@@ -91,13 +95,20 @@ class _BinaryGeneticOptimizer:
 
             stagnant_generations += 1
             if stagnant_generations >= self.config.stagnation_generations:
+                logger.info(f"GA: Stagnation limit reached at generation {generation} (stagnant for {stagnant_generations} generations)")
                 break
 
             next_population = self._build_next_generation(pop, objectives)
             pop = next_population
             generation += 1
+            
+            # Log progress every 50 generations
+            if generation % 50 == 0:
+                elapsed = time.time() - start
+                logger.info(f"GA: Generation {generation}, best objective: {best_objective:.4f}, elapsed: {elapsed:.2f}s, evaluations: {evaluations}")
 
         elapsed = time.time() - start
+        logger.info(f"GA: Optimization completed - generations: {generation}, evaluations: {evaluations}, elapsed: {elapsed:.2f}s, timed_out: {timed_out}, best_objective: {best_objective:.4f if np.isfinite(best_objective) else 'inf'}")
         return {
             "best_individual": best_individual,
             "best_objective": float(best_objective) if np.isfinite(best_objective) else None,
@@ -243,6 +254,7 @@ class PMedianGeneticSolver:
         initial_solution: Optional[np.ndarray] = None,
         time_budget_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
+        logger.info(f"P-Median GA: Starting solve with p={p}, objective_type={objective_type}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"P-Median GA: Starting solve with p={p}, objective_type={objective_type}")
         n_demand, n_candidates = distance_matrix.shape
         optimizer = _BinaryGeneticOptimizer(
             n_genes=n_candidates,
@@ -321,6 +333,7 @@ class PCenterGeneticSolver:
         initial_solution: Optional[np.ndarray] = None,
         time_budget_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
+        logger.info(f"P-Center GA: Starting solve with p={p}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"P-Center GA: Starting solve with p={p}")
         n_demand, n_candidates = distance_matrix.shape
 
         optimizer = _BinaryGeneticOptimizer(
@@ -392,6 +405,7 @@ class LSCPGeneticSolver:
         time_budget_seconds: Optional[float] = None,
         initial_solution: Optional[np.ndarray] = None,
     ) -> Dict[str, Any]:
+        logger.info(f"LSCP GA: Starting solve with time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else "LSCP GA: Starting solve")
         n_demand, n_candidates = coverage_matrix.shape
         optimizer = _BinaryGeneticOptimizer(
             n_genes=n_candidates,
@@ -487,6 +501,7 @@ class MCLPGeneticSolver:
         time_budget_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         variant = variant or "classical"
+        logger.info(f"MCLP GA: Starting solve with variant={variant}, p={p}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"MCLP GA: Starting solve with variant={variant}, p={p}")
         n_demand, n_candidates = coverage_matrix.shape
 
         if not self.supports_variant(variant):

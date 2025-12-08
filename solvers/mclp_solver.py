@@ -207,6 +207,7 @@ Where:
             shared_data = self._prepare_shared_data(data, parameters, distance_metric)
             fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
             ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
+            logger.info(f"MCLP: Fallback time limit set to {fallback_time_limit:.2f} seconds, GA time budget: {ga_time_budget:.2f} seconds")
             
             # Get user unit hint for visualization consistency
             user_unit_hint = None
@@ -238,8 +239,12 @@ Where:
             ga_needed = timed_out_flag or (
                 fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
             )
+            logger.info(f"MCLP timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
             if ga_needed:
+                logger.info(f"MCLP: Falling back to Genetic Algorithm for variant '{variant}'")
+                logger.info(f"MCLP: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
                 ga_solver = MCLPGeneticSolver(GAConfig(time_limit_seconds=ga_time_budget))
+                logger.info(f"MCLP: Starting GA with time budget: {ga_time_budget:.2f} seconds")
                 if ga_solver.supports_variant(variant):
                     incumbent_mask = None
                     selected = solution.get('selected_facilities')
@@ -262,6 +267,7 @@ Where:
                             initial_solution=incumbent_mask,
                             time_budget_seconds=ga_time_budget
                         )
+                        logger.info(f"MCLP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
                         ga_details = {
                             **ga_result.get("solver_details", {}),
                             "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
@@ -276,12 +282,14 @@ Where:
                             "solver_details": ga_details
                         }
                     except Exception as ga_err:
-                        logger.warning(f"GA fallback for MCLP variant '{variant}' failed: {ga_err}")
+                        logger.error(f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}", exc_info=True)
+                    else:
+                        logger.warning(
+                            "GA fallback not available for MCLP variant '%s'; returning MIP result",
+                            variant
+                        )
                 else:
-                    logger.warning(
-                        "GA fallback not available for MCLP variant '%s'; returning MIP result",
-                        variant
-                    )
+                    logger.info(f"MCLP: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
             # Calculate metrics
             metrics = self._calculate_metrics(
@@ -811,6 +819,7 @@ Where:
         model.setParam('OutputFlag', 0)
         if time_limit_seconds is not None:
             model.setParam('TimeLimit', float(time_limit_seconds))
+            logger.info(f"MCLP Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
         else:
             model.setParam('TimeLimit', 300)
         model.setParam('MIPGap', 0.01)  # 1% optimality gap

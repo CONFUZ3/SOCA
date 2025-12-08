@@ -147,6 +147,7 @@ Where:
             
             fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
             ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
+            logger.info(f"P-Center: Fallback time limit set to {fallback_time_limit:.2f} seconds, GA time budget: {ga_time_budget:.2f} seconds")
             
             # Solve using MIP with a strict time limit
             mip_start = time.time()
@@ -159,9 +160,13 @@ Where:
             mip_elapsed = time.time() - mip_start
             
             timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
-            if timed_out_flag or (
+            ga_needed = timed_out_flag or (
                 fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
-            ):
+            )
+            logger.info(f"P-Center timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
+            if ga_needed:
+                logger.info("P-Center: Falling back to Genetic Algorithm")
+                logger.info(f"P-Center: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
                 incumbent_mask = None
                 if solution.get('selected_facilities'):
                     incumbent_mask = np.zeros(distance_matrix.shape[1], dtype=np.int8)
@@ -169,6 +174,7 @@ Where:
                         if 0 <= idx < incumbent_mask.size:
                             incumbent_mask[idx] = 1
                 ga_cfg = GAConfig(time_limit_seconds=ga_time_budget)
+                logger.info(f"P-Center: Starting GA with time budget: {ga_time_budget:.2f} seconds")
                 ga_solver = PCenterGeneticSolver(ga_cfg)
                 ga_result = ga_solver.solve(
                     distance_matrix=distance_matrix,
@@ -176,6 +182,7 @@ Where:
                     initial_solution=incumbent_mask,
                     time_budget_seconds=ga_time_budget
                 )
+                logger.info(f"P-Center: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
                 ga_details = {
                     **ga_result.get('solver_details', {}),
                     "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
@@ -188,6 +195,8 @@ Where:
                     "assignments": ga_result["assignments"],
                     "solver_details": ga_details
                 }
+            else:
+                logger.info(f"P-Center: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
             # Calculate metrics
             metrics = self._calculate_metrics(
