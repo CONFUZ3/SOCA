@@ -5,6 +5,8 @@ import numpy as np
 import time
 import logging
 
+from utils.heuristics.genetic_solver import GAConfig, MCLPGeneticSolver
+
 logger = logging.getLogger(__name__)
 
 class MCLPSolver(SpatialOptimizationProblem):
@@ -203,6 +205,9 @@ Where:
         try:
             # Validate inputs and prepare shared data
             shared_data = self._prepare_shared_data(data, parameters, distance_metric)
+            fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
+            ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
+            logger.info(f"MCLP: Fallback time limit set to {fallback_time_limit:.2f} seconds, GA time budget: {ga_time_budget:.2f} seconds")
             
             # Get user unit hint for visualization consistency
             user_unit_hint = None
@@ -220,12 +225,71 @@ Where:
             logger.info(f"MCLP Solver: Using variant '{variant}' with parameters: {parameters}")
             
             # Select variant-specific solver
+            mip_start = time.time()
             solution = self._solve_variant(
                 variant=variant,
                 shared_data=shared_data,
                 parameters=parameters,
-                constraints=constraints
+                constraints=constraints,
+                time_limit_seconds=fallback_time_limit
             )
+            mip_elapsed = time.time() - mip_start
+            
+            timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
+            ga_needed = timed_out_flag or (
+                fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
+            )
+            logger.info(f"MCLP timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
+            if ga_needed:
+                logger.info(f"MCLP: Falling back to Genetic Algorithm for variant '{variant}'")
+                logger.info(f"MCLP: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                ga_solver = MCLPGeneticSolver(GAConfig(time_limit_seconds=ga_time_budget))
+                logger.info(f"MCLP: Starting GA with time budget: {ga_time_budget:.2f} seconds")
+                if ga_solver.supports_variant(variant):
+                    incumbent_mask = None
+                    selected = solution.get('selected_facilities')
+                    if selected:
+                        incumbent_mask = np.zeros(shared_data['coverage_matrix'].shape[1], dtype=np.int8)
+                        for idx in selected:
+                            if 0 <= idx < incumbent_mask.size:
+                                incumbent_mask[idx] = 1
+                    try:
+                        ga_result = ga_solver.solve(
+                            coverage_matrix=shared_data['coverage_matrix'],
+                            distance_matrix=shared_data['distance_matrix'],
+                            demand_weights=shared_data['demand_weights'],
+                            variant=variant,
+                            p=parameters.get('n_facilities'),
+                            facility_costs=shared_data.get('facility_costs'),
+                            budget=parameters.get('budget'),
+                            k_coverage=parameters.get('k_coverage', 2 if variant == 'backup' else 1),
+                            reliability=parameters.get('facility_reliability'),
+                            initial_solution=incumbent_mask,
+                            time_budget_seconds=ga_time_budget
+                        )
+                        logger.info(f"MCLP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                        ga_details = {
+                            **ga_result.get("solver_details", {}),
+                            "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
+                            "fallback_reason": "time_limit"
+                        }
+                        solution = {
+                            "status": ga_result.get("status", "feasible"),
+                            "objective_value": ga_result["objective_value"],
+                            "selected_facilities": ga_result["selected_facilities"],
+                            "assignments": ga_result.get("assignments", {}),
+                            "z_values": ga_result.get("z_values"),
+                            "solver_details": ga_details
+                        }
+                    except Exception as ga_err:
+                        logger.error(f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}", exc_info=True)
+                    else:
+                        logger.warning(
+                            "GA fallback not available for MCLP variant '%s'; returning MIP result",
+                            variant
+                        )
+                else:
+                    logger.info(f"MCLP: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
             # Calculate metrics
             metrics = self._calculate_metrics(
@@ -378,7 +442,8 @@ Where:
         variant: str,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Delegate to variant-specific solver using strategy pattern.
@@ -395,7 +460,7 @@ Where:
         if variant not in solver_map:
             raise ValueError(f"Unsupported MCLP variant: {variant}")
         
-        return solver_map[variant](shared_data, parameters, constraints)
+        return solver_map[variant](shared_data, parameters, constraints, time_limit_seconds)
     
     def _extract_facility_costs(
         self,
@@ -522,7 +587,8 @@ Where:
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve classical MCLP variant."""
         p = int(parameters['n_facilities'])
@@ -540,14 +606,16 @@ Where:
             capacities=None,
             k_coverage=1,
             reliability=None,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     def _solve_budget(
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve budget-constrained MCLP variant."""
         budget = float(parameters['budget'])
@@ -563,14 +631,16 @@ Where:
             capacities=None,
             k_coverage=1,
             reliability=None,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     def _solve_capacitated(
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve capacitated MCLP variant."""
         capacities = shared_data['capacities']
@@ -603,14 +673,16 @@ Where:
             capacities=capacities,
             k_coverage=1,
             reliability=None,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     def _solve_probabilistic(
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve probabilistic MCLP variant."""
         p = int(parameters['n_facilities'])
@@ -627,14 +699,16 @@ Where:
             capacities=None,
             k_coverage=1,
             reliability=reliability,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     def _solve_multi_coverage(
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve multi-coverage MCLP variant."""
         p = int(parameters['n_facilities'])
@@ -651,14 +725,16 @@ Where:
             capacities=None,
             k_coverage=k_coverage,
             reliability=None,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     def _solve_backup(
         self,
         shared_data: Dict[str, Any],
         parameters: Dict[str, Any],
-        constraints: Dict[str, Any]
+        constraints: Dict[str, Any],
+        time_limit_seconds: Optional[float]
     ) -> Dict[str, Any]:
         """Solve backup coverage MCLP variant."""
         p = int(parameters['n_facilities'])
@@ -675,7 +751,8 @@ Where:
             capacities=None,
             k_coverage=k_coverage,
             reliability=None,
-            distance_matrix=shared_data['distance_matrix']
+            distance_matrix=shared_data['distance_matrix'],
+            time_limit_seconds=time_limit_seconds
         )
     
     # ============================================================================
@@ -694,7 +771,8 @@ Where:
         capacities: Optional[np.ndarray],
         k_coverage: int,
         reliability: Optional[np.ndarray],
-        distance_matrix: np.ndarray
+        distance_matrix: np.ndarray,
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Solve MCLP using Mixed Integer Programming.
@@ -707,12 +785,14 @@ Where:
             from gurobipy import GRB
             return self._solve_gurobi(
                 coverage_matrix, demand_weights, p, constraints,
-                variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix
+                variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix,
+                time_limit_seconds
             )
         except ImportError:
             return self._solve_pulp(
                 coverage_matrix, demand_weights, p, constraints,
-                variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix
+                variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix,
+                time_limit_seconds
             )
     
     def _solve_gurobi(
@@ -727,7 +807,8 @@ Where:
         capacities: Optional[np.ndarray],
         k_coverage: int,
         reliability: Optional[np.ndarray],
-        distance_matrix: np.ndarray
+        distance_matrix: np.ndarray,
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
@@ -736,7 +817,11 @@ Where:
         
         model = gp.Model("mclp")
         model.setParam('OutputFlag', 0)
-        model.setParam('TimeLimit', 300)
+        if time_limit_seconds is not None:
+            model.setParam('TimeLimit', float(time_limit_seconds))
+            logger.info(f"MCLP Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
+        else:
+            model.setParam('TimeLimit', 300)
         model.setParam('MIPGap', 0.01)  # 1% optimality gap
         model.setParam('Presolve', 2)   # Aggressive presolve
         model.setParam('Cuts', 2)       # Aggressive cut generation
@@ -820,7 +905,8 @@ Where:
         
         model.optimize()
         
-        if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
+        timed_out = (model.status == GRB.TIME_LIMIT)
+        if model.status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             selected = [j for j in range(n_candidates) if x[j].X > 0.5]
             
             # Determine assignments and served fractions for capacitated
@@ -872,7 +958,8 @@ Where:
                 'solver_details': {
                     'solver': 'gurobi',
                     'gap': model.MIPGap,
-                    'formulation': f'MCLP {variant} MIP'
+                    'formulation': f'MCLP {variant} MIP',
+                    'timed_out': bool(timed_out)
                 }
             }
             if variant == 'capacitated':
@@ -898,7 +985,8 @@ Where:
         capacities: Optional[np.ndarray],
         k_coverage: int,
         reliability: Optional[np.ndarray],
-        distance_matrix: np.ndarray
+        distance_matrix: np.ndarray,
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         import pulp
         
@@ -976,7 +1064,12 @@ Where:
                 ])
                 prob += assigned_demand <= float(capacities[j]) * x[j]
         
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        solver = pulp.PULP_CBC_CMD(
+            msg=0,
+            timeLimit=float(time_limit_seconds) if time_limit_seconds is not None else None
+        )
+        prob.solve(solver)
+        timed_out = bool(time_limit_seconds is not None and prob.status not in (pulp.LpStatusOptimal, pulp.LpStatusInfeasible))
         
         if prob.status == pulp.LpStatusOptimal:
             selected = [j for j in range(n_candidates) if pulp.value(x[j]) > 0.5]
@@ -1026,7 +1119,11 @@ Where:
                 'selected_facilities': selected,
                 'assignments': assignments,
                 'z_values': z_values,
-                'solver_details': {'solver': 'pulp', 'formulation': f'MCLP {variant} MIP'}
+                'solver_details': {
+                    'solver': 'pulp',
+                    'formulation': f'MCLP {variant} MIP',
+                    'timed_out': timed_out
+                }
             }
             if variant == 'capacitated':
                 result['y_values'] = y_values
@@ -1036,7 +1133,8 @@ Where:
                 'status': 'infeasible',
                 'objective_value': None,
                 'selected_facilities': [],
-                'assignments': {}
+                'assignments': {},
+                'solver_details': {'solver': 'pulp', 'timed_out': timed_out}
             }
     
     def _calculate_metrics(

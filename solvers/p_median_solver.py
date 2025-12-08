@@ -164,6 +164,7 @@ Where:
         try:
             # Import optimizer
             from utils.distance_calculator import DistanceCalculator
+            from utils.heuristics.genetic_solver import PMedianGeneticSolver, GAConfig
             
             # Extract data
             demand_gdf = data.get('demand_points')
@@ -180,6 +181,11 @@ Where:
             facility_costs = parameters.get('facility_costs') if isinstance(parameters.get('facility_costs'), (list, np.ndarray)) else None
             budget = parameters.get('budget') if isinstance(parameters.get('budget'), (int, float)) else None
             max_assign_dist = parameters.get('max_assignment_distance') if isinstance(parameters.get('max_assignment_distance'), (int, float)) else None
+            
+            # Fallback configuration
+            fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
+            use_ga_after_timeout = True
+            logger.info(f"P-Median: Fallback time limit set to {fallback_time_limit:.2f} seconds")
             
             # Validate p
             if p > len(candidate_gdf):
@@ -201,7 +207,8 @@ Where:
                 except Exception:
                     distance_mask = None
             
-            # Solve using optimization
+            # Solve using optimization (respect a time limit for fallback orchestration)
+            mip_start = time.time()
             solution = self._solve_mip(
                 distance_matrix=distance_matrix,
                 demand_weights=demand_weights,
@@ -212,8 +219,50 @@ Where:
                 capacities=np.array(capacities, dtype=float) if capacities is not None else None,
                 facility_costs=np.array(facility_costs, dtype=float) if facility_costs is not None else None,
                 budget=float(budget) if budget is not None else None,
-                distance_mask=distance_mask
+                distance_mask=distance_mask,
+                time_limit_seconds=fallback_time_limit
             )
+            mip_elapsed = time.time() - mip_start
+
+            # If timed out or we reached the 60s window, switch to GA per user choice (a)
+            timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
+            ga_needed = use_ga_after_timeout and (timed_out_flag or mip_elapsed >= max(0.1, 0.95 * fallback_time_limit))
+            logger.info(f"P-Median timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
+            if ga_needed:
+                logger.info("P-Median: Falling back to Genetic Algorithm")
+                logger.info(f"P-Median: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                incumbent_mask = None
+                if solution.get('selected_facilities'):
+                    incumbent_mask = np.zeros(distance_matrix.shape[1], dtype=int)
+                    for j in solution['selected_facilities']:
+                        if 0 <= int(j) < incumbent_mask.size:
+                            incumbent_mask[int(j)] = 1
+                ga_cfg = GAConfig(time_limit_seconds=float(parameters.get('ga_time_budget_seconds', 60.0)))
+                logger.info(f"P-Median: Starting GA with time budget: {ga_cfg.time_limit_seconds:.2f} seconds")
+                ga = PMedianGeneticSolver(ga_cfg)
+                ga_result = ga.solve(
+                    distance_matrix=distance_matrix,
+                    demand_weights=demand_weights,
+                    p=p,
+                    objective_type=objective_type,
+                    initial_solution=incumbent_mask,
+                    time_budget_seconds=ga_cfg.time_limit_seconds
+                )
+                logger.info(f"P-Median: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                ga_details = {
+                    **ga_result.get("solver_details", {}),
+                    "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
+                    "fallback_reason": "time_limit"
+                }
+                solution = {
+                    "status": ga_result.get("status", "feasible"),
+                    "objective_value": float(ga_result["objective_value"]),
+                    "selected_facilities": ga_result["selected_facilities"],
+                    "assignments": ga_result["assignments"],
+                    "solver_details": ga_details
+                }
+            else:
+                logger.info(f"P-Median: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
             # Validate assignments against service radius if provided
             validation_results = self._validate_assignments(
@@ -262,7 +311,9 @@ Where:
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
                 "academic_metadata": {
-                    "algorithm_used": "Mixed Integer Programming (MIP)",
+                    "algorithm_used": ("Genetic Algorithm (GA)"
+                                       if solution.get('solver_details', {}).get('solver') == 'ga'
+                                       else "Mixed Integer Programming (MIP)"),
                     "references": self.get_metadata()['academic_refs'][:2],
                     "assumptions": [
                         "Each demand point is assigned to exactly one facility",
@@ -335,7 +386,8 @@ Where:
         capacities: Optional[np.ndarray],
         facility_costs: Optional[np.ndarray],
         budget: Optional[float],
-        distance_mask: Optional[np.ndarray]
+        distance_mask: Optional[np.ndarray],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """Solve using Mixed Integer Programming"""
         n_demand, n_candidates = distance_matrix.shape
@@ -346,13 +398,15 @@ Where:
             from gurobipy import GRB
             return self._solve_gurobi(
                 distance_matrix, demand_weights, p, constraints,
-                variant, objective_type, capacities, facility_costs, budget, distance_mask
+                variant, objective_type, capacities, facility_costs, budget, distance_mask,
+                time_limit_seconds=time_limit_seconds
             )
         except ImportError:
             logger.info("Gurobi not available, using PuLP")
             return self._solve_pulp(
                 distance_matrix, demand_weights, p, constraints,
-                variant, objective_type, capacities, facility_costs, budget, distance_mask
+                variant, objective_type, capacities, facility_costs, budget, distance_mask,
+                time_limit_seconds=time_limit_seconds
             )
     
     def _solve_gurobi(
@@ -366,7 +420,8 @@ Where:
         capacities: Optional[np.ndarray],
         facility_costs: Optional[np.ndarray],
         budget: Optional[float],
-        distance_mask: Optional[np.ndarray]
+        distance_mask: Optional[np.ndarray],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """Solve using Gurobi"""
         import gurobipy as gp
@@ -377,7 +432,11 @@ Where:
         # Create model
         model = gp.Model("p-median")
         model.setParam('OutputFlag', 0)  # Suppress output
-        model.setParam('TimeLimit', 300)  # 5 minute time limit
+        if time_limit_seconds is not None:
+            model.setParam('TimeLimit', float(time_limit_seconds))
+            logger.info(f"P-Median Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
+        else:
+            model.setParam('TimeLimit', 300)
         model.setParam('MIPGap', 0.01)
         
         # Decision variables
@@ -461,7 +520,8 @@ Where:
         model.optimize()
         
         # Extract solution
-        if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL:
+        timed_out = (model.status == GRB.TIME_LIMIT)
+        if model.status == GRB.OPTIMAL or model.status == GRB.SUBOPTIMAL or model.status == GRB.TIME_LIMIT:
             selected = [j for j in range(n_candidates) if x[j].X > 0.5]
             assignments = {}
             for i in range(n_demand):
@@ -493,7 +553,8 @@ Where:
                     'iterations': model.IterCount,
                     'formulation': f'P-Median MIP ({variant})',
                     'total_weighted_distance': total_weighted_distance,  # Always include total for reference
-                    'solver_objective_value': model.objVal  # Keep the solver's objective value for reference
+                    'solver_objective_value': model.objVal,  # Keep the solver's objective value for reference
+                    'timed_out': bool(timed_out)
                 }
             }
         else:
@@ -516,7 +577,8 @@ Where:
         capacities: Optional[np.ndarray],
         facility_costs: Optional[np.ndarray],
         budget: Optional[float],
-        distance_mask: Optional[np.ndarray]
+        distance_mask: Optional[np.ndarray],
+        time_limit_seconds: Optional[float] = None
     ) -> Dict[str, Any]:
         """Solve using PuLP"""
         import pulp
@@ -594,7 +656,8 @@ Where:
                 prob += x[j] == 0
         
         # Solve
-        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=float(time_limit_seconds) if time_limit_seconds is not None else None)
+        prob.solve(solver)
         
         # Extract solution
         if prob.status == pulp.LpStatusOptimal:
@@ -627,16 +690,19 @@ Where:
                     'solver': 'pulp',
                     'formulation': 'P-Median MIP',
                     'total_weighted_distance': total_weighted_distance,  # Always include total for reference
-                    'solver_objective_value': pulp.value(prob.objective)  # Keep the solver's objective value for reference
+                    'solver_objective_value': pulp.value(prob.objective),  # Keep the solver's objective value for reference
+                    'timed_out': False
                 }
             }
         else:
+            # Not optimal: approximate timeout if a time limit was set
+            timed_out = bool(time_limit_seconds is not None)
             return {
                 'status': 'infeasible',
                 'objective_value': None,
                 'selected_facilities': [],
                 'assignments': {},
-                'solver_details': {'solver': 'pulp', 'status': prob.status}
+                'solver_details': {'solver': 'pulp', 'status': prob.status, 'timed_out': timed_out}
             }
     
     def _validate_assignments(
