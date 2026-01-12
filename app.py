@@ -1,12 +1,15 @@
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+import pydeck as pdk
 import geopandas as gpd
 from pathlib import Path
 import os
 import logging
 import time
 import inspect
+import hashlib
+import json
 
 # Set up logging
 logging.basicConfig(
@@ -24,8 +27,36 @@ from agent.conversation_manager import ConversationManager
 from solvers.registry import problem_registry
 from utils.data_processor import DataProcessor
 from utils.visualizer import MapVisualizer
+from utils.pydeck_visualizer import PyDeckVisualizer
 from utils.export_handler import ExportHandler
 from config.settings import settings
+
+
+# ============================================================================
+# PERFORMANCE: Caching functions for expensive operations
+# ============================================================================
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_data_hash(data_dict: dict) -> str:
+    """Generate hash of data for cache invalidation"""
+    hash_parts = []
+    for name, gdf in data_dict.items():
+        if gdf is not None:
+            hash_parts.append(f"{name}:{len(gdf)}:{gdf.total_bounds.tobytes().hex()}")
+    return hashlib.md5(":".join(hash_parts).encode()).hexdigest()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def get_solution_hash(solution: dict) -> str:
+    """Generate hash of solution for cache invalidation"""
+    if not solution:
+        return "none"
+    key_parts = [
+        str(solution.get('status', '')),
+        str(solution.get('objective_value', '')),
+        str(sorted(solution.get('selected_facilities', []))),
+    ]
+    return hashlib.md5(":".join(key_parts).encode()).hexdigest()
 
 # Page config
 st.set_page_config(
@@ -93,6 +124,15 @@ What problem would you like to solve today?"""
     
     if "raster_data" not in st.session_state:
         st.session_state.raster_data = {}  # Store raster overlays separately from vector data
+    
+    if "map_renderer" not in st.session_state:
+        st.session_state.map_renderer = "pydeck"  # Default to faster pydeck renderer
+    
+    if "basemap_style" not in st.session_state:
+        st.session_state.basemap_style = "light"  # Default basemap style
+    
+    if "pydeck_visualizer" not in st.session_state:
+        st.session_state.pydeck_visualizer = PyDeckVisualizer(basemap_style="light")
     
     if "conversation_manager" not in st.session_state:
         # Get API key
@@ -312,6 +352,42 @@ with st.sidebar:
             with st.expander("Constraints"):
                 st.json(st.session_state.problem_state["constraints"])
     
+    # Map renderer settings
+    st.divider()
+    st.subheader("⚡ Performance")
+    
+    renderer_options = {
+        "pydeck": "PyDeck (Fast - WebGL)",
+        "folium": "Folium (Classic - Leaflet)"
+    }
+    
+    st.session_state.map_renderer = st.radio(
+        "Map Renderer",
+        options=list(renderer_options.keys()),
+        format_func=lambda x: renderer_options[x],
+        index=0 if st.session_state.get("map_renderer", "pydeck") == "pydeck" else 1,
+        help="PyDeck uses WebGL for faster rendering with large datasets"
+    )
+    
+    # Basemap selector (only for PyDeck)
+    if st.session_state.get("map_renderer", "pydeck") == "pydeck":
+        basemap_options = {
+            "light": "🌤️ Light (Positron)",
+            "dark": "🌙 Dark Matter",
+            "voyager": "🗺️ Voyager (Colorful)",
+        }
+        
+        if "basemap_style" not in st.session_state:
+            st.session_state.basemap_style = "light"
+        
+        st.session_state.basemap_style = st.selectbox(
+            "Basemap Style",
+            options=list(basemap_options.keys()),
+            format_func=lambda x: basemap_options[x],
+            index=list(basemap_options.keys()).index(st.session_state.get("basemap_style", "light")),
+            help="Choose the map background style"
+        )
+    
     # Clear conversation button
     st.divider()
     if st.button("Reset Conversation"):
@@ -331,6 +407,332 @@ st.title("Spatial Optimization Conversational Agent")
 
 # Create two columns: chat and map
 col1, col2 = st.columns([1, 1])
+
+
+# ============================================================================
+# METRICS DISPLAY: Problem-specific metrics formatting
+# ============================================================================
+
+def _display_problem_metrics(problem_type: str, solution: dict, metrics: dict):
+    """Display problem-specific metrics with proper grouping and formatting."""
+    
+    # Common header metrics row
+    metric_cols = st.columns(3)
+    
+    with metric_cols[0]:
+        # Show objective value with problem-specific label
+        obj_name = metrics.get('objective_name', 'objective_value')
+        obj_val = metrics.get('objective_value', solution.get('objective_value'))
+        if obj_val is not None:
+            label = _format_metric_label(obj_name)
+            st.metric(label, f"{obj_val:.2f}")
+    
+    with metric_cols[1]:
+        st.metric("Solution Status", solution.get('status', 'Unknown').title())
+    
+    with metric_cols[2]:
+        st.metric("Solution Time", f"{solution.get('solution_time', 0):.2f}s")
+    
+    # Problem-specific key metrics
+    if problem_type == "lscp":
+        _display_lscp_metrics(metrics)
+    elif problem_type == "mclp":
+        _display_mclp_metrics(metrics, solution)
+    elif problem_type == "p-center":
+        _display_pcenter_metrics(metrics)
+    elif problem_type == "p-median":
+        _display_pmedian_metrics(metrics)
+    else:
+        # Generic fallback
+        _display_generic_metrics(metrics)
+
+
+def _format_metric_label(key: str) -> str:
+    """Format metric key as readable label."""
+    labels = {
+        'min_facilities': 'Min Facilities',
+        'max_distance': 'Max Distance',
+        'total_weighted_distance': 'Total Weighted Distance',
+        'average_weighted_distance': 'Avg Weighted Distance',
+        'covered_demand': 'Covered Demand',
+        'served_demand': 'Served Demand',
+        'expected_covered_demand': 'Expected Coverage',
+    }
+    return labels.get(key, key.replace('_', ' ').title())
+
+
+def _display_lscp_metrics(metrics: dict):
+    """Display LSCP-specific metrics."""
+    st.markdown("##### Coverage Metrics")
+    cols = st.columns(3)
+    
+    with cols[0]:
+        st.metric("Facilities Required", int(metrics.get('num_facilities', 0)))
+    with cols[1]:
+        coverage = metrics.get('coverage_percentage', 0)
+        st.metric("Coverage", f"{coverage:.1f}%")
+    with cols[2]:
+        radius = metrics.get('service_radius', 0)
+        st.metric("Service Radius", f"{radius:.2f}")
+    
+    # Additional details
+    with st.expander("Detailed Metrics"):
+        st.write(f"**Total Demand Points:** {metrics.get('total_demand_points', 0)}")
+        st.write(f"**Covered Points:** {metrics.get('num_covered_points', 0)}")
+        st.write(f"**Uncovered Points:** {metrics.get('num_uncovered_points', 0)}")
+        st.write(f"**Average Distance:** {metrics.get('average_distance', 0):.2f}")
+        st.write(f"**Max Distance:** {metrics.get('max_distance', 0):.2f}")
+
+
+def _display_mclp_metrics(metrics: dict, solution: dict):
+    """Display MCLP-specific metrics."""
+    variant = solution.get('variant_used', 'classical')
+    
+    st.markdown("##### Coverage Metrics")
+    cols = st.columns(4)
+    
+    with cols[0]:
+        coverage = metrics.get('coverage_percentage', 0)
+        st.metric("Coverage", f"{coverage:.1f}%")
+    with cols[1]:
+        covered = metrics.get('covered_demand', 0)
+        st.metric("Covered Demand", f"{covered:.1f}")
+    with cols[2]:
+        uncovered = metrics.get('uncovered_demand', 0)
+        st.metric("Uncovered Demand", f"{uncovered:.1f}")
+    with cols[3]:
+        radius = metrics.get('service_radius', 0)
+        st.metric("Service Radius", f"{radius:.2f}")
+    
+    # Variant-specific metrics
+    with st.expander("Detailed Metrics"):
+        st.write(f"**Variant:** {variant.title()}")
+        st.write(f"**Facilities Selected:** {metrics.get('num_facilities', 0)}")
+        st.write(f"**Total Demand:** {metrics.get('total_demand', 0):.1f}")
+        st.write(f"**Covered Points:** {metrics.get('num_covered_points', 0)}")
+        st.write(f"**Avg Distance (covered):** {metrics.get('average_distance_covered', 0):.2f}")
+        
+        # Variant-specific details
+        if variant == 'capacitated':
+            st.write(f"**Capacity Utilization:** {metrics.get('capacity_utilization', 0)*100:.1f}%")
+            if 'avg_facility_utilization' in metrics:
+                st.write(f"**Avg Facility Utilization:** {metrics.get('avg_facility_utilization', 0)*100:.1f}%")
+        elif variant == 'budget':
+            st.write(f"**Total Cost:** {metrics.get('total_cost', 0):.2f}")
+            st.write(f"**Budget Utilization:** {metrics.get('budget_utilization', 0)*100:.1f}%")
+        elif variant in ('multi_coverage', 'backup'):
+            st.write(f"**K Required:** {metrics.get('k_required', 2)}")
+            st.write(f"**Min Coverage Count:** {metrics.get('min_coverage_count', 0)}")
+        elif variant == 'probabilistic':
+            st.write(f"**Avg Reliability:** {metrics.get('avg_selected_reliability', 0)*100:.1f}%")
+
+
+def _display_pcenter_metrics(metrics: dict):
+    """Display P-Center-specific metrics."""
+    st.markdown("##### Distance Metrics (Minimax)")
+    cols = st.columns(4)
+    
+    with cols[0]:
+        max_dist = metrics.get('max_distance', 0)
+        st.metric("Max Distance", f"{max_dist:.2f}", help="Objective: minimize this value")
+    with cols[1]:
+        avg_dist = metrics.get('average_distance', 0)
+        st.metric("Avg Distance", f"{avg_dist:.2f}")
+    with cols[2]:
+        min_dist = metrics.get('min_distance', 0)
+        st.metric("Min Distance", f"{min_dist:.2f}")
+    with cols[3]:
+        n_fac = metrics.get('num_facilities', 0)
+        st.metric("Facilities", int(n_fac))
+    
+    with st.expander("Detailed Metrics"):
+        st.write(f"**Demand Points Served:** {metrics.get('num_demand_points', 0)}")
+        st.write(f"**Std Deviation:** {metrics.get('std_distance', 0):.2f}")
+
+
+def _display_pmedian_metrics(metrics: dict):
+    """Display P-Median-specific metrics."""
+    obj_type = metrics.get('objective_type', 'total')
+    
+    st.markdown("##### Distance Metrics")
+    cols = st.columns(4)
+    
+    with cols[0]:
+        if obj_type == 'average':
+            avg_dist = metrics.get('average_distance', 0)
+            st.metric("Avg Weighted Distance", f"{avg_dist:.2f}", help="Objective value")
+        else:
+            total_dist = metrics.get('total_weighted_distance', 0)
+            st.metric("Total Weighted Distance", f"{total_dist:.2f}", help="Objective value")
+    with cols[1]:
+        if obj_type == 'average':
+            total_dist = metrics.get('total_weighted_distance', 0)
+            st.metric("Total Distance", f"{total_dist:.2f}")
+        else:
+            avg_dist = metrics.get('average_distance', 0)
+            st.metric("Avg Distance", f"{avg_dist:.2f}")
+    with cols[2]:
+        max_dist = metrics.get('max_distance', 0)
+        st.metric("Max Distance", f"{max_dist:.2f}")
+    with cols[3]:
+        n_fac = metrics.get('num_facilities', 0)
+        st.metric("Facilities", int(n_fac))
+    
+    with st.expander("Detailed Metrics"):
+        st.write(f"**Objective Type:** {obj_type.title()}")
+        st.write(f"**Demand Points Served:** {metrics.get('num_demand_points', 0)}")
+        st.write(f"**Total Demand Weight:** {metrics.get('total_demand_weight', 0):.2f}")
+        
+        # Variant-specific
+        if 'budget_used' in metrics:
+            st.write(f"**Budget Used:** {metrics.get('budget_used', 0):.2f}")
+        if 'capacity_utilization' in metrics:
+            cap_util = metrics.get('capacity_utilization', {})
+            if isinstance(cap_util, dict) and cap_util:
+                st.write("**Capacity Utilization by Facility:**")
+                for fac_id, util in cap_util.items():
+                    if util is not None:
+                        st.write(f"  - Facility {fac_id}: {util*100:.1f}%")
+        
+        # Validation warnings
+        if 'violation_count' in metrics and metrics['violation_count'] > 0:
+            st.warning(f"⚠️ {metrics['violation_count']} assignment violation(s) detected")
+
+
+def _display_generic_metrics(metrics: dict):
+    """Display generic metrics for unknown problem types."""
+    with st.expander("Detailed Metrics", expanded=True):
+        for key, value in metrics.items():
+            if key in ('objective_value', 'objective_name'):
+                continue  # Already displayed in header
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                st.write(f"**{key.replace('_', ' ').title()}:** {value:.2f}")
+            elif isinstance(value, dict):
+                st.write(f"**{key.replace('_', ' ').title()}:** (complex)")
+            else:
+                st.write(f"**{key.replace('_', ' ').title()}:** {value}")
+
+
+# ============================================================================
+# PERFORMANCE: Use fragment for map to prevent full page reruns
+# ============================================================================
+
+@st.fragment
+def render_map_fragment():
+    """Render map in a fragment to avoid full page reruns"""
+    if not st.session_state.problem_state["data"] and not st.session_state.problem_state["solution"]:
+        st.info("Upload data or start a conversation to see visualizations")
+        return
+    
+    try:
+        # Get visualization config if problem type is known
+        viz_config = None
+        if st.session_state.problem_state["problem_type"]:
+            problem_solver = problem_registry.get_problem(st.session_state.problem_state["problem_type"])
+            if problem_solver:
+                viz_config = problem_solver.get_visualization_config()
+        
+        # Optional UI toggle to show service areas when radius is available
+        try:
+            current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
+            params = st.session_state.problem_state.get("parameters", {})
+            sol = st.session_state.problem_state.get("solution", {}) or {}
+            metrics = sol.get("metrics", {})
+            service_radius = params.get("service_radius") or metrics.get("service_radius")
+            if service_radius is not None and current_problem in ["mclp", "lscp"]:
+                show_radius = st.checkbox("Show service radius", value=True, key="show_service_radius_frag")
+                if viz_config is None:
+                    viz_config = {}
+                viz_config["show_service_areas"] = bool(show_radius)
+        except Exception:
+            pass
+
+        # Generate candidate sites once for visualization if missing and persist
+        try:
+            data_items = st.session_state.problem_state["data"]
+            data_processor = st.session_state.data_processor
+            has_demand_viz = False
+            has_candidates_viz = False
+            for fname, fgdf in data_items.items():
+                dtype = data_processor.identify_data_type(fgdf)
+                if dtype == "demand_points" or "demand" in fname.lower():
+                    has_demand_viz = True
+                if dtype == "candidate_sites" or any(w in fname.lower() for w in ["candidate", "site", "facility"]):
+                    has_candidates_viz = True
+
+            if has_demand_viz and not has_candidates_viz and "generated_candidates" not in data_items:
+                demand_gdf_viz = None
+                for fname, fgdf in data_items.items():
+                    dtype = data_processor.identify_data_type(fgdf)
+                    if dtype == "demand_points" or "demand" in fname.lower():
+                        demand_gdf_viz = fgdf
+                        break
+                if demand_gdf_viz is not None and len(demand_gdf_viz) > 0:
+                    num_sites = st.session_state.get("generated_sites_count", 100)
+                    random_seed = st.session_state.get("generated_sites_seed", None)
+                    generated_candidates_viz = data_processor.generate_candidate_sites(
+                        demand_gdf_viz,
+                        num_sites=num_sites,
+                        random_seed=random_seed
+                    )
+                    st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates_viz
+        except Exception as viz_gen_err:
+            logger.warning(f"Could not auto-generate candidate sites for visualization: {viz_gen_err}")
+        
+        # Map data to expected format for visualizer
+        data_processor = st.session_state.data_processor
+        mapped_data = {}
+        
+        for file_name, gdf in st.session_state.problem_state["data"].items():
+            data_type = data_processor.identify_data_type(gdf)
+            
+            if data_type == "demand_points" or "demand" in file_name.lower():
+                mapped_data["demand_points"] = gdf
+            elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
+                mapped_data["candidate_sites"] = gdf
+            elif "demand_points" not in mapped_data:
+                mapped_data["demand_points"] = gdf
+            elif "candidate_sites" not in mapped_data:
+                mapped_data["candidate_sites"] = gdf
+        
+        # Prepare parameters with service radius unit from solution
+        parameters = st.session_state.problem_state.get("parameters", {}).copy()
+        solution = st.session_state.problem_state["solution"]
+        if solution and "service_radius_unit" in solution:
+            parameters["service_radius_unit"] = solution["service_radius_unit"]
+        
+        # Choose map renderer based on user preference
+        if st.session_state.get("map_renderer", "pydeck") == "pydeck":
+            # Get basemap style from session state
+            basemap_style = st.session_state.get("basemap_style", "light")
+            
+            deck = st.session_state.pydeck_visualizer.create_map(
+                data=mapped_data,
+                solution=solution,
+                problem_type=st.session_state.problem_state["problem_type"],
+                viz_config=viz_config,
+                parameters=parameters,
+                constraints=st.session_state.problem_state.get("constraints", {}),
+                basemap_style=basemap_style
+            )
+            st.pydeck_chart(deck, height=500, width="stretch")
+        else:
+            map_obj = st.session_state.map_visualizer.create_map(
+                data=mapped_data,
+                solution=solution,
+                problem_type=st.session_state.problem_state["problem_type"],
+                viz_config=viz_config,
+                parameters=parameters,
+                constraints=st.session_state.problem_state.get("constraints", {}),
+                raster_data=st.session_state.get("raster_data", {})
+            )
+            st_folium(map_obj, width=700, height=500, key="map_frag")
+    
+    except Exception as e:
+        st.error(f"Error creating map: {e}")
+        logger.error(f"Map error: {e}", exc_info=True)
+    
+
 
 with col1:
     st.subheader("Conversation")
@@ -633,217 +1035,91 @@ with col1:
 with col2:
     st.subheader("Visualization")
     
-    # Map display
-    if st.session_state.problem_state["data"] or st.session_state.problem_state["solution"]:
-        try:
-            # Get visualization config if problem type is known
-            viz_config = None
-            if st.session_state.problem_state["problem_type"]:
-                problem_solver = problem_registry.get_problem(st.session_state.problem_state["problem_type"])
-                if problem_solver:
-                    viz_config = problem_solver.get_visualization_config()
-            
-            # Optional UI toggle to show service areas when radius is available
-            try:
-                current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
-                params = st.session_state.problem_state.get("parameters", {})
-                sol = st.session_state.problem_state.get("solution", {}) or {}
-                metrics = sol.get("metrics", {})
-                service_radius = params.get("service_radius") or metrics.get("service_radius")
-                if service_radius is not None and current_problem in ["mclp", "lscp"]:
-                    show_radius = st.checkbox("Show service radius", value=True, key="show_service_radius")
-                    if viz_config is None:
-                        viz_config = {}
-                    viz_config["show_service_areas"] = bool(show_radius)
-            except Exception:
-                pass
-
-            # Generate candidate sites once for visualization if missing and persist
-            try:
-                data_items = st.session_state.problem_state["data"]
-                data_processor = st.session_state.data_processor
-                # Detect presence of demand and absence of any candidate sites in state
-                has_demand_viz = False
-                has_candidates_viz = False
-                for fname, fgdf in data_items.items():
-                    dtype = data_processor.identify_data_type(fgdf)
-                    if dtype == "demand_points" or "demand" in fname.lower():
-                        has_demand_viz = True
-                    if dtype == "candidate_sites" or any(w in fname.lower() for w in ["candidate", "site", "facility"]):
-                        has_candidates_viz = True
-
-                # Only generate if no candidates exist and none previously generated/persisted
-                if has_demand_viz and not has_candidates_viz and "generated_candidates" not in data_items:
-                    # Use first demand dataset to derive extent
-                    demand_gdf_viz = None
-                    for fname, fgdf in data_items.items():
-                        dtype = data_processor.identify_data_type(fgdf)
-                        if dtype == "demand_points" or "demand" in fname.lower():
-                            demand_gdf_viz = fgdf
-                            break
-                    if demand_gdf_viz is not None and len(demand_gdf_viz) > 0:
-                        num_sites = st.session_state.get("generated_sites_count", 100)
-                        random_seed = st.session_state.get("generated_sites_seed", None)
-                        generated_candidates_viz = data_processor.generate_candidate_sites(
-                            demand_gdf_viz,
-                            num_sites=num_sites,
-                            random_seed=random_seed
-                        )
-                        # Persist once for reuse (and so map renders them)
-                        st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates_viz
-            except Exception as viz_gen_err:
-                logger.warning(f"Could not auto-generate candidate sites for visualization: {viz_gen_err}")
-            
-            # Map data to expected format for visualizer
-            data_processor = st.session_state.data_processor
-            mapped_data = {}
-            
-            for file_name, gdf in st.session_state.problem_state["data"].items():
-                data_type = data_processor.identify_data_type(gdf)
-                
-                if data_type == "demand_points" or "demand" in file_name.lower():
-                    mapped_data["demand_points"] = gdf
-                elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
-                    mapped_data["candidate_sites"] = gdf
-                elif "demand_points" not in mapped_data:
-                    # Assume first dataset is demand
-                    mapped_data["demand_points"] = gdf
-                elif "candidate_sites" not in mapped_data:
-                    # Assume second dataset is candidates
-                    mapped_data["candidate_sites"] = gdf
-            
-            # Prepare parameters with user unit hint from solution
-            parameters = st.session_state.problem_state.get("parameters", {}).copy()
-            solution = st.session_state.problem_state["solution"]
-            if solution and "user_unit_hint" in solution:
-                parameters["user_unit_hint"] = solution["user_unit_hint"]
-            
-            # Create map with optional raster overlay
-            map_obj = st.session_state.map_visualizer.create_map(
-                data=mapped_data,
-                solution=solution,
-                problem_type=st.session_state.problem_state["problem_type"],
-                viz_config=viz_config,
-                parameters=parameters,
-                constraints=st.session_state.problem_state.get("constraints", {}),
-                raster_data=st.session_state.get("raster_data", {})
-            )
-            
-            # Display map
-            st_folium(map_obj, width=700, height=500, key="map")
-        
-        except Exception as e:
-            st.error(f"Error creating map: {e}")
-            logger.error(f"Map error: {e}", exc_info=True)
-        
-        # Metrics dashboard
-        if st.session_state.problem_state["solution"]:
-            st.divider()
-            st.subheader("Solution Metrics")
-            
-            solution = st.session_state.problem_state["solution"]
-            
-            if solution.get('status') in ['optimal', 'feasible']:
-                metrics = solution.get("metrics", {})
-                
-                # Display key metrics in columns
-                metric_cols = st.columns(3)
-                
-                with metric_cols[0]:
-                    obj_val = solution.get('objective_value', 0)
-                    if obj_val is not None:
-                        st.metric(
-                            "Objective Value",
-                            f"{obj_val:.2f}"
-                        )
-                
-                with metric_cols[1]:
-                    st.metric(
-                        "Solution Status",
-                        solution.get('status', 'Unknown').title()
-                    )
-                
-                with metric_cols[2]:
-                    st.metric(
-                        "Solution Time",
-                        f"{solution.get('solution_time', 0):.2f}s"
-                    )
-                
-                # Additional metrics
-                with st.expander("Detailed Metrics"):
-                    for key, value in metrics.items():
-                        if isinstance(value, (int, float)):
-                            st.write(f"**{key.replace('_', ' ').title()}:** {value:.2f}")
-                        else:
-                            st.write(f"**{key.replace('_', ' ').title()}:** {value}")
-                
-                # Export options
-                st.divider()
-                st.subheader("Export Solution")
-                
-                export_col1, export_col2, export_col3 = st.columns(3)
-                
-                with export_col1:
-                    if st.button("Export GeoJSON"):
-                        try:
-                            geojson_data = st.session_state.export_handler.export_solution_geojson(
-                                solution, st.session_state.problem_state["data"]
-                            )
-                            st.download_button(
-                                "Download GeoJSON",
-                                geojson_data,
-                                "solution.geojson",
-                                "application/geo+json"
-                            )
-                        except Exception as e:
-                            st.error(f"Export error: {e}")
-                
-                with export_col2:
-                    if st.button("Export CSV"):
-                        try:
-                            csv_data = st.session_state.export_handler.export_solution_csv(solution)
-                            st.download_button(
-                                "Download CSV",
-                                csv_data,
-                                "solution.csv",
-                                "text/csv"
-                            )
-                        except Exception as e:
-                            st.error(f"Export error: {e}")
-                
-                with export_col3:
-                    if st.button("Generate PDF Report"):
-                        try:
-                            problem_metadata = {}
-                            if st.session_state.problem_state["problem_type"]:
-                                problem_solver = problem_registry.get_problem(
-                                    st.session_state.problem_state["problem_type"]
-                                )
-                                if problem_solver:
-                                    problem_metadata = problem_solver.get_metadata()
-                            
-                            pdf_data = st.session_state.export_handler.generate_pdf_report(
-                                solution,
-                                problem_metadata,
-                                st.session_state.problem_state["parameters"]
-                            )
-                            st.download_button(
-                                "Download PDF",
-                                pdf_data,
-                                "solution_report.pdf",
-                                "application/pdf"
-                            )
-                        except Exception as e:
-                            st.error(f"PDF generation error: {e}")
-            else:
-                st.warning(f"Solution status: {solution.get('status', 'Unknown')}")
-                if solution.get('error'):
-                    st.error(solution['error'])
+    # Use fragment for map rendering to prevent full page reruns
+    render_map_fragment()
     
-    else:
-        st.info("Upload data or start a conversation to see visualizations")
+    # Metrics dashboard (outside fragment to ensure it updates)
+    if st.session_state.problem_state["solution"]:
+        st.divider()
+        st.subheader("Solution Metrics")
         
-        # Show example
+        solution = st.session_state.problem_state["solution"]
+        problem_type = (st.session_state.problem_state.get("problem_type") or "").lower()
+        
+        if solution.get('status') in ['optimal', 'feasible']:
+            metrics = solution.get("metrics", {})
+            
+            # Display problem-specific key metrics
+            _display_problem_metrics(problem_type, solution, metrics)
+        else:
+            st.warning(f"Solution status: {solution.get('status', 'Unknown')}")
+            if solution.get('error'):
+                st.error(solution['error'])
+    
+    # Export options (outside fragment to avoid key conflicts)
+    if st.session_state.problem_state["solution"]:
+        solution = st.session_state.problem_state["solution"]
+        if solution.get('status') in ['optimal', 'feasible']:
+            st.divider()
+            st.subheader("Export Solution")
+            
+            export_col1, export_col2, export_col3 = st.columns(3)
+            
+            with export_col1:
+                if st.button("Export GeoJSON"):
+                    try:
+                        geojson_data = st.session_state.export_handler.export_solution_geojson(
+                            solution, st.session_state.problem_state["data"]
+                        )
+                        st.download_button(
+                            "Download GeoJSON",
+                            geojson_data,
+                            "solution.geojson",
+                            "application/geo+json"
+                        )
+                    except Exception as e:
+                        st.error(f"Export error: {e}")
+            
+            with export_col2:
+                if st.button("Export CSV"):
+                    try:
+                        csv_data = st.session_state.export_handler.export_solution_csv(solution)
+                        st.download_button(
+                            "Download CSV",
+                            csv_data,
+                            "solution.csv",
+                            "text/csv"
+                        )
+                    except Exception as e:
+                        st.error(f"Export error: {e}")
+            
+            with export_col3:
+                if st.button("Generate PDF Report"):
+                    try:
+                        problem_metadata = {}
+                        if st.session_state.problem_state["problem_type"]:
+                            problem_solver = problem_registry.get_problem(
+                                st.session_state.problem_state["problem_type"]
+                            )
+                            if problem_solver:
+                                problem_metadata = problem_solver.get_metadata()
+                        
+                        pdf_data = st.session_state.export_handler.generate_pdf_report(
+                            solution,
+                            problem_metadata,
+                            st.session_state.problem_state["parameters"]
+                        )
+                        st.download_button(
+                            "Download PDF",
+                            pdf_data,
+                            "solution_report.pdf",
+                            "application/pdf"
+                        )
+                    except Exception as e:
+                        st.error(f"PDF generation error: {e}")
+    
+    # Quick start guide when no data
+    if not st.session_state.problem_state["data"] and not st.session_state.problem_state["solution"]:
         with st.expander("Quick Start Guide"):
             st.markdown("""
             **Step 1: Upload Data**

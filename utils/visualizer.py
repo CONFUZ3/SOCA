@@ -138,12 +138,12 @@ class MapVisualizer:
                 selected_indices = solution.get('selected_facilities', [])
                 service_radius = solution.get('metrics', {}).get('service_radius')
                 if service_radius:
-                    # Get user unit hint from parameters if available
-                    user_unit_hint = None
-                    if parameters and 'user_unit_hint' in parameters:
-                        user_unit_hint = parameters['user_unit_hint']
+                    # Get service radius unit from parameters if available
+                    service_radius_unit = None
+                    if parameters and 'service_radius_unit' in parameters:
+                        service_radius_unit = parameters['service_radius_unit']
                     
-                    self._add_service_areas(m, candidate_gdf, selected_indices, service_radius, viz_config, user_unit_hint)
+                    self._add_service_areas(m, candidate_gdf, selected_indices, service_radius, viz_config, service_radius_unit)
             
             # Add legend
             self._add_legend(
@@ -432,18 +432,18 @@ class MapVisualizer:
         selected_indices: List[int],
         radius: float,
         viz_config: Dict[str, Any],
-        user_unit_hint: str = None
+        service_radius_unit: str = None
     ):
-        """Add service area circles around facilities with user-friendly unit conversion"""
+        """Add service area circles around facilities"""
         service_layer = folium.FeatureGroup(name='Service Areas')
         
-        # Use the same smart unit conversion as distance calculator
+        # Convert radius to meters using explicit unit
         from utils.distance_calculator import DistanceCalculator
         dist_calc = DistanceCalculator()
-        radius_meters, unit_description = dist_calc._smart_unit_conversion(radius, facility_gdf, user_unit_hint)
+        radius_meters = dist_calc._convert_to_meters(radius, service_radius_unit)
         
         # Log the conversion for consistency
-        logger.info(f"Visualization radius conversion: {unit_description}")
+        logger.info(f"Visualization radius: {radius} {service_radius_unit or 'meters'} = {radius_meters:.0f} meters")
         
         for pos_idx in selected_indices:
             # Use positional indexing - selected_indices are positional indices from solver

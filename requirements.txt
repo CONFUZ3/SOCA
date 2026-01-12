@@ -1,25 +1,27 @@
 # Core
-streamlit==1.50.0              # latest as of Sep 2025 :contentReference[oaicite:0]{index=0}  
-python-dotenv==1.0.0           # still stable, no major update
+streamlit>=1.32.0              # flexible version for compatibility
+python-dotenv>=1.0.0           # environment variables
 
 # Google Gemini
 google-generativeai>=0.8.0     # latest Gemini API SDK
 
 # Geospatial
-geopandas==1.1.1               # latest release on PyPI :contentReference[oaicite:1]{index=1}  
-shapely==2.1.2                 # latest stable for geometry operations :contentReference[oaicite:2]{index=2}  
-folium>=0.15.1                 # stay with your existing or allow minor updates  
-streamlit-folium>=0.18.0       # to ensure compatibility with new streamlit  
-pyproj>=3.6.1                  # allow minor upgrades, maintain compatibility with geopandas
-rasterio>=1.3.0                # for raster/satellite imagery support
+geopandas>=1.0.0               # flexible version (uses pyogrio by default, no fiona needed)
+shapely>=2.0.0                 # geometry operations  
+folium>=0.15.1                 # map visualization  
+streamlit-folium>=0.18.0       # streamlit integration  
+pyproj>=3.5.0                  # coordinate transformations
+pyogrio>=0.7.0                 # fast geospatial I/O (replaces fiona)
+# rasterio>=1.3.0              # OPTIONAL: raster/satellite imagery (may need manual install on Windows)
 
 # Optimization
-spopt>=0.5.0                    # keep minimal constraint  
-libpysal>=4.9.2                 # allow newer patches  
-gurobipy>=11.0.0                # stay with major version 11 if your Gurobi license allows  
-pulp>=2.8.0                     # allow newer patches  
-scipy>=1.12.0                   # latest major you had  
-networkx>=3.2.1                 # allow newer minor updates
+spopt>=0.5.0                    # spatial optimization  
+libpysal>=4.10.0                # spatial data structures (lighter than full pysal)
+# pysal>=24.1                   # OPTIONAL: full pysal suite (requires GDAL/fiona on Windows)
+# gurobipy>=11.0.0              # OPTIONAL: install manually if you have a Gurobi license  
+pulp>=2.8.0                     # linear programming solver  
+scipy>=1.12.0                   # scientific computing  
+networkx>=3.2.1                 # network analysis
 
 # Data processing
 pandas>=2.2.0                    # allow upgrades but be cautious with breaking changes  
@@ -44,6 +46,6 @@ pytest-cov>=4.1.0                # allow newer
 # Performance monitoring
 psutil>=5.9.0                    # system metrics monitoring
 
-# Future enhancements
-osmnx>=1.9.1                     # allow minor upgrades  
-contextily>=1.5.2                # allow newer patches  
+# Future enhancements (optional - may require additional system dependencies)
+# osmnx>=1.9.1                   # OPTIONAL: OpenStreetMap network analysis  
+# contextily>=1.5.2              # OPTIONAL: basemap tiles

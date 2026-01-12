@@ -209,17 +209,8 @@ Where:
             ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
             logger.info(f"MCLP: Fallback time limit set to {fallback_time_limit:.2f} seconds, GA time budget: {ga_time_budget:.2f} seconds")
             
-            # Get user unit hint for visualization consistency
-            user_unit_hint = None
-            if 'unit_info' in shared_data:
-                unit_info = shared_data['unit_info']
-                if unit_info.get('needs_user_confirmation', False):
-                    # Extract the recommended unit from suggestions
-                    suggestions = unit_info.get('suggestions', {})
-                    if 'suggestions' in suggestions and suggestions['suggestions']:
-                        recommended = next((s for s in suggestions['suggestions'] if s.get('recommended', False)), None)
-                        if recommended:
-                            user_unit_hint = recommended.get('unit', 'km')
+            # Get service radius unit for visualization consistency
+            service_radius_unit = shared_data.get('service_radius_unit', 'm')
             
             variant = parameters.get('variant', 'classical')
             logger.info(f"MCLP Solver: Using variant '{variant}' with parameters: {parameters}")
@@ -320,12 +311,12 @@ Where:
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
                 "variant_used": variant,
-                "user_unit_hint": user_unit_hint,  # Pass unit hint for visualization
+                "service_radius_unit": service_radius_unit,  # Pass unit for visualization
                 "academic_metadata": {
                     "algorithm_used": "Mixed Integer Programming (MIP)",
                     "references": self.get_metadata()['academic_refs'][:2],
                     "assumptions": [
-                        f"Service radius: {shared_data['service_radius']}",
+                        f"Service radius: {shared_data['service_radius']} {service_radius_unit}",
                         "Demand covered if within service radius of any facility",
                         f"Distance metric: {distance_metric}",
                         f"MCLP variant: {variant}",
@@ -395,26 +386,23 @@ Where:
             raise ValueError("Both demand_points and candidate_sites are required")
         
         service_radius = float(parameters['service_radius'])
+        # Get explicit unit from parameters (default to 'm' if not specified)
+        service_radius_unit = parameters.get('service_radius_unit', 'm')
         
         # Get demand weights
         demand_weights = self._extract_weights(demand_gdf, parameters)
         
-        # Calculate coverage and distance matrices with user-friendly unit conversion
+        # Calculate coverage and distance matrices
         dist_calc = DistanceCalculator()
         
-        # Get unit conversion info and suggestions for user
-        unit_info = dist_calc.get_unit_info(service_radius, demand_gdf)
-        
-        # Check if user confirmation is needed
-        if unit_info.get('needs_user_confirmation', False):
-            logger.info(f"Unit confirmation needed: {unit_info['user_message']}")
-            # In a real app, this would trigger a user interface for confirmation
-            # For now, we'll use the auto-detected conversion but log the need for confirmation
+        # Get unit conversion info
+        unit_info = dist_calc.get_unit_info(service_radius, service_radius_unit)
         
         coverage_matrix = dist_calc.calculate_coverage_matrix(
             demand_gdf, candidate_gdf, 
             threshold=service_radius,
-            metric=distance_metric
+            metric=distance_metric,
+            unit=service_radius_unit
         )
         
         distance_matrix = dist_calc.calculate_distance_matrix(
@@ -432,9 +420,10 @@ Where:
             'distance_matrix': distance_matrix,
             'demand_weights': demand_weights,
             'service_radius': service_radius,
+            'service_radius_unit': service_radius_unit,
             'facility_costs': facility_costs,
             'capacities': capacities,
-            'unit_info': unit_info  # Include unit info for user hint extraction
+            'unit_info': unit_info
         }
     
     def _solve_variant(

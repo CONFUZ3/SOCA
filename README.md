@@ -69,6 +69,13 @@ GEMINI_API_KEY = "your_api_key_here"
 python tests/generate_test_data.py
 ```
 
+   Or download real-world test datasets:
+```bash
+pip install requests  # if not already installed
+python download_test_datasets.py
+```
+   See [DATASETS.md](DATASETS.md) for more dataset sources and options.
+
 6. **Run the application**
 ```bash
 streamlit run app.py

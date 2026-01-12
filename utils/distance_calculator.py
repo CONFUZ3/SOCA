@@ -1,22 +1,28 @@
 import numpy as np
 import geopandas as gpd
 from scipy.spatial.distance import cdist
-from typing import Optional, Any, Dict, Tuple
+from pyproj import Geod
+from typing import Optional, Any, Dict
 import logging
 import hashlib
-from functools import lru_cache
 
 logger = logging.getLogger(__name__)
 
+
 class DistanceCalculator:
-    """Computes distance matrices using various metrics with caching for performance"""
+    """Computes distance matrices using various metrics with caching for performance.
+    
+    Uses geodesic calculations for geographic coordinates (lat/lon) to ensure
+    accurate distance measurements regardless of latitude.
+    """
     
     def __init__(self):
         self._cache: Dict[str, np.ndarray] = {}
         self._cache_max_size = 10  # Limit cache size
+        self._geod = Geod(ellps="WGS84")  # WGS84 ellipsoid for geodesic calculations
     
     def _looks_like_lonlat(self, gdf: gpd.GeoDataFrame) -> bool:
-        """Improved detection of lat/lon coordinates with better heuristics"""
+        """Detect if coordinates appear to be geographic (lon/lat)."""
         try:
             xs = [geom.x for geom in gdf.geometry]
             ys = [geom.y for geom in gdf.geometry]
@@ -26,25 +32,29 @@ class DistanceCalculator:
             x_range = max(xs) - min(xs)
             y_range = max(ys) - min(ys)
             
-            # More robust lat/lon detection
+            # Check if coordinates fall within valid lon/lat bounds
             is_lonlat_bounds = (
                 min(xs) >= -180 and max(xs) <= 180 and
                 min(ys) >= -90 and max(ys) <= 90
             )
             
-            # Additional heuristics to avoid false positives
+            # Additional heuristics to avoid false positives with projected coordinates
             is_reasonable_geographic_extent = (
-                x_range < 360 and y_range < 180 and  # Reasonable geographic extent
-                not (min(xs) > 0 and max(xs) < 1000 and min(ys) > 0 and max(ys) < 1000)  # Avoid UTM-like coordinates
+                x_range < 360 and y_range < 180 and
+                not (min(xs) > 0 and max(xs) < 1000 and min(ys) > 0 and max(ys) < 1000)
             )
-            
-            # Debug output (can be removed in production)
-            # logger.debug(f"Lat/lon detection: bounds={is_lonlat_bounds}, extent={is_reasonable_geographic_extent}, "
-            #             f"x_range={x_range:.3f}, y_range={y_range:.3f}")
             
             return is_lonlat_bounds and is_reasonable_geographic_extent
         except Exception:
             return False
+    
+    def _is_geographic(self, gdf: gpd.GeoDataFrame) -> bool:
+        """Check if GeoDataFrame has geographic CRS or appears to be lon/lat."""
+        if gdf.crs and gdf.crs.is_geographic:
+            return True
+        if gdf.crs is None and self._looks_like_lonlat(gdf):
+            return True
+        return False
     
     def _generate_cache_key(
         self, 
@@ -52,16 +62,19 @@ class DistanceCalculator:
         destinations: gpd.GeoDataFrame, 
         metric: str
     ) -> str:
-        """Generate cache key for distance matrix"""
-        # Create hash from geometry coordinates and metric
+        """Generate cache key for distance matrix including CRS information."""
         origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
         dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
         
-        key_data = f"{origin_coords.tobytes()}{dest_coords.tobytes()}{metric}"
+        # Include CRS in cache key to avoid incorrect cached results
+        origin_crs = str(origins.crs) if origins.crs else "None"
+        dest_crs = str(destinations.crs) if destinations.crs else "None"
+        
+        key_data = f"{origin_coords.tobytes()}{dest_coords.tobytes()}{metric}{origin_crs}{dest_crs}"
         return hashlib.md5(key_data.encode()).hexdigest()
     
     def _manage_cache(self, key: str, value: np.ndarray):
-        """Manage cache size and add new entry"""
+        """Manage cache size and add new entry."""
         if len(self._cache) >= self._cache_max_size:
             # Remove oldest entry (simple FIFO)
             oldest_key = next(iter(self._cache))
@@ -69,105 +82,90 @@ class DistanceCalculator:
         
         self._cache[key] = value
     
-    def _smart_unit_conversion(self, threshold: float, gdf: gpd.GeoDataFrame, user_unit_hint: str = None) -> tuple[float, str]:
-        """
-        Smart unit detection and conversion for service radius.
-        Returns (converted_value_in_meters, unit_description)
-        """
-        # If user provided a unit hint, use it
-        if user_unit_hint:
-            if user_unit_hint.lower() in ['km', 'kilometers', 'kilometer']:
-                meters = threshold * 1000
-                return meters, f"{threshold} km -> {meters:.0f} m (user specified kilometers)"
-            elif user_unit_hint.lower() in ['m', 'meters', 'meter']:
-                return threshold, f"{threshold} m (user specified meters)"
+    def _convert_to_meters(self, threshold: float, unit: Optional[str] = None) -> float:
+        """Convert threshold to meters. Requires explicit unit specification.
         
-        # For ambiguous cases, be conservative and ask user to specify
-        # Don't auto-assume units based on coordinate system
-        if self._looks_like_lonlat(gdf):
-            # For lat/lon data, be conservative - don't assume units
-            # Return meters as default but flag for user confirmation
-            return threshold, f"{threshold} m (default - please confirm units for lat/lon data)"
-        else:
-            # For projected coordinates, meters is usually correct
-            return threshold, f"{threshold} m (projected coordinates detected)"
-    
-    def _suggest_units_for_user(self, threshold: float, gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
-        """
-        Suggest appropriate units to the user based on data characteristics.
-        Returns suggestions for user confirmation.
-        """
-        # Analyze the data to make intelligent suggestions
-        bounds = gdf.total_bounds
-        x_range = bounds[2] - bounds[0]
-        y_range = bounds[3] - bounds[1]
-        max_extent = max(x_range, y_range)
-        
-        suggestions = {
-            "threshold": threshold,
-            "data_extent_km": max_extent * 111 if self._looks_like_lonlat(gdf) else max_extent / 1000,  # Rough conversion
-            "suggestions": []
-        }
-        
-        # For lat/lon data, be neutral and ask user to specify
-        if self._looks_like_lonlat(gdf):
-            suggestions["suggestions"].append({
-                "unit": "meters",
-                "value": threshold,
-                "converted_meters": threshold,
-                "reason": "Most common for service radius values (e.g., 3000m = 3km)",
-                "recommended": True
-            })
-            suggestions["suggestions"].append({
-                "unit": "kilometers", 
-                "value": threshold,
-                "converted_meters": threshold * 1000,
-                "reason": "If you meant a very large service area (e.g., 3000km)",
-                "recommended": False
-            })
-        else:
-            suggestions["suggestions"].append({
-                "unit": "meters",
-                "value": threshold,
-                "converted_meters": threshold,
-                "reason": "Your data appears to be in a projected coordinate system",
-                "recommended": True
-            })
-            suggestions["suggestions"].append({
-                "unit": "kilometers",
-                "value": threshold,
-                "converted_meters": threshold * 1000,
-                "reason": "If you meant a very large service area",
-                "recommended": False
-            })
-        
-        return suggestions
-    
-    def _detect_reasonable_threshold(self, threshold: float, gdf: gpd.GeoDataFrame) -> bool:
-        """
-        Detect if threshold value seems reasonable for the data extent.
-        Helps catch unit mistakes (e.g., 3000 km when user meant 3000 m).
-        """
-        try:
-            # Get data bounds
-            bounds = gdf.total_bounds  # [minx, miny, maxx, maxy]
-            x_range = bounds[2] - bounds[0]
-            y_range = bounds[3] - bounds[1]
-            max_extent = max(x_range, y_range)
+        Args:
+            threshold: The threshold value to convert
+            unit: Unit specification ('m', 'km', 'miles'). If None, assumes meters with warning.
             
-            # If threshold is much larger than data extent, it might be wrong units
-            if gdf.crs and gdf.crs.is_geographic:
-                # For geographic data, threshold in km should be reasonable
-                if threshold > max_extent * 10:  # 10x data extent seems too large
-                    return False
-            else:
-                # For projected data, threshold in meters should be reasonable
-                if threshold > max_extent * 10:  # 10x data extent seems too large
-                    return False
-            
-            return True
-        except Exception:
-            return True  # If we can't determine, assume it's reasonable
+        Returns:
+            Threshold value in meters
+        """
+        if unit is None:
+            logger.warning(
+                f"No unit specified for threshold {threshold}. Assuming meters. "
+                "Specify unit explicitly (e.g., 'km', 'm', 'miles') to avoid ambiguity."
+            )
+            return threshold
+        
+        unit = unit.lower().strip()
+        if unit in ('m', 'meter', 'meters'):
+            return threshold
+        elif unit in ('km', 'kilometer', 'kilometers'):
+            return threshold * 1000
+        elif unit in ('mi', 'mile', 'miles'):
+            return threshold * 1609.34
+        else:
+            raise ValueError(f"Unknown unit: {unit}. Use 'm', 'km', or 'miles'.")
+    
+    def _geodesic_distance_matrix(
+        self, 
+        origins: gpd.GeoDataFrame, 
+        destinations: gpd.GeoDataFrame
+    ) -> np.ndarray:
+        """Calculate geodesic distances for geographic coordinates (lat/lon).
+        
+        Uses pyproj.Geod with WGS84 ellipsoid for accurate distance calculations
+        that account for Earth's curvature, unlike EPSG:3857 which has significant
+        distance distortion at higher latitudes.
+        
+        Returns:
+            Distance matrix in meters with shape (len(origins), len(destinations))
+        """
+        origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
+        dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
+        
+        n_origins = len(origin_coords)
+        n_dests = len(dest_coords)
+        distances = np.zeros((n_origins, n_dests))
+        
+        for i, (ox, oy) in enumerate(origin_coords):
+            for j, (dx, dy) in enumerate(dest_coords):
+                # geod.inv returns (forward_azimuth, back_azimuth, distance_in_meters)
+                _, _, dist = self._geod.inv(ox, oy, dx, dy)
+                distances[i, j] = dist
+        
+        return distances
+    
+    def _geodesic_manhattan_distance_matrix(
+        self, 
+        origins: gpd.GeoDataFrame, 
+        destinations: gpd.GeoDataFrame
+    ) -> np.ndarray:
+        """Calculate Manhattan-style geodesic distances for geographic coordinates.
+        
+        Computes the sum of east-west and north-south geodesic distances.
+        
+        Returns:
+            Distance matrix in meters with shape (len(origins), len(destinations))
+        """
+        origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
+        dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
+        
+        n_origins = len(origin_coords)
+        n_dests = len(dest_coords)
+        distances = np.zeros((n_origins, n_dests))
+        
+        for i, (ox, oy) in enumerate(origin_coords):
+            for j, (dx, dy) in enumerate(dest_coords):
+                # East-West distance (same latitude)
+                _, _, dist_ew = self._geod.inv(ox, oy, dx, oy)
+                # North-South distance (same longitude)
+                _, _, dist_ns = self._geod.inv(dx, oy, dx, dy)
+                distances[i, j] = abs(dist_ew) + abs(dist_ns)
+        
+        return distances
     
     def calculate_distance_matrix(
         self,
@@ -176,8 +174,11 @@ class DistanceCalculator:
         metric: str = "euclidean",
         network_graph: Optional[Any] = None
     ) -> np.ndarray:
-        """
-        Calculate distance matrix with caching for performance.
+        """Calculate distance matrix with caching for performance.
+        
+        For geographic coordinates (lat/lon), uses geodesic calculations for
+        accurate distances. For projected coordinates, uses standard Euclidean
+        or Manhattan distance.
         
         Args:
             origins: GeoDataFrame of origin points
@@ -186,12 +187,12 @@ class DistanceCalculator:
             network_graph: Optional network graph for network distances
             
         Returns:
-            Distance matrix of shape (len(origins), len(destinations))
+            Distance matrix in meters with shape (len(origins), len(destinations))
         
         Metrics:
-        - euclidean: Straight-line distance
+        - euclidean: Straight-line distance (geodesic for geographic CRS)
         - manhattan: Grid-based distance (L1 norm)
-        - network: Road network distance (requires OSMnx)
+        - network: Road network distance (not implemented, falls back to euclidean)
         """
         # Check cache first
         cache_key = self._generate_cache_key(origins, destinations, metric)
@@ -203,29 +204,29 @@ class DistanceCalculator:
         if origins.crs and destinations.crs and origins.crs != destinations.crs:
             destinations = destinations.to_crs(origins.crs)
         
-        # Project to metric CRS if data is geographic or looks like lon/lat with missing CRS
-        if (origins.crs and origins.crs.is_geographic) or (origins.crs is None and self._looks_like_lonlat(origins)):
-            origins_proj = origins.to_crs("EPSG:3857") if origins.crs else origins.set_crs("EPSG:4326", inplace=False).to_crs("EPSG:3857")
-            if destinations.crs:
-                destinations_proj = destinations.to_crs("EPSG:3857")
-            else:
-                # Assume same as origins
-                destinations_proj = destinations.set_crs("EPSG:4326", inplace=False).to_crs("EPSG:3857")
-        else:
-            origins_proj = origins
-            destinations_proj = destinations
+        # Determine if we should use geodesic calculations
+        use_geodesic = self._is_geographic(origins)
         
-        # Calculate distance matrix
+        # Calculate distance matrix based on metric and coordinate system
         if metric == "euclidean":
-            result = self.euclidean_distance(origins_proj, destinations_proj)
+            if use_geodesic:
+                result = self._geodesic_distance_matrix(origins, destinations)
+            else:
+                result = self._euclidean_distance(origins, destinations)
         elif metric == "manhattan":
-            result = self.manhattan_distance(origins_proj, destinations_proj)
+            if use_geodesic:
+                result = self._geodesic_manhattan_distance_matrix(origins, destinations)
+            else:
+                result = self._manhattan_distance(origins, destinations)
         elif metric == "network":
             if network_graph is None:
                 logger.warning("Network graph not provided, falling back to Euclidean distance")
-                result = self.euclidean_distance(origins_proj, destinations_proj)
+                if use_geodesic:
+                    result = self._geodesic_distance_matrix(origins, destinations)
+                else:
+                    result = self._euclidean_distance(origins, destinations)
             else:
-                result = self.network_distance(origins_proj, destinations_proj, network_graph)
+                result = self._network_distance(origins, destinations, network_graph)
         else:
             raise ValueError(f"Unknown distance metric: {metric}. Use 'euclidean', 'manhattan', or 'network'")
         
@@ -233,20 +234,39 @@ class DistanceCalculator:
         self._manage_cache(cache_key, result)
         return result
     
+    def _euclidean_distance(
+        self, 
+        origins: gpd.GeoDataFrame, 
+        destinations: gpd.GeoDataFrame
+    ) -> np.ndarray:
+        """Vectorized Euclidean distance calculation for projected coordinates."""
+        origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
+        dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
+        
+        distances = cdist(origin_coords, dest_coords, metric='euclidean')
+        return distances
+    
+    # Keep public aliases for backward compatibility
     def euclidean_distance(
         self, 
         origins: gpd.GeoDataFrame, 
         destinations: gpd.GeoDataFrame
     ) -> np.ndarray:
-        """Vectorized Euclidean distance calculation"""
-        # Extract coordinates
+        """Euclidean distance calculation. Uses geodesic for geographic CRS."""
+        if self._is_geographic(origins):
+            return self._geodesic_distance_matrix(origins, destinations)
+        return self._euclidean_distance(origins, destinations)
+    
+    def _manhattan_distance(
+        self, 
+        origins: gpd.GeoDataFrame, 
+        destinations: gpd.GeoDataFrame
+    ) -> np.ndarray:
+        """Manhattan (L1) distance for projected coordinates."""
         origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
         dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
         
-        # Calculate pairwise Euclidean distances
-        distances = cdist(origin_coords, dest_coords, metric='euclidean')
-        # Note: We keep exact zeros for coincident points to ensure proper coverage calculation
-        
+        distances = cdist(origin_coords, dest_coords, metric='cityblock')
         return distances
     
     def manhattan_distance(
@@ -254,38 +274,23 @@ class DistanceCalculator:
         origins: gpd.GeoDataFrame, 
         destinations: gpd.GeoDataFrame
     ) -> np.ndarray:
-        """Manhattan (L1) distance"""
-        # Extract coordinates
-        origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
-        dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
-        
-        # Calculate pairwise Manhattan distances
-        distances = cdist(origin_coords, dest_coords, metric='cityblock')
-        
-        return distances
+        """Manhattan distance calculation. Uses geodesic for geographic CRS."""
+        if self._is_geographic(origins):
+            return self._geodesic_manhattan_distance_matrix(origins, destinations)
+        return self._manhattan_distance(origins, destinations)
     
-    def network_distance(
+    def _network_distance(
         self, 
         origins: gpd.GeoDataFrame, 
         destinations: gpd.GeoDataFrame, 
         network_graph
     ) -> np.ndarray:
-        """
-        Network-based distance using OSMnx.
-        For future implementation.
-        
-        This would use shortest path algorithms on a road network graph.
-        """
+        """Network-based distance using OSMnx (placeholder - not implemented)."""
         try:
             import osmnx as ox
             import networkx as nx
             
-            # This is a placeholder for future implementation
-            # Would need to:
-            # 1. Snap origin/destination points to nearest network nodes
-            # 2. Calculate shortest paths between all pairs
-            # 3. Return distance matrix
-            
+            # Placeholder for future implementation
             logger.warning("Network distance calculation not fully implemented yet. Using Euclidean as fallback.")
             return self.euclidean_distance(origins, destinations)
             
@@ -293,70 +298,61 @@ class DistanceCalculator:
             logger.error("OSMnx not installed. Install with: pip install osmnx")
             raise
     
+    # Keep public alias for backward compatibility
+    def network_distance(
+        self, 
+        origins: gpd.GeoDataFrame, 
+        destinations: gpd.GeoDataFrame, 
+        network_graph
+    ) -> np.ndarray:
+        """Network distance (not implemented, falls back to Euclidean)."""
+        return self._network_distance(origins, destinations, network_graph)
+    
     def calculate_coverage_matrix(
         self,
         origins: gpd.GeoDataFrame,
         destinations: gpd.GeoDataFrame,
         threshold: float,
         metric: str = "euclidean",
-        user_unit_hint: str = None
+        unit: Optional[str] = None
     ) -> np.ndarray:
-        """
-        Calculate binary coverage matrix with user-friendly unit conversion.
+        """Calculate binary coverage matrix.
         
         Args:
-            threshold: Service radius threshold
-            user_unit_hint: Optional hint from user about units ('km' or 'm')
+            origins: GeoDataFrame of origin points (demand points)
+            destinations: GeoDataFrame of destination points (candidate sites)
+            threshold: Service radius threshold value
+            metric: Distance metric ("euclidean", "manhattan", "network")
+            unit: Unit for threshold ('m', 'km', 'miles'). If None, assumes meters with warning.
         
         Returns:
             Binary matrix where 1 indicates destination is within threshold of origin
         """
         distances = self.calculate_distance_matrix(origins, destinations, metric)
         
-        # Use smart unit conversion with user hint
-        threshold_meters, unit_description = self._smart_unit_conversion(threshold, origins, user_unit_hint)
+        # Convert threshold to meters
+        threshold_meters = self._convert_to_meters(threshold, unit)
         
-        # Log the conversion for debugging
-        logger.info(f"Service radius conversion: {unit_description}")
-        
-        # Check if threshold seems reasonable
-        if not self._detect_reasonable_threshold(threshold, origins):
-            logger.warning(f"Service radius {threshold} seems unusually large for data extent. "
-                          f"Please verify units. Converted to {threshold_meters:.0f} meters.")
+        logger.info(f"Coverage threshold: {threshold} {unit or 'meters (assumed)'} = {threshold_meters:.0f} meters")
         
         coverage = (distances <= threshold_meters).astype(int)
         return coverage
     
-    def get_unit_info(self, threshold: float, gdf: gpd.GeoDataFrame) -> Dict[str, Any]:
-        """
-        Get user-friendly information about unit conversion with suggestions.
-        Returns a dictionary with conversion details and suggestions for users.
-        """
-        # Get suggestions for user confirmation
-        suggestions = self._suggest_units_for_user(threshold, gdf)
+    def get_unit_info(self, threshold: float, unit: Optional[str] = None) -> Dict[str, Any]:
+        """Get information about unit conversion.
         
-        # Get current conversion (auto-detected)
-        threshold_meters, unit_description = self._smart_unit_conversion(threshold, gdf)
-        is_reasonable = self._detect_reasonable_threshold(threshold, gdf)
+        Args:
+            threshold: The threshold value
+            unit: Unit specification ('m', 'km', 'miles')
+            
+        Returns:
+            Dictionary with conversion details
+        """
+        threshold_meters = self._convert_to_meters(threshold, unit)
         
         return {
             "input_value": threshold,
+            "input_unit": unit or "meters (assumed)",
             "converted_meters": threshold_meters,
-            "unit_description": unit_description,
-            "is_reasonable": is_reasonable,
-            "needs_user_confirmation": True,  # Always ask user to confirm
-            "suggestions": suggestions,
-            "user_message": self._generate_user_message(threshold, suggestions)
+            "unit_specified": unit is not None
         }
-    
-    def _generate_user_message(self, threshold: float, suggestions: Dict[str, Any]) -> str:
-        """Generate a user-friendly message about unit conversion"""
-        recommended = next((s for s in suggestions["suggestions"] if s["recommended"]), None)
-        if recommended:
-            return (f"Please confirm the units for your service radius of {threshold}. "
-                   f"I recommend treating it as {recommended['unit']} (converts to {recommended['converted_meters']:.0f} meters) "
-                   f"because {recommended['reason']}. "
-                   f"Please confirm this is correct, or specify if you meant a different unit.")
-        else:
-            return f"Please specify the units for your service radius of {threshold} (kilometers or meters)."
-

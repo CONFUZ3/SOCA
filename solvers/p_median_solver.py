@@ -773,12 +773,25 @@ Where:
             weight = demand_weights[demand_id]
             distances.append((dist, weight))
         
-        total_weighted_distance = sum(d * w for d, w in distances)
-        total_weight = sum(demand_weights)
-        average_distance = total_weighted_distance / total_weight if total_weight > 0 else 0
-        max_distance = max((d for d, w in distances), default=0)
+        total_weighted_distance = float(sum(d * w for d, w in distances))
+        total_weight = float(sum(demand_weights))
+        average_distance = total_weighted_distance / total_weight if total_weight > 0 else 0.0
+        max_distance = float(max((d for d, w in distances), default=0))
+        
+        # Determine objective value based on objective type
+        if objective_type == "average":
+            objective_value = average_distance
+            objective_name = "average_weighted_distance"
+        else:  # "total" is default
+            objective_value = total_weighted_distance
+            objective_name = "total_weighted_distance"
         
         return {
+            # Objective info for P-Median
+            "objective_value": objective_value,
+            "objective_name": objective_name,
+            "objective_type": objective_type,
+            # Core metrics
             "total_weighted_distance": total_weighted_distance,
             "average_distance": average_distance,
             "max_distance": max_distance,

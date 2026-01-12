@@ -344,7 +344,7 @@ class TestDistanceCalculator(unittest.TestCase):
     def test_coverage_matrix(self):
         """Test coverage matrix calculation"""
         coverage_matrix = self.calc.calculate_coverage_matrix(
-            self.origins, self.destinations, threshold=200000, metric="euclidean"
+            self.origins, self.destinations, threshold=200, metric="euclidean", unit="km"
         )
         
         self.assertEqual(coverage_matrix.shape, (3, 2))

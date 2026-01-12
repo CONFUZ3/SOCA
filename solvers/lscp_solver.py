@@ -128,30 +128,20 @@ Where:
                 raise ValueError("Both demand_points and candidate_sites are required")
             
             service_radius = parameters['service_radius']
+            # Get explicit unit from parameters (default to 'm' if not specified)
+            service_radius_unit = parameters.get('service_radius_unit', 'm')
             
-            # Calculate coverage matrix with user-friendly unit conversion
+            # Calculate coverage matrix
             dist_calc = DistanceCalculator()
             
-            # Get unit conversion info and suggestions for user
-            unit_info = dist_calc.get_unit_info(service_radius, demand_gdf)
-            
-            # Check if user confirmation is needed
-            user_unit_hint = None
-            if unit_info.get('needs_user_confirmation', False):
-                logger.info(f"Unit confirmation needed: {unit_info['user_message']}")
-                # In a real app, this would trigger a user interface for confirmation
-                # For now, we'll use the auto-detected conversion but log the need for confirmation
-                # Extract the recommended unit from suggestions
-                suggestions = unit_info.get('suggestions', {})
-                if 'suggestions' in suggestions and suggestions['suggestions']:
-                    recommended = next((s for s in suggestions['suggestions'] if s.get('recommended', False)), None)
-                    if recommended:
-                        user_unit_hint = recommended.get('unit', 'km')
+            # Get unit conversion info
+            unit_info = dist_calc.get_unit_info(service_radius, service_radius_unit)
             
             coverage_matrix = dist_calc.calculate_coverage_matrix(
                 demand_gdf, candidate_gdf,
                 threshold=service_radius,
-                metric=distance_metric
+                metric=distance_metric,
+                unit=service_radius_unit
             )
             
             distance_matrix = dist_calc.calculate_distance_matrix(
@@ -240,12 +230,12 @@ Where:
                 "metrics": metrics,
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
-                "user_unit_hint": user_unit_hint,  # Pass unit hint for visualization
+                "service_radius_unit": service_radius_unit,  # Pass unit for visualization
                 "academic_metadata": {
                     "algorithm_used": "Mixed Integer Programming (Set Cover)",
                     "references": self.get_metadata()['academic_refs'][:2],
                     "assumptions": [
-                        f"Service radius: {service_radius}",
+                        f"Service radius: {service_radius} {service_radius_unit}",
                         "All demand must be covered",
                         f"Distance metric: {distance_metric}",
                         "Facilities have unlimited capacity"
@@ -440,6 +430,7 @@ Where:
         service_radius: float
     ) -> Dict[str, float]:
         n_demand = coverage_matrix.shape[0]
+        num_facilities = len(selected_facilities)
         
         # All demands should be covered
         covered = np.zeros(n_demand, dtype=bool)
@@ -448,21 +439,32 @@ Where:
         
         coverage_pct = (np.sum(covered) / n_demand * 100) if n_demand > 0 else 0
         
+        # LSCP validation: coverage should be 100% for a valid solution
+        if coverage_pct < 100.0 and num_facilities > 0:
+            logger.warning(
+                f"LSCP solution has {coverage_pct:.1f}% coverage instead of 100%. "
+                f"This indicates a potential issue with the solution or data."
+            )
+        
         # Calculate distances
-        if len(selected_facilities) > 0:
+        if num_facilities > 0:
             min_distances = np.min(distance_matrix[:, selected_facilities], axis=1)
-            avg_distance = np.mean(min_distances)
-            max_distance = np.max(min_distances)
+            avg_distance = float(np.mean(min_distances))
+            max_distance = float(np.max(min_distances))
         else:
-            avg_distance = 0
-            max_distance = 0
+            avg_distance = 0.0
+            max_distance = 0.0
         
         return {
-            "num_facilities": len(selected_facilities),
-            "coverage_percentage": coverage_pct,
+            # Objective info for LSCP (minimize facilities)
+            "objective_value": float(num_facilities),
+            "objective_name": "min_facilities",
+            # Core metrics
+            "num_facilities": num_facilities,
+            "coverage_percentage": float(coverage_pct),
             "num_covered_points": int(np.sum(covered)),
             "num_uncovered_points": int(n_demand - np.sum(covered)),
-            "service_radius": service_radius,
+            "service_radius": float(service_radius),
             "average_distance": avg_distance,
             "max_distance": max_distance,
             "total_demand_points": n_demand

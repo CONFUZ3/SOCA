@@ -408,25 +408,59 @@ class ConversationManager:
                 updated_state['parameters']['n_facilities'] = n_facilities
                 break
         
-        # Check for service radius mentions
-        radius_patterns = [
+        # Check for service radius mentions - capture both value and unit
+        # Patterns with explicit units (capture unit in group 2)
+        radius_patterns_with_unit = [
+            r'within\s+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
+            r'(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)\s+radius',
+            r'radius\s+of\s+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
+            r'service_radius[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
+            r'service\s+radius[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
+            r'distance\s+threshold[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
+            r'(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)\s+service',
+        ]
+        # Patterns without explicit units (value only)
+        radius_patterns_no_unit = [
             r'radius\s+of\s+(\d+\.?\d*)',
             r'service_radius[:\s=]+(\d+\.?\d*)',
             r'service\s+radius[:\s=]+(\d+\.?\d*)',
             r'distance\s+threshold[:\s=]+(\d+\.?\d*)',
             r'maximum\s+distance[:\s=]+(\d+\.?\d*)',
             r'max\s+distance[:\s=]+(\d+\.?\d*)',
-            r'within\s+(\d+\.?\d*)\s+(km|miles?|meters?)',
-            r'(\d+\.?\d*)\s+(km|miles?|meters?)\s+radius'
         ]
-        for pattern in radius_patterns:
+        
+        radius_found = False
+        # First try patterns with units
+        for pattern in radius_patterns_with_unit:
             radius_match = re.search(pattern, response_lower)
             if radius_match:
-                service_radius = float(radius_match.group(1))
+                value = float(radius_match.group(1))
+                unit = radius_match.group(2).lower()
+                
+                # Normalize unit and convert to meters
+                service_radius_meters, normalized_unit = self._convert_radius_to_meters(value, unit)
+                
                 if 'parameters' not in updated_state:
                     updated_state['parameters'] = {}
-                updated_state['parameters']['service_radius'] = service_radius
+                updated_state['parameters']['service_radius'] = service_radius_meters
+                updated_state['parameters']['service_radius_original'] = value
+                updated_state['parameters']['service_radius_unit'] = 'm'  # Value is already in meters
+                radius_found = True
+                logger.info(f"Parsed service radius: {value} {normalized_unit} = {service_radius_meters} meters")
                 break
+        
+        # If no unit pattern matched, try patterns without units
+        if not radius_found:
+            for pattern in radius_patterns_no_unit:
+                radius_match = re.search(pattern, response_lower)
+                if radius_match:
+                    service_radius = float(radius_match.group(1))
+                    if 'parameters' not in updated_state:
+                        updated_state['parameters'] = {}
+                    updated_state['parameters']['service_radius'] = service_radius
+                    # No unit info - will be determined later by distance calculator
+                    logger.info(f"Parsed service radius: {service_radius} (no unit specified)")
+                    break
 
         # Detect variant mentions - only from explicit user requests, not data descriptions
         # Only set variant if user explicitly mentions wanting that variant
@@ -564,6 +598,31 @@ class ConversationManager:
             return False
         affirmatives = ["yes", "y", "confirm", "proceed", "go ahead", "ok", "okay", "do it"]
         return any(a == t or t.startswith(a) for a in affirmatives)
+    
+    def _convert_radius_to_meters(self, value: float, unit: str) -> tuple:
+        """
+        Convert a radius value to meters based on the specified unit.
+        
+        Args:
+            value: The numeric value
+            unit: The unit string (e.g., 'km', 'kilometers', 'm', 'meters', 'mi', 'miles')
+        
+        Returns:
+            Tuple of (value_in_meters, normalized_unit)
+        """
+        unit = unit.lower().strip()
+        
+        # Normalize unit variations
+        if unit in ('km', 'kilometer', 'kilometers'):
+            return value * 1000, 'km'
+        elif unit in ('m', 'meter', 'meters'):
+            return value, 'm'
+        elif unit in ('mi', 'mile', 'miles'):
+            return value * 1609.34, 'miles'
+        else:
+            # Unknown unit, assume meters
+            logger.warning(f"Unknown unit '{unit}', assuming meters")
+            return value, 'm'
 
     def _validate_variant_parameters(self, action: Dict[str, Any]) -> Optional[str]:
         """Validate that variant-specific parameters are present."""
