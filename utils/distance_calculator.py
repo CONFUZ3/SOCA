@@ -1,5 +1,6 @@
 import numpy as np
 import geopandas as gpd
+import pandas as pd
 from scipy.spatial.distance import cdist
 from pyproj import Geod
 from typing import Optional, Any, Dict
@@ -143,29 +144,29 @@ class DistanceCalculator:
         origins: gpd.GeoDataFrame, 
         destinations: gpd.GeoDataFrame
     ) -> np.ndarray:
-        """Calculate Manhattan-style geodesic distances for geographic coordinates.
+        """Calculate Manhattan-style distances for geographic coordinates.
         
-        Computes the sum of east-west and north-south geodesic distances.
+        Projects data to a local Azimuthal Equidistant projection centered on the 
+        dataset centroid to calculate accurate grid distances in meters.
         
         Returns:
             Distance matrix in meters with shape (len(origins), len(destinations))
         """
-        origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
-        dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
+        # Calculate centroid of all points to center the projection
+        all_geoms = pd.concat([origins.geometry, destinations.geometry])
+        center_lon = all_geoms.x.mean()
+        center_lat = all_geoms.y.mean()
         
-        n_origins = len(origin_coords)
-        n_dests = len(dest_coords)
-        distances = np.zeros((n_origins, n_dests))
+        # Define local Azimuthal Equidistant projection
+        # This preserves distances from the center point
+        proj_str = f"+proj=aeqd +lat_0={center_lat} +lon_0={center_lon} +datum=WGS84 +units=m +no_defs"
         
-        for i, (ox, oy) in enumerate(origin_coords):
-            for j, (dx, dy) in enumerate(dest_coords):
-                # East-West distance (same latitude)
-                _, _, dist_ew = self._geod.inv(ox, oy, dx, oy)
-                # North-South distance (same longitude)
-                _, _, dist_ns = self._geod.inv(dx, oy, dx, dy)
-                distances[i, j] = abs(dist_ew) + abs(dist_ns)
+        # Project origins and destinations
+        origins_proj = origins.to_crs(proj_str)
+        destinations_proj = destinations.to_crs(proj_str)
         
-        return distances
+        # Calculate Manhattan distance in the projected plane
+        return self._manhattan_distance(origins_proj, destinations_proj)
     
     def calculate_distance_matrix(
         self,
@@ -205,7 +206,18 @@ class DistanceCalculator:
             destinations = destinations.to_crs(origins.crs)
         
         # Determine if we should use geodesic calculations
-        use_geodesic = self._is_geographic(origins)
+        # Strict check: if CRS is present and geographic -> True
+        # Heuristic check: if CRS is missing but looks like lat/lon -> True
+        use_geodesic = False
+        if origins.crs:
+            use_geodesic = origins.crs.is_geographic
+        else:
+            use_geodesic = self._looks_like_lonlat(origins)
+            if not use_geodesic:
+                logger.debug("CRS is missing and coordinates do not look like Lat/Lon. Using Cartesian calculations.")
+        
+        if use_geodesic:
+            logger.debug(f"Using Geodesic calculations for {metric} metric (likely Lat/Lon)")
         
         # Calculate distance matrix based on metric and coordinate system
         if metric == "euclidean":

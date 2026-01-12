@@ -237,8 +237,14 @@ class DataProcessor:
         
         # Standardize CRS to WGS84 if not already
         if gdf.crs is None:
-            logger.warning("No CRS found, assuming EPSG:4326")
-            gdf.set_crs("EPSG:4326", inplace=True)
+            # Check for extreme coordinate values before assuming WGS84
+            bounds = gdf.total_bounds
+            if bounds[0] < -181 or bounds[2] > 181 or bounds[1] < -91 or bounds[3] > 91:
+                logger.warning("Data has no CRS and coordinates outside Lat/Lon range - treating as unknown projected system")
+                # Do NOT assign a default CRS that would be incorrect
+            else:
+                logger.warning("No CRS found but coordinates look like Lat/Lon, assuming EPSG:4326")
+                gdf.set_crs("EPSG:4326", inplace=True)
         else:
             try:
                 # Compare via EPSG integer when possible
@@ -430,6 +436,8 @@ class DataProcessor:
     ) -> gpd.GeoDataFrame:
         """
         Generate random candidate sites within the extent of demand data.
+        For geographic coordinates (lat/lon), uses equal-area sampling on the sphere
+        to avoid bias towards poles.
         
         Args:
             demand_gdf: Demand points GeoDataFrame to use for extent
@@ -453,9 +461,36 @@ class DataProcessor:
         bounds = demand_gdf.total_bounds  # minx, miny, maxx, maxy
         minx, miny, maxx, maxy = bounds
         
-        # Generate random coordinates within bounding box
-        random_x = np.random.uniform(minx, maxx, num_sites)
-        random_y = np.random.uniform(miny, maxy, num_sites)
+        # Check if coordinates are geographic (Lat/Lon)
+        is_geographic = False
+        if demand_gdf.crs and demand_gdf.crs.is_geographic:
+            is_geographic = True
+        elif demand_gdf.crs is None:
+            # Heuristic check
+            if -180 <= minx and maxx <= 180 and -90 <= miny and maxy <= 90:
+                is_geographic = True
+        
+        if is_geographic:
+            # Use equal-area sampling on sphere for Lat/Lon
+            # Longitude is uniform
+            random_x = np.random.uniform(minx, maxx, num_sites)
+            
+            # Latitude needs inverse transform sampling: y = asin(uniform(sin(ymin), sin(ymax)))
+            # Convert to radians for calculation
+            ymin_rad = np.radians(miny)
+            ymax_rad = np.radians(maxy)
+            
+            # Uniformly sample in sin-space
+            sin_vals = np.random.uniform(np.sin(ymin_rad), np.sin(ymax_rad), num_sites)
+            
+            # Convert back to latitude degrees
+            random_y = np.degrees(np.arcsin(sin_vals))
+            
+            logger.info("Used sphere-aware sampling for geographic coordinates")
+        else:
+            # Standard uniform sampling for projected coordinates
+            random_x = np.random.uniform(minx, maxx, num_sites)
+            random_y = np.random.uniform(miny, maxy, num_sites)
         
         # Create GeoDataFrame with generated points
         from shapely.geometry import Point

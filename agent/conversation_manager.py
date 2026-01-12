@@ -4,6 +4,7 @@ import json
 import logging
 import numpy as np
 from .prompts import build_system_prompt, build_data_summary_text
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class ConversationManager:
     
     def __init__(self, api_key: str, problem_registry):
         genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel("gemini-flash-lite-latest")
+        self.model = genai.GenerativeModel(settings.GEMINI_MODEL)
         self.problem_registry = problem_registry
         self.max_tokens = 4096
     
@@ -74,7 +75,7 @@ class ConversationManager:
             
             # Create a new model instance with system instruction
             model_with_system = genai.GenerativeModel(
-                "gemini-flash-lite-latest",
+                settings.GEMINI_MODEL,
                 system_instruction=system_prompt
             )
             

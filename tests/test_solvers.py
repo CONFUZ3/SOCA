@@ -23,7 +23,7 @@ class TestPMedianSolver(unittest.TestCase):
         self.demand_gdf = gpd.GeoDataFrame(
             {"demand": [1.0] * 25},
             geometry=[Point(x, y) for x, y in demand_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         # Create candidate sites (3x3 subset)
@@ -31,7 +31,7 @@ class TestPMedianSolver(unittest.TestCase):
         self.candidate_gdf = gpd.GeoDataFrame(
             {"capacity": [10.0] * 9},
             geometry=[Point(x, y) for x, y in candidate_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         self.solver = problem_registry.get_problem("p-median")
@@ -156,14 +156,14 @@ class TestPCenterSolver(unittest.TestCase):
         self.demand_gdf = gpd.GeoDataFrame(
             {"demand": [1.0] * 25},
             geometry=[Point(x, y) for x, y in demand_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         candidate_coords = [(i, j) for i in range(0, 5, 2) for j in range(0, 5, 2)]
         self.candidate_gdf = gpd.GeoDataFrame(
             {"capacity": [10.0] * 9},
             geometry=[Point(x, y) for x, y in candidate_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         self.solver = problem_registry.get_problem("p-center")
@@ -193,13 +193,13 @@ class TestMCLPSolver(unittest.TestCase):
         self.demand_gdf = gpd.GeoDataFrame(
             {"demand": [1.0] * 25},
             geometry=[Point(x, y) for x, y in demand_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         candidate_coords = [(i, j) for i in range(0, 5, 2) for j in range(0, 5, 2)]
         self.candidate_gdf = gpd.GeoDataFrame(
             geometry=[Point(x, y) for x, y in candidate_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         self.solver = problem_registry.get_problem("mclp")
@@ -239,7 +239,7 @@ class TestLSCPSolver(unittest.TestCase):
         demand_coords = [(i, j) for i in range(3) for j in range(3)]
         self.demand_gdf = gpd.GeoDataFrame(
             geometry=[Point(x, y) for x, y in demand_coords],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         # Use same points as candidates
@@ -314,12 +314,12 @@ class TestDistanceCalculator(unittest.TestCase):
         """Create test data"""
         self.origins = gpd.GeoDataFrame(
             geometry=[Point(0, 0), Point(1, 0), Point(0, 1)],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         self.destinations = gpd.GeoDataFrame(
             geometry=[Point(0, 0), Point(1, 1)],
-            crs="EPSG:4326"
+            crs="EPSG:3857"
         )
         
         self.calc = DistanceCalculator()
