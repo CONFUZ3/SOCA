@@ -8,12 +8,12 @@ Supported models:
 
 - P-Median
 - P-Center
-- MCLP (including budget/capacity/probabilistic/multi-coverage variants)
+- MCLP 
 - LSCP
 
 Core capabilities:
 
-- Natural-language problem setup via Gemini
+- Natural-language problem setup via LLM
 - Geospatial input handling (CSV/GeoJSON/Shapefile)
 - Interactive map output and result export
 
@@ -77,10 +77,6 @@ pytest tests/ -v
 pytest tests/ -v --cov=solvers --cov=utils --cov=agent
 ```
 
-## License
-
-MIT License. See `LICENSE`.
 
 ## Contact
-
 For issues and questions, use repository issues or contact: `mahad.imran29@gmail.com`
