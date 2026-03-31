@@ -385,20 +385,39 @@ class ConversationManager:
         # This could be enhanced with more sophisticated NLP
         response_lower = response_text.lower()
         
-        # Check for facility count mentions
+        # Check for facility count mentions - ONLY match user intent patterns
+        # Avoid descriptive patterns like "Selected 5 facilities" or "Located 5 facilities with optimal objective"
         import re
+        
+        # Intent-based patterns: patterns that indicate the user WANTS to set a value
+        # These require explicit action words before/after the number
         facility_patterns = [
-            r'(\d+)\s+facilities?',
+            # Direct parameter setting
             r'n_facilities[:\s=]+(\d+)',
             r'number\s+of\s+facilities[:\s=]+(\d+)',
-            r'locate\s+(\d+)\s+facilities?',
-            r'place\s+(\d+)\s+facilities?',
-            r'(\d+)\s+sites?',
-            r'(\d+)\s+stations?',
-            r'(\d+)\s+centers?',
             r'change\s+n_facilities\s+to\s+(\d+)',
             r'set\s+n_facilities\s+to\s+(\d+)',
-            r'n_facilities\s+to\s+(\d+)'
+            r'n_facilities\s+to\s+(\d+)',
+            # Intent verbs before the number
+            r'locate\s+(\d+)\s+facilities?',
+            r'place\s+(\d+)\s+facilities?',
+            r'need\s+(\d+)\s+facilities?',
+            r'want\s+(\d+)\s+facilities?',
+            r'with\s+(\d+)\s+facilities?',
+            r'using\s+(\d+)\s+facilities?',
+            r'open\s+(\d+)\s+facilities?',
+            r'build\s+(\d+)\s+facilities?',
+            # Same for sites/stations/centers
+            r'locate\s+(\d+)\s+sites?',
+            r'place\s+(\d+)\s+sites?',
+            r'need\s+(\d+)\s+sites?',
+            r'want\s+(\d+)\s+sites?',
+            r'with\s+(\d+)\s+sites?',
+            r'using\s+(\d+)\s+sites?',
+            r'locate\s+(\d+)\s+stations?',
+            r'place\s+(\d+)\s+stations?',
+            r'locate\s+(\d+)\s+centers?',
+            r'place\s+(\d+)\s+centers?',
         ]
         for pattern in facility_patterns:
             facility_match = re.search(pattern, response_lower)
@@ -407,27 +426,37 @@ class ConversationManager:
                 if 'parameters' not in updated_state:
                     updated_state['parameters'] = {}
                 updated_state['parameters']['n_facilities'] = n_facilities
+                logger.debug(f"Extracted n_facilities={n_facilities} from pattern: {pattern}")
                 break
         
         # Check for service radius mentions - capture both value and unit
         # Patterns with explicit units (capture unit in group 2)
+        # Supported: km, m, miles, feet, yards, nautical miles
+        unit_pattern = r'(km|kilometers?|mi|miles?|m|meters?|ft|feet|foot|yd|yards?|nm|nmi|nautical\s+miles?)'
         radius_patterns_with_unit = [
-            r'within\s+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
-            r'(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)\s+radius',
-            r'radius\s+of\s+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
-            r'service_radius[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
-            r'service\s+radius[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
-            r'distance\s+threshold[:\s=]+(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)',
-            r'(\d+\.?\d*)\s*(km|kilometers?|mi|miles?|m|meters?)\s+service',
+            # Standard patterns
+            rf'within\s+(\d+\.?\d*)\s*{unit_pattern}',
+            rf'(\d+\.?\d*)\s*{unit_pattern}\s+radius',
+            rf'radius\s+of\s+(\d+\.?\d*)\s*{unit_pattern}',
+            rf'service_radius[:\s=]+(\d+\.?\d*)\s*{unit_pattern}',
+            rf'service\s+radius[:\s=]+(\d+\.?\d*)\s*{unit_pattern}',
+            rf'distance\s+threshold[:\s=]+(\d+\.?\d*)\s*{unit_pattern}',
+            rf'(\d+\.?\d*)\s*{unit_pattern}\s+service',
+            # Shorthand patterns (sr = 90ft, sr=90ft)
+            rf'sr\s*[=:]\s*(\d+\.?\d*)\s*{unit_pattern}',
+            rf'\bsr\s+(\d+\.?\d*)\s*{unit_pattern}',
+            # Number directly followed by unit (90ft, 5km)
+            rf'radius[:\s=]+(\d+\.?\d*)\s*{unit_pattern}',
         ]
         # Patterns without explicit units (value only)
         radius_patterns_no_unit = [
-            r'radius\s+of\s+(\d+\.?\d*)',
-            r'service_radius[:\s=]+(\d+\.?\d*)',
-            r'service\s+radius[:\s=]+(\d+\.?\d*)',
-            r'distance\s+threshold[:\s=]+(\d+\.?\d*)',
-            r'maximum\s+distance[:\s=]+(\d+\.?\d*)',
-            r'max\s+distance[:\s=]+(\d+\.?\d*)',
+            r'radius\s+of\s+(\d+\.?\d*)(?!\s*[a-z])',
+            r'service_radius[:\s=]+(\d+\.?\d*)(?!\s*[a-z])',
+            r'service\s+radius[:\s=]+(\d+\.?\d*)(?!\s*[a-z])',
+            r'distance\s+threshold[:\s=]+(\d+\.?\d*)(?!\s*[a-z])',
+            r'maximum\s+distance[:\s=]+(\d+\.?\d*)(?!\s*[a-z])',
+            r'max\s+distance[:\s=]+(\d+\.?\d*)(?!\s*[a-z])',
+            r'sr\s*[=:]\s*(\d+\.?\d*)(?!\s*[a-z])',
         ]
         
         radius_found = False
@@ -445,12 +474,13 @@ class ConversationManager:
                     updated_state['parameters'] = {}
                 updated_state['parameters']['service_radius'] = service_radius_meters
                 updated_state['parameters']['service_radius_original'] = value
-                updated_state['parameters']['service_radius_unit'] = 'm'  # Value is already in meters
+                updated_state['parameters']['service_radius_unit'] = normalized_unit
                 radius_found = True
                 logger.info(f"Parsed service radius: {value} {normalized_unit} = {service_radius_meters} meters")
                 break
         
         # If no unit pattern matched, try patterns without units
+        # Set a flag so the LLM knows to ask for clarification
         if not radius_found:
             for pattern in radius_patterns_no_unit:
                 radius_match = re.search(pattern, response_lower)
@@ -459,8 +489,9 @@ class ConversationManager:
                     if 'parameters' not in updated_state:
                         updated_state['parameters'] = {}
                     updated_state['parameters']['service_radius'] = service_radius
-                    # No unit info - will be determined later by distance calculator
-                    logger.info(f"Parsed service radius: {service_radius} (no unit specified)")
+                    # Flag that unit was not specified - LLM should ask for clarification
+                    updated_state['parameters']['service_radius_unit_missing'] = True
+                    logger.info(f"Parsed service radius: {service_radius} (NO UNIT SPECIFIED - needs clarification)")
                     break
 
         # Detect variant mentions - only from explicit user requests, not data descriptions
@@ -558,6 +589,22 @@ class ConversationManager:
                 updated_state['parameters']['max_assignment_distance'] = max_dist_val
                 break
         
+        # Capture weight range hints from user messages
+        # The LLM will use these hints along with the data summary to infer the weight column
+        # (Main weight column inference is done by LLM through system prompt)
+        if 'weight' in response_lower:
+            weight_range_pattern = r'weights?\s+(?:are\s+)?(?:from\s+)?([\d.]+)\s+to\s+([\d.]+)'
+            range_match = re.search(weight_range_pattern, response_lower)
+            
+            if range_match:
+                if 'parameters' not in updated_state:
+                    updated_state['parameters'] = {}
+                min_val = float(range_match.group(1))
+                max_val = float(range_match.group(2))
+                updated_state['parameters']['_weight_range_hint'] = (min_val, max_val)
+                logger.info(f"User mentioned weight range: {min_val} to {max_val}")
+        
+        
         # Handle parameter clearing/reset requests
         if any(word in response_lower for word in ['clear', 'reset', 'remove', 'delete']):
             if 'parameters' in response_lower:
@@ -606,24 +653,116 @@ class ConversationManager:
         
         Args:
             value: The numeric value
-            unit: The unit string (e.g., 'km', 'kilometers', 'm', 'meters', 'mi', 'miles')
+            unit: The unit string (e.g., 'km', 'miles', 'm', 'ft', 'yd', 'nm')
         
         Returns:
             Tuple of (value_in_meters, normalized_unit)
+        
+        Supported units:
+            - Metric: m, meters, km, kilometers
+            - Imperial: mi, miles, ft, feet, foot, yd, yards
+            - Nautical: nm, nmi, nautical miles
         """
         unit = unit.lower().strip()
+        # Handle compound units like "nautical miles"
+        unit = unit.replace(' ', '')
         
-        # Normalize unit variations
+        # Unit conversion factors to meters (GIS-compliant values)
         if unit in ('km', 'kilometer', 'kilometers'):
             return value * 1000, 'km'
         elif unit in ('m', 'meter', 'meters'):
             return value, 'm'
         elif unit in ('mi', 'mile', 'miles'):
-            return value * 1609.34, 'miles'
+            return value * 1609.344, 'miles'
+        elif unit in ('ft', 'foot', 'feet'):
+            return value * 0.3048, 'ft'
+        elif unit in ('yd', 'yard', 'yards'):
+            return value * 0.9144, 'yd'
+        elif unit in ('nm', 'nmi', 'nauticalmiles', 'nauticalmile'):
+            return value * 1852, 'nm'
         else:
-            # Unknown unit, assume meters
-            logger.warning(f"Unknown unit '{unit}', assuming meters")
+            # Unknown unit, log warning and treat as meters
+            logger.warning(f"Unknown unit '{unit}', treating as meters")
             return value, 'm'
+
+    def infer_weight_column_from_data(
+        self,
+        data_summary: Optional[Dict[str, Any]],
+        weight_range_hint: Optional[tuple] = None
+    ) -> Optional[str]:
+        """
+        Smart-infer weight column from uploaded data summary.
+        
+        Uses heuristics:
+        1. Look for columns with names containing: expected, value, priority, importance, score
+        2. If weight_range_hint provided, match columns whose min/max align with the range
+        3. Fall back to first numeric non-geometry column that looks like weights
+        
+        Args:
+            data_summary: Dictionary with uploaded data info (columns, stats)
+            weight_range_hint: Optional tuple (min_val, max_val) from user message
+        
+        Returns:
+            Column name if found, None otherwise
+        """
+        if not data_summary:
+            return None
+        
+        # Priority keywords for weight columns (not the standard ones which are already handled)
+        priority_keywords = ['expected', 'value', 'score', 'priority', 'importance', 'rating', 'rank']
+        exclude_keywords = ['id', 'name', 'geometry', 'geom', 'lat', 'lon', 'longitude', 'latitude', 'x', 'y']
+        
+        candidates = []
+        
+        for dataset_name, dataset_info in data_summary.items():
+            columns = dataset_info.get('columns', [])
+            column_stats = dataset_info.get('column_stats', {})
+            
+            for col in columns:
+                col_lower = col.lower()
+                
+                # Skip excluded columns
+                if any(exc in col_lower for exc in exclude_keywords):
+                    continue
+                
+                # Check if column has stats (indicates numeric)
+                stats = column_stats.get(col, {})
+                if not stats:
+                    continue
+                
+                col_min = stats.get('min')
+                col_max = stats.get('max')
+                
+                # Skip if not numeric
+                if col_min is None or col_max is None:
+                    continue
+                
+                # Check if column name matches priority keywords
+                name_score = sum(1 for kw in priority_keywords if kw in col_lower) * 10
+                
+                # Check if value range matches hint
+                range_score = 0
+                if weight_range_hint:
+                    hint_min, hint_max = weight_range_hint
+                    # Check if the column's range roughly matches the hint
+                    if abs(col_min - hint_min) < 0.5 and abs(col_max - hint_max) < 0.5:
+                        range_score = 100  # Strong match
+                    elif col_min <= hint_min and col_max >= hint_max:
+                        range_score = 50  # Contains the range
+                
+                total_score = name_score + range_score
+                
+                if total_score > 0:
+                    candidates.append((col, total_score, dataset_name))
+        
+        if candidates:
+            # Sort by score descending and return best match
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            best_col = candidates[0][0]
+            logger.info(f"Smart-inferred weight column: '{best_col}' from data summary")
+            return best_col
+        
+        return None
 
     def _validate_variant_parameters(self, action: Dict[str, Any]) -> Optional[str]:
         """Validate that variant-specific parameters are present."""

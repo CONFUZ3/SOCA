@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import folium
 from streamlit_folium import st_folium
 import pydeck as pdk
@@ -209,6 +210,25 @@ with st.sidebar:
                 cost_cols = data_processor.identify_cost_columns(gdf)
                 demand_cols = data_processor.identify_demand_columns(gdf)
                 
+                # Add sample values for LLM context (first non-null value per column)
+                sample_values = {}
+                column_stats = {}
+                for col in gdf.columns:
+                    if col.lower() in ['geometry', 'shape']:
+                        continue
+                    try:
+                        non_null = gdf[col].dropna()
+                        if len(non_null) > 0:
+                            sample_values[col] = non_null.iloc[0]
+                            # Add stats for numeric columns
+                            if gdf[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                                column_stats[col] = {
+                                    'mean': float(gdf[col].mean()),
+                                    'max': float(gdf[col].max())
+                                }
+                    except Exception:
+                        pass
+                
                 data_summary[name] = {
                     "num_features": len(gdf),
                     "geometry_type": gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown",
@@ -217,7 +237,9 @@ with st.sidebar:
                     "bounds": gdf.total_bounds.tolist() if len(gdf) > 0 else [],
                     "capacity_columns": capacity_cols,
                     "cost_columns": cost_cols,
-                    "demand_columns": demand_cols
+                    "demand_columns": demand_cols,
+                    "sample_values": sample_values,
+                    "column_stats": column_stats
                 }
             try:
                 with st.spinner("Syncing uploaded data with AI..."):
@@ -424,7 +446,7 @@ def _display_problem_metrics(problem_type: str, solution: dict, metrics: dict):
         obj_name = metrics.get('objective_name', 'objective_value')
         obj_val = metrics.get('objective_value', solution.get('objective_value'))
         if obj_val is not None:
-            label = _format_metric_label(obj_name)
+            label = _get_metric_label(obj_name)
             st.metric(label, f"{obj_val:.2f}")
     
     with metric_cols[1]:
@@ -433,25 +455,31 @@ def _display_problem_metrics(problem_type: str, solution: dict, metrics: dict):
     with metric_cols[2]:
         st.metric("Solution Time", f"{solution.get('solution_time', 0):.2f}s")
     
+    # Get distance unit from solution
+    distance_unit = solution.get('service_radius_unit', 'm')
+    
     # Problem-specific key metrics
     if problem_type == "lscp":
-        _display_lscp_metrics(metrics)
+        _display_lscp_metrics(metrics, distance_unit)
     elif problem_type == "mclp":
-        _display_mclp_metrics(metrics, solution)
+        _display_mclp_metrics(metrics, solution, distance_unit)
     elif problem_type == "p-center":
-        _display_pcenter_metrics(metrics)
+        _display_pcenter_metrics(metrics, distance_unit)
     elif problem_type == "p-median":
-        _display_pmedian_metrics(metrics)
+        _display_pmedian_metrics(metrics, distance_unit)
     else:
         # Generic fallback
         _display_generic_metrics(metrics)
 
 
-def _format_metric_label(key: str) -> str:
-    """Format metric key as readable label."""
+def _get_metric_label(key: str) -> str:
+    """Get human-friendly label for a metric key."""
     labels = {
-        'min_facilities': 'Min Facilities',
+        'coverage_percentage': 'Coverage Percentage',
+        'num_facilities': 'Facilities Selected',
+        'average_distance_covered': 'Avg Distance (covered)',
         'max_distance': 'Max Distance',
+        'average_distance': 'Average Distance',
         'total_weighted_distance': 'Total Weighted Distance',
         'average_weighted_distance': 'Avg Weighted Distance',
         'covered_demand': 'Covered Demand',
@@ -461,7 +489,22 @@ def _format_metric_label(key: str) -> str:
     return labels.get(key, key.replace('_', ' ').title())
 
 
-def _display_lscp_metrics(metrics: dict):
+def _format_distance(value: float, unit: str) -> str:
+    """Format a distance value with its unit consistently."""
+    # Mapping to pretty unit labels
+    pretty_units = {
+        'm': 'm',
+        'km': 'km',
+        'mi': 'miles',
+        'ft': 'ft',
+        'yd': 'yards',
+        'nm': 'nm'
+    }
+    unit_label = pretty_units.get(unit.lower().strip(), unit)
+    return f"{value:.2f} {unit_label}"
+
+
+def _display_lscp_metrics(metrics: dict, unit: str = 'm'):
     """Display LSCP-specific metrics."""
     st.markdown("##### Coverage Metrics")
     cols = st.columns(3)
@@ -473,18 +516,18 @@ def _display_lscp_metrics(metrics: dict):
         st.metric("Coverage", f"{coverage:.1f}%")
     with cols[2]:
         radius = metrics.get('service_radius', 0)
-        st.metric("Service Radius", f"{radius:.2f}")
+        st.metric("Service Radius", _format_distance(radius, unit))
     
     # Additional details
     with st.expander("Detailed Metrics"):
         st.write(f"**Total Demand Points:** {metrics.get('total_demand_points', 0)}")
         st.write(f"**Covered Points:** {metrics.get('num_covered_points', 0)}")
         st.write(f"**Uncovered Points:** {metrics.get('num_uncovered_points', 0)}")
-        st.write(f"**Average Distance:** {metrics.get('average_distance', 0):.2f}")
-        st.write(f"**Max Distance:** {metrics.get('max_distance', 0):.2f}")
+        st.write(f"**Average Distance:** {_format_distance(metrics.get('average_distance', 0), unit)}")
+        st.write(f"**Max Distance:** {_format_distance(metrics.get('max_distance', 0), unit)}")
 
 
-def _display_mclp_metrics(metrics: dict, solution: dict):
+def _display_mclp_metrics(metrics: dict, solution: dict, unit: str = 'm'):
     """Display MCLP-specific metrics."""
     variant = solution.get('variant_used', 'classical')
     
@@ -502,7 +545,7 @@ def _display_mclp_metrics(metrics: dict, solution: dict):
         st.metric("Uncovered Demand", f"{uncovered:.1f}")
     with cols[3]:
         radius = metrics.get('service_radius', 0)
-        st.metric("Service Radius", f"{radius:.2f}")
+        st.metric("Service Radius", _format_distance(radius, unit))
     
     # Variant-specific metrics
     with st.expander("Detailed Metrics"):
@@ -510,7 +553,7 @@ def _display_mclp_metrics(metrics: dict, solution: dict):
         st.write(f"**Facilities Selected:** {metrics.get('num_facilities', 0)}")
         st.write(f"**Total Demand:** {metrics.get('total_demand', 0):.1f}")
         st.write(f"**Covered Points:** {metrics.get('num_covered_points', 0)}")
-        st.write(f"**Avg Distance (covered):** {metrics.get('average_distance_covered', 0):.2f}")
+        st.write(f"**Avg Distance (covered):** {_format_distance(metrics.get('average_distance_covered', 0), unit)}")
         
         # Variant-specific details
         if variant == 'capacitated':
@@ -527,30 +570,30 @@ def _display_mclp_metrics(metrics: dict, solution: dict):
             st.write(f"**Avg Reliability:** {metrics.get('avg_selected_reliability', 0)*100:.1f}%")
 
 
-def _display_pcenter_metrics(metrics: dict):
+def _display_pcenter_metrics(metrics: dict, unit: str = 'm'):
     """Display P-Center-specific metrics."""
     st.markdown("##### Distance Metrics (Minimax)")
     cols = st.columns(4)
     
     with cols[0]:
         max_dist = metrics.get('max_distance', 0)
-        st.metric("Max Distance", f"{max_dist:.2f}", help="Objective: minimize this value")
+        st.metric("Max Distance", _format_distance(max_dist, unit), help="Objective: minimize this value")
     with cols[1]:
         avg_dist = metrics.get('average_distance', 0)
-        st.metric("Avg Distance", f"{avg_dist:.2f}")
+        st.metric("Avg Distance", _format_distance(avg_dist, unit))
     with cols[2]:
         min_dist = metrics.get('min_distance', 0)
-        st.metric("Min Distance", f"{min_dist:.2f}")
+        st.metric("Min Distance", _format_distance(min_dist, unit))
     with cols[3]:
         n_fac = metrics.get('num_facilities', 0)
         st.metric("Facilities", int(n_fac))
     
     with st.expander("Detailed Metrics"):
         st.write(f"**Demand Points Served:** {metrics.get('num_demand_points', 0)}")
-        st.write(f"**Std Deviation:** {metrics.get('std_distance', 0):.2f}")
+        st.write(f"**Std Deviation:** {_format_distance(metrics.get('std_distance', 0), unit)}")
 
 
-def _display_pmedian_metrics(metrics: dict):
+def _display_pmedian_metrics(metrics: dict, unit: str = 'm'):
     """Display P-Median-specific metrics."""
     obj_type = metrics.get('objective_type', 'total')
     
@@ -560,20 +603,20 @@ def _display_pmedian_metrics(metrics: dict):
     with cols[0]:
         if obj_type == 'average':
             avg_dist = metrics.get('average_distance', 0)
-            st.metric("Avg Weighted Distance", f"{avg_dist:.2f}", help="Objective value")
+            st.metric("Avg Weighted Distance", _format_distance(avg_dist, unit), help="Objective value")
         else:
             total_dist = metrics.get('total_weighted_distance', 0)
-            st.metric("Total Weighted Distance", f"{total_dist:.2f}", help="Objective value")
+            st.metric("Total Weighted Distance", _format_distance(total_dist, unit), help="Objective value")
     with cols[1]:
         if obj_type == 'average':
             total_dist = metrics.get('total_weighted_distance', 0)
-            st.metric("Total Distance", f"{total_dist:.2f}")
+            st.metric("Total Distance", _format_distance(total_dist, unit))
         else:
             avg_dist = metrics.get('average_distance', 0)
-            st.metric("Avg Distance", f"{avg_dist:.2f}")
+            st.metric("Avg Distance", _format_distance(avg_dist, unit))
     with cols[2]:
         max_dist = metrics.get('max_distance', 0)
-        st.metric("Max Distance", f"{max_dist:.2f}")
+        st.metric("Max Distance", _format_distance(max_dist, unit))
     with cols[3]:
         n_fac = metrics.get('num_facilities', 0)
         st.metric("Facilities", int(n_fac))
@@ -633,20 +676,8 @@ def render_map_fragment():
                 viz_config = problem_solver.get_visualization_config()
         
         # Optional UI toggle to show service areas when radius is available
-        try:
-            current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
-            params = st.session_state.problem_state.get("parameters", {})
-            sol = st.session_state.problem_state.get("solution", {}) or {}
-            metrics = sol.get("metrics", {})
-            service_radius = params.get("service_radius") or metrics.get("service_radius")
-            if service_radius is not None and current_problem in ["mclp", "lscp"]:
-                show_radius = st.checkbox("Show service radius", value=True, key="show_service_radius_frag")
-                if viz_config is None:
-                    viz_config = {}
-                viz_config["show_service_areas"] = bool(show_radius)
-        except Exception:
-            pass
-
+        # (Moved to specific renderer blocks to allow for better UI placement)
+        
         # Generate candidate sites once for visualization if missing and persist
         try:
             data_items = st.session_state.problem_state["data"]
@@ -703,6 +734,33 @@ def render_map_fragment():
         
         # Choose map renderer based on user preference
         if st.session_state.get("map_renderer", "pydeck") == "pydeck":
+            if viz_config is None:
+                viz_config = {}
+                
+            # Layer Selector Popover
+            # Placed in a column to appear as a small button above the map
+            ls_col1, ls_col2 = st.columns([0.2, 0.8])
+            with ls_col1:
+                with st.popover("🗺️ Layers", help="Toggle map layers"):
+                    st.caption("Layer Visibility")
+                    viz_config["show_demand"] = st.checkbox("Demand Points", value=True, key="pd_show_demand")
+                    viz_config["show_candidates"] = st.checkbox("Candidate Sites", value=True, key="pd_show_candidates")
+                    viz_config["show_facilities"] = st.checkbox("Selected Facilities", value=True, key="pd_show_facilities")
+                    viz_config["show_assignments"] = st.checkbox("Assignments", value=True, key="pd_show_assignments")
+                    
+                    # Service radius toggle
+                    try:
+                        current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
+                        params = st.session_state.problem_state.get("parameters", {})
+                        sol = st.session_state.problem_state.get("solution", {}) or {}
+                        metrics = sol.get("metrics", {})
+                        service_radius = params.get("service_radius") or metrics.get("service_radius")
+                        
+                        if service_radius is not None and current_problem in ["mclp", "lscp"]:
+                             viz_config["show_service_areas"] = st.checkbox("Service Radius", value=True, key="pd_show_service_areas")
+                    except Exception:
+                        pass
+
             # Get basemap style from session state
             basemap_style = st.session_state.get("basemap_style", "light")
             
@@ -715,8 +773,47 @@ def render_map_fragment():
                 constraints=st.session_state.problem_state.get("constraints", {}),
                 basemap_style=basemap_style
             )
-            st.pydeck_chart(deck, height=500, width="stretch")
+            with st.container():
+                legend_html = st.session_state.pydeck_visualizer.generate_legend_html(
+                    problem_type=st.session_state.problem_state["problem_type"],
+                    has_solution=solution is not None,
+                    parameters=parameters or {},
+                    constraints=st.session_state.problem_state.get("constraints", {}) or {},
+                    solution=solution or {},
+                )
+                deck_html = deck.to_html(as_string=True)
+                # Ensure body is the positioning context for the legend overlay
+                deck_html = deck_html.replace(
+                    "<body>",
+                    '<body style="margin:0;padding:0;position:relative;">',
+                    1,
+                )
+                # Inject the legend overlay directly inside the deck HTML before </body>
+                combined_html = deck_html.replace(
+                    "</body>",
+                    f"{legend_html}</body>",
+                    1,
+                )
+                components.html(combined_html, height=500)
         else:
+            if viz_config is None:
+                viz_config = {}
+                
+            # For Folium, ensure service areas are shown if applicable (LayerControl handles visibility)
+            try:
+                current_problem = (st.session_state.problem_state["problem_type"] or "").lower()
+                params = st.session_state.problem_state.get("parameters", {})
+                sol = st.session_state.problem_state.get("solution", {}) or {}
+                metrics = sol.get("metrics", {})
+                service_radius = params.get("service_radius") or metrics.get("service_radius")
+                
+                if service_radius is not None and current_problem in ["mclp", "lscp"]:
+                     # Checkbox for initial inclusion, though LayerControl can toggle
+                     # Placing it here to match previous behavior for Folium
+                     viz_config["show_service_areas"] = st.checkbox("Show service radius", value=True, key="folium_show_service_areas")
+            except Exception:
+                pass
+
             map_obj = st.session_state.map_visualizer.create_map(
                 data=mapped_data,
                 solution=solution,
@@ -767,6 +864,25 @@ with col1:
                 cost_cols = data_processor.identify_cost_columns(gdf)
                 demand_cols = data_processor.identify_demand_columns(gdf)
                 
+                # Add sample values for LLM context (first non-null value per column)
+                sample_values = {}
+                column_stats = {}
+                for col in gdf.columns:
+                    if col.lower() in ['geometry', 'shape']:
+                        continue
+                    try:
+                        non_null = gdf[col].dropna()
+                        if len(non_null) > 0:
+                            sample_values[col] = non_null.iloc[0]
+                            # Add stats for numeric columns
+                            if gdf[col].dtype in ['int64', 'float64', 'int32', 'float32']:
+                                column_stats[col] = {
+                                    'mean': float(gdf[col].mean()),
+                                    'max': float(gdf[col].max())
+                                }
+                    except Exception:
+                        pass
+                
                 data_summary[name] = {
                     "num_features": len(gdf),
                     "geometry_type": gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown",
@@ -775,7 +891,9 @@ with col1:
                     "bounds": gdf.total_bounds.tolist() if len(gdf) > 0 else [],
                     "capacity_columns": capacity_cols,
                     "cost_columns": cost_cols,
-                    "demand_columns": demand_cols
+                    "demand_columns": demand_cols,
+                    "sample_values": sample_values,
+                    "column_stats": column_stats
                 }
         
         # Call conversation manager

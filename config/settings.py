@@ -12,7 +12,7 @@ class Settings:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     
     # Model settings
-    GEMINI_MODEL = "models/gemini-flash-latest"  # Latest Gemini Flash model
+    GEMINI_MODEL = "models/gemini-2.5-pro"  # Latest Gemini Flash model
     MAX_TOKENS = 4096
     
     # Solver preferences

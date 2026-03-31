@@ -135,6 +135,7 @@ Where:
                 raise ValueError("Both demand_points and candidate_sites are required")
             
             p = parameters['n_facilities']
+            service_radius_unit = parameters.get('service_radius_unit', 'm')
             
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
@@ -202,7 +203,8 @@ Where:
             metrics = self._calculate_metrics(
                 distance_matrix, 
                 solution['selected_facilities'],
-                solution['assignments']
+                solution['assignments'],
+                distance_unit=service_radius_unit
             )
             
             solution_time = time.time() - start_time
@@ -415,15 +417,25 @@ Where:
         self,
         distance_matrix: np.ndarray,
         selected_facilities: List[int],
-        assignments: Dict[int, int]
+        assignments: Dict[int, int],
+        distance_unit: Optional[str] = None
     ) -> Dict[str, float]:
         distances = [distance_matrix[i, j] for i, j in assignments.items()]
         
+        # Convert distances to user-requested units if specified
+        from utils.distance_calculator import DistanceCalculator
+        dist_calc = DistanceCalculator()
+        
+        max_dist = max(distances) if distances else 0
+        avg_dist = np.mean(distances) if distances else 0
+        min_dist = min(distances) if distances else 0
+        std_dist = np.std(distances) if distances else 0
+        
         return {
-            "max_distance": max(distances) if distances else 0,
-            "average_distance": np.mean(distances) if distances else 0,
-            "min_distance": min(distances) if distances else 0,
-            "std_distance": np.std(distances) if distances else 0,
+            "max_distance": dist_calc.convert_meters_to_unit(float(max_dist), distance_unit),
+            "average_distance": dist_calc.convert_meters_to_unit(float(avg_dist), distance_unit),
+            "min_distance": dist_calc.convert_meters_to_unit(float(min_dist), distance_unit),
+            "std_distance": dist_calc.convert_meters_to_unit(float(std_dist), distance_unit),
             "num_facilities": len(selected_facilities),
             "num_demand_points": len(assignments)
         }

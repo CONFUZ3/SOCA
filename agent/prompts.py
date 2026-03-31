@@ -107,6 +107,35 @@ Then respond with JSON in this EXACT format:
 }
 ```
 
+**IMPORTANT: Distance/Radius Parameters**
+When the user specifies a service_radius or any distance parameter with a unit:
+- Include `service_radius` with the **original numeric value** (do NOT convert)
+- Include `service_radius_unit` with the unit abbreviation: "m", "km", "miles", "ft", "yd", "nm"
+
+Example for "sr = 90ft":
+```json
+{
+  "action": "optimize",
+  "problem_type": "mclp",
+  "parameters": {
+    "n_facilities": 3,
+    "service_radius": 90,
+    "service_radius_unit": "ft"
+  },
+  "constraints": {}
+}
+```
+
+Example for "5 km radius":
+```json
+{
+  "parameters": {
+    "service_radius": 5,
+    "service_radius_unit": "km"
+  }
+}
+```
+
 **IMPORTANT: Variant-Specific Parameters**
 ONLY use variants when explicitly requested by the user. Do NOT automatically infer variants based on data columns.
 
@@ -129,6 +158,32 @@ When using variants, you MUST include all required parameters:
 
 If variant-specific parameters are missing, provide reasonable defaults or ask the user for clarification.
 
+**IMPORTANT: Demand Weight Column Inference**
+For MCLP and other coverage problems, users may specify which column contains demand weights. When users mention:
+- "use ExpectedVa as weights"
+- "weight column is [column_name]"  
+- "there's a weight column called [name]"
+- "weights are in the [column_name] column"
+- Any reference to a specific column containing weights, values, scores, priorities, or importance
+
+You MUST include the `demand_weight_column` parameter in the JSON output:
+```json
+{
+  "parameters": {
+    "demand_weight_column": "ExpectedVa",
+    "n_facilities": 3,
+    "service_radius": 90,
+    "service_radius_unit": "ft"
+  }
+}
+```
+
+**How to infer the weight column:**
+1. If user explicitly names a column → use that column name exactly
+2. If user says "there's a weight column" without naming it → check the data summary for columns with names like: expected*, value*, score*, priority*, importance*
+3. If user mentions a value range (e.g., "weights from 1.0 to 5.02") → match against column statistics in the data summary
+4. The standard columns (demand, weight, population, pop) are auto-detected by the solver - only set demand_weight_column for non-standard names
+
 **Explaining Solutions**: After optimization, explain:
   - What the solution achieved
   - Key metrics and their meaning
@@ -144,6 +199,53 @@ If variant-specific parameters are missing, provide reasonable defaults or ask t
 5. **Be academic but accessible**: Provide rigorous information in plain language.
 6. **Cite sources when relevant**: Reference key papers when discussing methodology.
 7. **Explain assumptions clearly**: State any defaults or inferences you used without asking the user to confirm them.
+
+# Dataset Role Inference
+
+When data is uploaded, analyze these signals to infer dataset roles:
+
+1. **Filename Indicators** (highest priority):
+   - "demand", "population", "census", "people", "customers" → **Demand Points**
+   - "candidate", "facility", "site", "location", "station" → **Candidate Sites**
+   - "boundary", "region", "area", "zone", "district" → **Boundary/Region**
+
+2. **Column Patterns**:
+   - population, pop, demand, weight, need → likely demand dataset
+   - capacity, cap, cost, facility_cost → likely candidate sites
+
+3. **Geometry Type**:
+   - Point geometries → demand or candidate sites
+   - Polygon geometries → often boundaries or service areas
+
+4. **Value Characteristics**:
+   - Large numeric values (thousands-millions) in columns → likely population/demand
+
+**ALWAYS explain your inference reasoning** to the user. For example:
+"Based on the filename 'population_centers.geojson' and the presence of a 'pop' column with values averaging 15,000, I'm treating this as demand points representing population centers."
+
+# Unit Handling
+
+**CRITICAL: Never assume distance units!**
+
+When a user provides a numeric distance value (e.g., service radius) WITHOUT specifying a unit:
+1. **ASK for clarification**: "You mentioned a radius of 5. Could you clarify the unit? (km, miles, meters, feet)"
+2. **DO NOT guess or assume** the unit—different assumptions lead to drastically different results (5km vs 5m is 1000x difference!)
+
+**Supported Units:**
+- Metric: meters (m), kilometers (km)
+- Imperial: miles (mi), feet (ft), yards (yd)
+- Nautical: nautical miles (nm, nmi)
+
+**When units ARE specified:**
+- Always confirm the conversion: "Using a service radius of 5 km (= 5,000 meters)"
+- Store and display both original and converted values
+
+**Example Interaction:**
+User: "Use a service radius of 10"
+You: "You mentioned a service radius of 10. Could you clarify the unit? For example:
+- 10 km would be 10,000 meters
+- 10 miles would be ~16,093 meters  
+- 10 meters would be quite small for most facility location problems"
 
 # Example Conversation Flow
 
@@ -174,13 +276,22 @@ You: [Return JSON action to trigger optimization]
 - Explain the "why" behind recommendations
 - Academic rigor with practical focus
 - Always maintain full conversational context
+- **Explain your dataset role inferences with reasoning**
+- **Always ask for unit clarification if not specified**
 """
     
     return prompt
 
 
 def build_data_summary_text(data_summary: dict) -> str:
-    """Format data summary for inclusion in messages"""
+    """Format data summary for inclusion in messages.
+    
+    Provides rich context to help LLM infer dataset roles:
+    - Filename with extension
+    - Column names with sample values and statistics
+    - Geometry type and count
+    - Coordinate bounds
+    """
     if not data_summary:
         return "No data uploaded yet."
     
@@ -188,31 +299,67 @@ def build_data_summary_text(data_summary: dict) -> str:
     for name, info in data_summary.items():
         num = info.get('num_features', 'unknown')
         geom = info.get('geometry_type', 'unknown')
-        text += f"- {name}: {num} features ({geom})\n"
-        # Columns
+        text += f"\n### {name}\n"
+        text += f"- **Features:** {num} ({geom} geometry)\n"
+        
+        # Columns with sample values for LLM context
         cols = info.get('columns') or []
         if cols:
-            # Show all provided columns explicitly
-            text += f"  • Columns: {', '.join(cols)}\n"
-        # Column types, if provided
+            text += f"- **Columns:** {', '.join(cols)}\n"
+        
+        # Column types and sample statistics for inference
         dtypes = info.get('dtypes') or {}
-        if dtypes:
+        sample_values = info.get('sample_values') or {}
+        column_stats = info.get('column_stats') or {}
+        
+        if sample_values or column_stats:
+            text += "- **Column Details:**\n"
+            for col in cols:
+                if col.lower() in ['geometry', 'shape']:
+                    continue
+                dtype = dtypes.get(col, 'unknown')
+                details = [f"type: {dtype}"]
+                
+                # Add sample value if available
+                if col in sample_values:
+                    sample = sample_values[col]
+                    if sample is not None:
+                        sample_str = str(sample)[:50]
+                        if len(str(sample)) > 50:
+                            sample_str += "..."
+                        details.append(f"sample: {sample_str}")
+                
+                # Add stats for numeric columns
+                if col in column_stats:
+                    stats = column_stats[col]
+                    if 'mean' in stats:
+                        details.append(f"mean: {stats['mean']:.1f}")
+                    if 'max' in stats:
+                        details.append(f"max: {stats['max']:.1f}")
+                
+                text += f"  - {col}: {', '.join(details)}\n"
+        elif dtypes:
             pretty_types = ", ".join(f"{col}:{dtype}" for col, dtype in dtypes.items())
-            text += f"  • Types: {pretty_types}\n"
-        # Bounds, if provided
+            text += f"- **Types:** {pretty_types}\n"
+        
+        # Bounds for geographic context
         bounds = info.get('bounds')
-        if bounds:
-            text += f"  • Bounds: {bounds}\n"
+        if bounds and len(bounds) == 4:
+            text += f"- **Bounds:** minx={bounds[0]:.4f}, miny={bounds[1]:.4f}, maxx={bounds[2]:.4f}, maxy={bounds[3]:.4f}\n"
+        elif bounds:
+            text += f"- **Bounds:** {bounds}\n"
+        
         # Special column detection
         capacity_cols = info.get('capacity_columns', [])
         cost_cols = info.get('cost_columns', [])
         demand_cols = info.get('demand_columns', [])
         
         if capacity_cols:
-            text += f"  • Capacity columns detected: {', '.join(capacity_cols)} (available for capacitated variants if requested)\n"
+            text += f"- **Capacity columns:** {', '.join(capacity_cols)}\n"
         if cost_cols:
-            text += f"  • Cost columns detected: {', '.join(cost_cols)} (available for budget variants if requested)\n"
+            text += f"- **Cost columns:** {', '.join(cost_cols)}\n"
         if demand_cols:
-            text += f"  • Demand columns detected: {', '.join(demand_cols)}\n"
+            text += f"- **Demand columns:** {', '.join(demand_cols)}\n"
+    
     return text
 

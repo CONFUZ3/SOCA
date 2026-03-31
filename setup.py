@@ -117,7 +117,7 @@ def main():
     print("1. Edit .env or .streamlit/secrets.toml with your GEMINI_API_KEY")
     print("2. Run: streamlit run app.py")
     print("3. Open http://localhost:8501 in your browser")
-    print("\nFor help, see README.md or docs/architecture.md")
+    print("\nFor help, see README.md and QUICKSTART.md")
     print("=" * 60)
 
 if __name__ == "__main__":

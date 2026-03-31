@@ -10,6 +10,7 @@ import numpy as np
 from typing import Dict, List, Optional, Any
 import logging
 import os
+import textwrap
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +102,8 @@ class PyDeckVisualizer:
             assignments = solution.get('assignments', {}) if solution else {}
             
             # 1. Add assignment lines (render first, below points)
-            if solution and assignments and demand_gdf is not None and candidate_gdf is not None:
+            if (solution and assignments and demand_gdf is not None and candidate_gdf is not None 
+                and (viz_config is None or viz_config.get('show_assignments', True))):
                 assignment_layer = self._create_assignment_layer(
                     demand_gdf, candidate_gdf, assignments
                 )
@@ -124,19 +126,22 @@ class PyDeckVisualizer:
                         layers.append(service_layer)
             
             # 3. Add candidate sites
-            if candidate_gdf is not None and len(candidate_gdf) > 0:
+            if (candidate_gdf is not None and len(candidate_gdf) > 0 
+                and (viz_config is None or viz_config.get('show_candidates', True))):
                 candidate_layer = self._create_candidate_layer(
                     candidate_gdf, selected_indices
                 )
                 layers.append(candidate_layer)
             
             # 4. Add demand points
-            if demand_gdf is not None and len(demand_gdf) > 0:
+            if (demand_gdf is not None and len(demand_gdf) > 0 
+                and (viz_config is None or viz_config.get('show_demand', True))):
                 demand_layer = self._create_demand_layer(demand_gdf, assignments)
                 layers.append(demand_layer)
             
             # 5. Add selected facilities (on top)
-            if candidate_gdf is not None and selected_indices:
+            if (candidate_gdf is not None and selected_indices 
+                and (viz_config is None or viz_config.get('show_facilities', True))):
                 facility_layer = self._create_facility_layer(
                     candidate_gdf, selected_indices
                 )
@@ -174,6 +179,74 @@ class PyDeckVisualizer:
                 initial_view_state=pdk.ViewState(latitude=40.7, longitude=-74.0, zoom=10),
                 map_style=self.get_basemap_url()
             )
+
+    def generate_legend_html(
+        self,
+        problem_type: Optional[str],
+        has_solution: bool,
+        parameters: Dict[str, Any],
+        constraints: Dict[str, Any],
+        solution: Dict[str, Any],
+    ) -> str:
+        """Generate HTML legend for Streamlit pydeck rendering.
+
+        Notes:
+            `st.pydeck_chart` can't inject HTML into the deck.gl map. This legend is
+            intended to be rendered separately via `st.markdown(..., unsafe_allow_html=True)`
+            and positioned with CSS (fixed bottom-right).
+        """
+        metrics = solution.get("metrics", {}) if has_solution else {}
+
+        # Match the Folium legend placement and keep it readable in Streamlit
+        # Use a unique wrapper id to reduce CSS collisions.
+        blue = "rgb(66,133,244)"
+        gray = "rgb(158,158,158)"
+        orange = "rgb(255,152,0)"
+        red = "rgb(244,67,54)"
+
+        legend_html = f"""
+<div id="spoptv2-pydeck-legend" style="
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  width: 200px;
+  height: auto;
+  background-color: white;
+  z-index: 9999;
+  font-size: 13px;
+  border: 2px solid grey;
+  border-radius: 6px;
+  padding: 10px;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+  line-height: 1.25;
+  pointer-events: none;
+">
+  <div style="display:flex; align-items:baseline; justify-content:space-between; gap:10px;">
+    <h4 style="margin:0 0 6px 0;">Legend</h4>
+  </div>
+"""
+
+        legend_html += f"""
+  <p style="margin:0;"><span style="color:{blue};">●</span> Demand Points</p>
+  <p style="margin:0;"><span style="color:{gray};">●</span> Candidate Sites</p>
+  <p style="margin:0;"><span style="color:{orange};">●</span> Generated Sites</p>
+"""
+
+        if has_solution:
+            legend_html += f"""
+  <p style="margin:0;"><span style="color:{red};">★</span> Selected Facilities</p>
+  <p style="margin:0;"><span style="color:{orange};">★</span> Selected Generated</p>
+  <p style="margin:0;"><span style="color:{gray};">─</span> Assignments</p>
+"""
+            violations = metrics.get("assignment_violations", []) or []
+            if violations:
+                legend_html += f"""
+  <p style="margin:0;"><span style="color:{red};">●</span> Assignment Violations</p>
+  <p style="margin:0;"><span style="color:{red};">─</span> Violation Lines</p>
+"""
+
+        legend_html += "\n</div>\n"
+        return textwrap.dedent(legend_html).strip()
     
     def _calculate_view_state(self, data: Dict[str, gpd.GeoDataFrame]) -> pdk.ViewState:
         """Calculate optimal view state from data bounds"""
@@ -451,12 +524,21 @@ class PyDeckVisualizer:
             return radius
         
         unit = radius_unit.lower().strip()
+        # Handle compound units like "nautical miles"
+        unit = unit.replace(' ', '')
+        
         if unit in ('km', 'kilometer', 'kilometers'):
             return radius * 1000
         elif unit in ('m', 'meter', 'meters'):
             return radius
         elif unit in ('mi', 'mile', 'miles'):
-            return radius * 1609.34
+            return radius * 1609.344
+        elif unit in ('ft', 'foot', 'feet'):
+            return radius * 0.3048
+        elif unit in ('yd', 'yard', 'yards'):
+            return radius * 0.9144
+        elif unit in ('nm', 'nmi', 'nauticalmiles', 'nauticalmile'):
+            return radius * 1852
         else:
             logger.warning(f"PyDeck: Unknown unit '{radius_unit}', assuming meters")
             return radius

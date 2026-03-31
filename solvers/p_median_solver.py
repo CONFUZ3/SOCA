@@ -181,6 +181,7 @@ Where:
             facility_costs = parameters.get('facility_costs') if isinstance(parameters.get('facility_costs'), (list, np.ndarray)) else None
             budget = parameters.get('budget') if isinstance(parameters.get('budget'), (int, float)) else None
             max_assign_dist = parameters.get('max_assignment_distance') if isinstance(parameters.get('max_assignment_distance'), (int, float)) else None
+            service_radius_unit = parameters.get('service_radius_unit', 'm')
             
             # Fallback configuration
             fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
@@ -274,7 +275,8 @@ Where:
                 distance_matrix, demand_weights, 
                 solution['selected_facilities'], 
                 solution['assignments'],
-                objective_type
+                objective_type,
+                distance_unit=service_radius_unit
             )
             
             # Add validation results to metrics
@@ -724,8 +726,16 @@ Where:
         if service_radius is None and max_assignment_distance is None:
             return validation_results
         
-        # Use the appropriate threshold
-        threshold = service_radius if service_radius is not None else max_assignment_distance
+        # Use the appropriate threshold value
+        threshold_value = service_radius if service_radius is not None else max_assignment_distance
+        
+        # Get unit from parameters and convert to meters for comparison
+        # (distance_matrix is already in meters from DistanceCalculator)
+        from utils.distance_calculator import DistanceCalculator
+        dist_calc = DistanceCalculator()
+        
+        service_radius_unit = parameters.get('service_radius_unit')
+        threshold_meters = dist_calc._convert_to_meters(threshold_value, service_radius_unit)
         
         violations = []
         violation_distances = []
@@ -733,13 +743,13 @@ Where:
         for demand_idx, facility_idx in assignments.items():
             if demand_idx < distance_matrix.shape[0] and facility_idx < distance_matrix.shape[1]:
                 distance = distance_matrix[demand_idx, facility_idx]
-                if distance > threshold:
+                if distance > threshold_meters:
                     violations.append({
                         'demand_idx': demand_idx,
                         'facility_idx': facility_idx,
                         'distance': distance,
-                        'threshold': threshold,
-                        'excess': distance - threshold
+                        'threshold': threshold_meters,
+                        'excess': distance - threshold_meters
                     })
                     violation_distances.append(distance)
         
@@ -750,10 +760,11 @@ Where:
             validation_results['avg_violation_distance'] = sum(violation_distances) / len(violation_distances) if violation_distances else 0
             
             # Log warnings for violations
-            logger.warning(f"Found {len(violations)} assignment violations exceeding service radius {threshold}")
+            unit_str = service_radius_unit or 'meters'
+            logger.warning(f"Found {len(violations)} assignment violations exceeding service radius {threshold_value} {unit_str} ({threshold_meters:.0f} meters)")
             for violation in violations[:5]:  # Log first 5 violations
                 logger.warning(f"Demand {violation['demand_idx']} -> Facility {violation['facility_idx']}: "
-                              f"distance {violation['distance']:.2f} > threshold {violation['threshold']:.2f}")
+                              f"distance {violation['distance']:.2f}m > threshold {violation['threshold']:.2f}m")
         
         return validation_results
 
@@ -763,7 +774,8 @@ Where:
         demand_weights: np.ndarray,
         selected_facilities: List[int],
         assignments: Dict[int, int],
-        objective_type: str
+        objective_type: str,
+        distance_unit: Optional[str] = None
     ) -> Dict[str, float]:
         """Calculate solution metrics"""
         # Calculate distances for assignments
@@ -778,6 +790,10 @@ Where:
         average_distance = total_weighted_distance / total_weight if total_weight > 0 else 0.0
         max_distance = float(max((d for d, w in distances), default=0))
         
+        # Convert distances to user-requested units if specified
+        from utils.distance_calculator import DistanceCalculator
+        dist_calc = DistanceCalculator()
+        
         # Determine objective value based on objective type
         if objective_type == "average":
             objective_value = average_distance
@@ -785,6 +801,12 @@ Where:
         else:  # "total" is default
             objective_value = total_weighted_distance
             objective_name = "total_weighted_distance"
+            
+        # Perform unit conversions
+        objective_value = dist_calc.convert_meters_to_unit(objective_value, distance_unit)
+        total_weighted_distance = dist_calc.convert_meters_to_unit(total_weighted_distance, distance_unit)
+        average_distance = dist_calc.convert_meters_to_unit(average_distance, distance_unit)
+        max_distance = dist_calc.convert_meters_to_unit(max_distance, distance_unit)
         
         return {
             # Objective info for P-Median

@@ -108,7 +108,8 @@ class _BinaryGeneticOptimizer:
                 logger.info(f"GA: Generation {generation}, best objective: {best_objective:.4f}, elapsed: {elapsed:.2f}s, evaluations: {evaluations}")
 
         elapsed = time.time() - start
-        logger.info(f"GA: Optimization completed - generations: {generation}, evaluations: {evaluations}, elapsed: {elapsed:.2f}s, timed_out: {timed_out}, best_objective: {best_objective:.4f if np.isfinite(best_objective) else 'inf'}")
+        best_obj_str = f"{best_objective:.4f}" if np.isfinite(best_objective) else "inf"
+        logger.info(f"GA: Optimization completed - generations: {generation}, evaluations: {evaluations}, elapsed: {elapsed:.2f}s, timed_out: {timed_out}, best_objective: {best_obj_str}")
         return {
             "best_individual": best_individual,
             "best_objective": float(best_objective) if np.isfinite(best_objective) else None,

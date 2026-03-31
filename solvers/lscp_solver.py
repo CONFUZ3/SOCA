@@ -217,7 +217,8 @@ Where:
             metrics = self._calculate_metrics(
                 coverage_matrix, distance_matrix,
                 solution['selected_facilities'],
-                service_radius
+                service_radius,
+                service_radius_unit=service_radius_unit
             )
             
             solution_time = time.time() - start_time
@@ -427,7 +428,8 @@ Where:
         coverage_matrix: np.ndarray,
         distance_matrix: np.ndarray,
         selected_facilities: List[int],
-        service_radius: float
+        service_radius: float,
+        service_radius_unit: Optional[str] = None
     ) -> Dict[str, float]:
         n_demand = coverage_matrix.shape[0]
         num_facilities = len(selected_facilities)
@@ -446,7 +448,6 @@ Where:
                 f"This indicates a potential issue with the solution or data."
             )
         
-        # Calculate distances
         if num_facilities > 0:
             min_distances = np.min(distance_matrix[:, selected_facilities], axis=1)
             avg_distance = float(np.mean(min_distances))
@@ -454,6 +455,10 @@ Where:
         else:
             avg_distance = 0.0
             max_distance = 0.0
+            
+        # Convert distances to user-requested units if specified
+        from utils.distance_calculator import DistanceCalculator
+        dist_calc = DistanceCalculator()
         
         return {
             # Objective info for LSCP (minimize facilities)
@@ -465,8 +470,8 @@ Where:
             "num_covered_points": int(np.sum(covered)),
             "num_uncovered_points": int(n_demand - np.sum(covered)),
             "service_radius": float(service_radius),
-            "average_distance": avg_distance,
-            "max_distance": max_distance,
+            "average_distance": dist_calc.convert_meters_to_unit(avg_distance, service_radius_unit),
+            "max_distance": dist_calc.convert_meters_to_unit(max_distance, service_radius_unit),
             "total_demand_points": n_demand
         }
     

@@ -17,6 +17,29 @@ class DistanceCalculator:
     accurate distance measurements regardless of latitude.
     """
     
+    # GIS-compliant conversion factors (to meters)
+    CONVERSION_FACTORS = {
+        'm': 1.0,
+        'meter': 1.0,
+        'meters': 1.0,
+        'km': 1000.0,
+        'kilometer': 1000.0,
+        'kilometers': 1000.0,
+        'mi': 1609.344,
+        'mile': 1609.344,
+        'miles': 1609.344,
+        'ft': 0.3048,
+        'foot': 0.3048,
+        'feet': 0.3048,
+        'yd': 0.9144,
+        'yard': 0.9144,
+        'yards': 0.9144,
+        'nm': 1852.0,
+        'nmi': 1852.0,
+        'nauticalmile': 1852.0,
+        'nauticalmiles': 1852.0
+    }
+    
     def __init__(self):
         self._cache: Dict[str, np.ndarray] = {}
         self._cache_max_size = 10  # Limit cache size
@@ -96,19 +119,38 @@ class DistanceCalculator:
         if unit is None:
             logger.warning(
                 f"No unit specified for threshold {threshold}. Assuming meters. "
-                "Specify unit explicitly (e.g., 'km', 'm', 'miles') to avoid ambiguity."
+                "Specify unit explicitly (e.g., 'km', 'm', 'miles', 'ft', 'yd', 'nm') to avoid ambiguity."
             )
             return threshold
         
-        unit = unit.lower().strip()
-        if unit in ('m', 'meter', 'meters'):
-            return threshold
-        elif unit in ('km', 'kilometer', 'kilometers'):
-            return threshold * 1000
-        elif unit in ('mi', 'mile', 'miles'):
-            return threshold * 1609.34
+        unit = unit.lower().strip().replace(' ', '')
+        
+        if unit in self.CONVERSION_FACTORS:
+            return threshold * self.CONVERSION_FACTORS[unit]
         else:
-            raise ValueError(f"Unknown unit: {unit}. Use 'm', 'km', or 'miles'.")
+            raise ValueError(f"Unknown unit: {unit}. Use 'm', 'km', 'miles', 'ft', 'yd', or 'nm'.")
+
+    def convert_meters_to_unit(self, value: float, unit: Optional[str] = None) -> float:
+        """Convert value from meters to specified unit.
+        
+        Args:
+            value: Value in meters
+            unit: Target unit ('m', 'km', 'miles', etc.)
+            
+        Returns:
+            Value in target unit
+        """
+        if unit is None:
+            return value
+            
+        unit = unit.lower().strip().replace(' ', '')
+        
+        if unit in self.CONVERSION_FACTORS:
+            factor = self.CONVERSION_FACTORS[unit]
+            return value / factor if factor != 0 else 0.0
+        else:
+            logger.warning(f"Unknown unit for reverse conversion: {unit}. Returning original value.")
+            return value
     
     def _geodesic_distance_matrix(
         self, 

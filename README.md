@@ -1,308 +1,86 @@
-# Spatial Optimization Conversational Agent
+# **SOCA: A Conversational Agent for Facility Location Problems**
 
-A tool for solving facility location problems using conversational AI powered by Google Gemini.
+Application for conversational facility-location optimization using geospatial data and mixed-integer programming.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)
-![Streamlit](https://img.shields.io/badge/Streamlit-1.31+-red.svg)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
+## Scope
 
-## 🎯 Overview
+Supported models:
 
-This application combines cutting-edge optimization algorithms with natural language AI to help urban planners, researchers, and administrators solve complex spatial optimization problems through simple conversation.
+- P-Median
+- P-Center
+- MCLP (including budget/capacity/probabilistic/multi-coverage variants)
+- LSCP
 
-### Key Features
+Core capabilities:
 
-- 🗣️ **Conversational Interface**: Describe your problem in natural language - no coding required
-- 🗺️ **Interactive Visualization**: See your solutions on beautiful interactive maps
-- 🎯 **Multiple Problem Types**: P-Median, P-Center, MCLP, LSCP, and more
-- 🧩 **Advanced Variants**: P-Median (capacitated, budget, max-distance), MCLP (budget, capacitated, probabilistic, multi-coverage, backup)
-- 📊 **Rich Analytics**: Comprehensive metrics and performance indicators
-- 🔌 **Extensible Architecture**: Easy to add new problem types
-- 🤖 **Smart Data Inference**: Auto-detects dataset roles and extracts capacities/costs/demand columns when variants require them
-- 💾 **Export Capabilities**: GeoJSON, CSV, PDF reports, and more
+- Natural-language problem setup via Gemini
+- Geospatial input handling (CSV/GeoJSON/Shapefile)
+- Interactive map output and result export
 
-## 🚀 Quick Start
+## Repository Contents
 
-### Prerequisites
+- `app.py`: Streamlit entry point
+- `agent/`: conversation and prompt logic
+- `solvers/`: optimization model implementations
+- `utils/`: data processing, distance, visualization, export helpers
+- `datasets/`: included datasets used for experiments/examples
+- `tests/`: unit and integration-oriented tests
 
-- Python 3.10 or higher
-- Google Gemini API key (get one at [Google AI Studio](https://aistudio.google.com/))
-- Gurobi license (optional - will fall back to PuLP if not available)
+## Requirements
 
-### Installation
+- Python 3.10+
+- `pip` and virtual environment tooling
+- Gemini API key
+- Optional: Gurobi license (PuLP fallback is supported)
 
-1. **Clone the repository**
-```bash
-git clone <repository-url>
-cd spoptv2
-```
+## Setup
 
-2. **Create virtual environment**
 ```bash
 python -m venv venv
-
 # Windows
 venv\Scripts\activate
-
-# Unix/MacOS
+# Linux/macOS
 source venv/bin/activate
-```
 
-3. **Install dependencies**
-```bash
 pip install -r requirements.txt
 ```
 
-4. **Set up environment variables**
+Create a local env file (do not commit secrets):
+
 ```bash
-# Create .env file
-echo GEMINI_API_KEY=your_api_key_here > .env
+cp .env.example .env
 ```
 
-Alternatively, create `.streamlit/secrets.toml`:
-```toml
-GEMINI_API_KEY = "your_api_key_here"
-```
+Set `GEMINI_API_KEY` in `.env` or in `.streamlit/secrets.toml`.
 
-5. **Generate test data** (optional)
-```bash
-python tests/generate_test_data.py
-```
+## Run
 
-   Or download real-world test datasets:
-```bash
-pip install requests  # if not already installed
-python download_test_datasets.py
-```
-   See [DATASETS.md](DATASETS.md) for more dataset sources and options.
-
-6. **Run the application**
 ```bash
 streamlit run app.py
 ```
 
-The application will open in your browser at `http://localhost:8501`
+Default local URL: `http://localhost:8501`
 
-## 📖 Usage
+## Data
 
-### 1. Upload Data
+The `datasets/` directory is intentionally included for reproducibility.
 
-Upload your geospatial data files in the sidebar:
-- **Demand points**: Locations with demand/population (GeoJSON, Shapefile, CSV with coordinates)
-- **Candidate sites**: Potential facility locations (same formats)
+Expected inputs:
 
-### 2. Describe Your Problem
+- Demand points with optional demand weights
+- Candidate facility locations
 
-Simply describe what you want to achieve:
+## Testing
 
-**Example conversations:**
-- "I need to locate 5 fire stations to minimize response times"
-- "Where should I place 3 warehouses to minimize average shipping distance?"
-- "I want to maximize coverage within 5km using 4 facilities"
-- "What's the minimum number of ambulance stations needed to cover all areas within 10 minutes?"
-
-### 3. Review Results
-
-- View the solution on an interactive map
-- Analyze performance metrics
-- Export results in multiple formats
-- Iterate and refine your solution
-
-## 🧮 Supported Problem Types
-
-### P-Median Problem
-**Objective**: Minimize total or average weighted distance
-
-**Use cases**: Warehouse location, distribution centers, service facilities
-
-**Example**: "Locate 5 libraries to minimize average distance for residents"
-
-**Variants**:
-- Base: minimize total/average distance
-- Capacitated: enforce facility capacity limits via `capacities`
-- Budget: select facilities under `budget` with `facility_costs`
-- Max-distance: forbid assignments beyond `max_assignment_distance`
-
-### P-Center Problem
-**Objective**: Minimize maximum distance (minimax/equity)
-
-**Use cases**: Emergency services, disaster relief, equal access requirements
-
-**Example**: "Place 3 fire stations to minimize worst-case response time"
-
-### Maximum Covering Location Problem (MCLP)
-**Objective**: Maximize demand covered within a service radius
-
-**Use cases**: Retail placement, emergency coverage, facility budgeting
-
-**Example**: "Maximize population served within 5km using 4 health clinics"
-
-**Variants**:
-- Classical: maximize covered demand within `service_radius` using `n_facilities`
-- Budget: maximize coverage subject to `budget` (optional `facility_costs`)
-- Capacitated: respect `capacities`; fractional service supported
-- Probabilistic: coverage scaled by `facility_reliability` in [0,1]
-- Multi-coverage/Backup: require at least `k_coverage` facilities per demand
-
-### Location Set Covering Problem (LSCP)
-**Objective**: Minimize facilities needed for full coverage
-
-**Use cases**: Minimum infrastructure deployment, cost optimization
-
-**Example**: "What's the minimum number of cell towers to cover the entire city?"
-
-## 📁 Project Structure
-
-```
-spoptv2/
-├── app.py                          # Main Streamlit application
-├── requirements.txt                # Python dependencies
-├── README.md                       # This file
-├── .env.example                    # Example environment variables
-├── config/
-│   └── settings.py                 # Configuration settings
-├── solvers/
-│   ├── base_solver.py              # Abstract base class
-│   ├── registry.py                 # Problem registry
-│   ├── p_median_solver.py          # P-Median implementation
-│   ├── p_center_solver.py          # P-Center implementation
-│   ├── mclp_solver.py              # MCLP implementation
-│   └── lscp_solver.py              # LSCP implementation
-├── agent/
-│   ├── conversation_manager.py     # Gemini API integration (action gating, data sync)
-│   └── prompts.py                  # System prompts
-├── utils/
-│   ├── data_processor.py           # Data loading/validation; auto-detect costs/capacities/demand
-│   ├── distance_calculator.py      # Distance matrix computation
-│   ├── visualizer.py               # Map generation
-│   └── export_handler.py           # Export functionality
-├── tests/
-│   ├── test_solvers.py             # Unit tests
-│   ├── generate_test_data.py       # Test data generation
-│   └── test_data/                  # Sample datasets
-└── docs/
-    └── architecture.md             # System architecture
-```
-
-## 🔬 Academic Use
-
-This tool is designed for academic research and includes:
-
-- **Mathematical formulations** for each problem type
-- **Academic references** in APA format
-- **Computational complexity** analysis
-- **Algorithm documentation** with citations
-- **Reproducible solutions** (all parameters saved)
-
-### Citations
-
-When using this tool in research, please cite the relevant papers listed in each solver's metadata. Access citations through:
-```python
-from solvers.registry import problem_registry
-solver = problem_registry.get_problem("p-median")
-references = solver.get_metadata()["academic_refs"]
-```
-
-## 🧪 Testing
-
-Run the test suite:
 ```bash
 pytest tests/ -v
-
-# With coverage
 pytest tests/ -v --cov=solvers --cov=utils --cov=agent
 ```
 
-### Scenario tests to try
-- P-Median max-distance with `max_assignment_distance`
-- MCLP budget with `budget` and candidate `cost` column
-- MCLP capacitated with candidate `capacity` column or inferred defaults
+## License
 
-## 🔧 Configuration
+MIT License. See `LICENSE`.
 
-### Solver Settings
+## Contact
 
-Edit `config/settings.py` to adjust:
-- Preferred solver (Gurobi vs PuLP)
-- Time limits
-- MIP gap tolerances
-- Distance calculation methods
-- Visualization defaults
-
-### Distance Metrics
-
-Supported distance metrics:
-- **Euclidean**: Straight-line distance (default)
-- **Manhattan**: Grid-based distance
-- **Network**: Road network distance (requires OSMnx - future feature)
-
-## 📊 Export Options
-
-Export your solutions in multiple formats:
-
-- **GeoJSON**: Selected facilities with metadata
-- **CSV**: Assignments and metrics
-- **Shapefile**: For use in GIS software
-- **PDF Report**: Comprehensive solution documentation
-
-## 🤝 Contributing
-
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-### Adding New Problem Types
-
-1. Create a new solver class inheriting from `SpatialOptimizationProblem`
-2. Implement all required abstract methods
-3. Add to registry in `solvers/registry.py`
-4. Write tests in `tests/`
-5. Document in `docs/problems/`
-
-See `docs/architecture.md` for detailed instructions.
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**"GEMINI_API_KEY not found"**
-- Ensure you've set the API key in `.env` or `.streamlit/secrets.toml`
-
-**"Gurobi not available"**
-- This is fine! The system will automatically use PuLP as a fallback
-- For better performance on large problems, install Gurobi with a license
-
-**"Unexpected variant requirements"**
-- Some variants require extra parameters:
-  - P-Median budget: `budget` and `facility_costs`
-  - P-Median max-distance: `max_assignment_distance`
-  - MCLP capacitated: `capacities` (auto-inferred if missing)
-  - MCLP multi-coverage/backup: `k_coverage`
-  - MCLP probabilistic: optional `facility_reliability`
-
-**"No module named 'geopandas'"**
-- Run `pip install -r requirements.txt` to install all dependencies
-
-**Map not displaying**
-- Check that your data has valid geometries
-- Ensure CRS is set correctly (should auto-detect to EPSG:4326)
-
-## 📝 License
-
-MIT License - see LICENSE file for details
-
-## 🙏 Acknowledgments
-
-- Google Gemini for conversational AI
-- Gurobi/PuLP for optimization engines
-- Streamlit for the web framework
-- OpenStreetMap for base maps
-
-## 📧 Contact
-
-For questions, issues, or contributions:
-- Open an issue on GitHub
-- Email: [mahad.imran29@gmail.com]
-
----
-
-**Built with ❤️ for urban planning and spatial optimization research**
-
+For issues and questions, use repository issues or contact: `mahad.imran29@gmail.com`

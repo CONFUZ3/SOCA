@@ -297,7 +297,8 @@ Where:
                 shared_data.get('facility_costs'),
                 parameters.get('budget'),
                 parameters.get('facility_reliability'),
-                solution.get('y_values')
+                solution.get('y_values'),
+                service_radius_unit=service_radius_unit
             )
             
             solution_time = time.time() - start_time
@@ -501,16 +502,36 @@ Where:
         Returns:
             Array of demand weights, allowing zero weights for valid use cases.
         """
+        # DEBUG: Log available columns
+        all_cols = [c for c in demand_gdf.columns if c != 'geometry']
+        logger.info(f"_extract_weights: Available columns in demand data: {all_cols}")
+        
         # 1) Explicit parameter takes precedence
         try:
             explicit_col = parameters.get('demand_weight_column')
             if explicit_col:
+                logger.info(f"_extract_weights: Looking for explicit column '{explicit_col}'")
+                explicit_lower = str(explicit_col).lower()
+                # Try exact case-insensitive match first
                 for c in demand_gdf.columns:
-                    if c.lower() == str(explicit_col).lower():
+                    if c.lower() == explicit_lower:
                         values = demand_gdf[c].astype(float).to_numpy()
                         if np.any(values < 0):
                             raise ValueError(f"Demand weight column '{c}' contains negative values")
+                        logger.info(f"Using explicit weight column '{c}' with sum={values.sum():.2f}")
                         return values
+                # Try partial match (for truncated column names like 'ExpectedVa' from 'ExpectedValue')
+                for c in demand_gdf.columns:
+                    c_lower = c.lower()
+                    if c_lower.startswith(explicit_lower[:6]) or explicit_lower.startswith(c_lower[:6]):
+                        try:
+                            values = demand_gdf[c].astype(float).to_numpy()
+                            if np.all(values >= 0):
+                                logger.info(f"Using partial-matched weight column '{c}' for requested '{explicit_col}' with sum={values.sum():.2f}")
+                                return values
+                        except Exception:
+                            continue
+                logger.warning(f"Explicit demand_weight_column '{explicit_col}' not found in columns: {all_cols}")
         except Exception as e:
             logger.warning(f"Failed to use explicit demand_weight_column: {e}")
 
@@ -527,8 +548,8 @@ Where:
                 except Exception:
                     pass
 
-        # 3) Substring heuristic: pick the first numeric column whose name contains pop/weight/demand
-        substr_keys = ['population', 'pop', 'weight', 'demand']
+        # 3) Substring heuristic: pick the first numeric column whose name contains pop/weight/demand/expected/value
+        substr_keys = ['population', 'pop', 'weight', 'demand', 'expected', 'value', 'score', 'priority']
         for c in demand_gdf.columns:
             lc = c.lower()
             if any(k in lc for k in substr_keys):
@@ -1141,7 +1162,8 @@ Where:
         facility_costs: Optional[np.ndarray] = None,
         budget: Optional[float] = None,
         reliability: Optional[np.ndarray] = None,
-        y_values: Optional[Dict[tuple, float]] = None
+        y_values: Optional[Dict[tuple, float]] = None,
+        service_radius_unit: Optional[str] = None
     ) -> Dict[str, float]:
         n_demand = len(demand_weights)
         
@@ -1262,6 +1284,10 @@ Where:
             # classical, budget, multi_coverage, backup
             objective_name = "covered_demand"
 
+        # Convert distances to user-requested units if specified
+        from utils.distance_calculator import DistanceCalculator
+        dist_calc = DistanceCalculator()
+        
         metrics = {
             "coverage_percentage": float(coverage_pct),
             "covered_demand": float(covered_weight),
@@ -1270,7 +1296,7 @@ Where:
             "num_covered_points": int(np.sum(covered)),
             "num_uncovered_points": int(n_demand - np.sum(covered)),
             "service_radius": float(service_radius),
-            "average_distance_covered": float(avg_distance_covered),
+            "average_distance_covered": dist_calc.convert_meters_to_unit(float(avg_distance_covered), service_radius_unit),
             "num_facilities": int(len(selected_facilities)),
             "avg_coverage_count": float(np.mean(cover_counts)) if len(cover_counts) > 0 else 0.0,
             # Add consistent objective info for UI/analytics

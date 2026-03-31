@@ -1,38 +1,70 @@
-# Python
+# ------------------------------
+# Python / virtualenv
+# ------------------------------
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+.venv/
 venv/
 env/
-.env
+ENV/
 
-# Streamlit
+# ------------------------------
+# Secrets / local config
+# ------------------------------
+.env
+.env.*
+!.env.example
 .streamlit/secrets.toml
 
-# Data
-data/
-temp/
-*.geojson
-*.shp
-*.shx
-*.dbf
-*.prj
-*.cpg
+# ------------------------------
+# Build / packaging / tooling
+# ------------------------------
+build/
+dist/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
 
-# IDE
+# ------------------------------
+# Runtime artifacts
+# ------------------------------
+logs/
+*.log
+tmp/
+temp/
+data/
+outputs/
+exports/
+
+# ------------------------------
+# IDE / editor
+# ------------------------------
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-
-# OS
+# ------------------------------
+# OS files
+# ------------------------------
 .DS_Store
 Thumbs.db
+
+# ------------------------------
+# Keep publication datasets
+# ------------------------------
+!datasets/
+!datasets/**
+datasets/**/__pycache__/
+datasets/**/*.py[cod]
+datasets/**/*.pyo
 
