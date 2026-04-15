@@ -292,10 +292,20 @@ class PyDeckVisualizer:
         )
     
     def _gdf_to_points_df(self, gdf: gpd.GeoDataFrame) -> pd.DataFrame:
-        """Convert GeoDataFrame to DataFrame with lon/lat columns"""
+        """Convert GeoDataFrame to DataFrame with lon/lat columns.
+
+        Handles Point, Polygon, MultiPolygon, etc. by using centroids for
+        non-Point geometries (e.g. OSM way/relation candidates).
+        """
+        def _lon(geom):
+            return geom.x if geom.geom_type == 'Point' else geom.centroid.x
+
+        def _lat(geom):
+            return geom.y if geom.geom_type == 'Point' else geom.centroid.y
+
         df = pd.DataFrame({
-            'lon': [geom.x for geom in gdf.geometry],
-            'lat': [geom.y for geom in gdf.geometry],
+            'lon': [_lon(geom) for geom in gdf.geometry],
+            'lat': [_lat(geom) for geom in gdf.geometry],
             'idx': range(len(gdf))
         })
         
@@ -376,6 +386,16 @@ class PyDeckVisualizer:
             auto_highlight=True,
         )
     
+    @staticmethod
+    def _geom_lon(geom) -> float:
+        """Return longitude, using centroid for non-Point geometries."""
+        return geom.x if geom.geom_type == 'Point' else geom.centroid.x
+
+    @staticmethod
+    def _geom_lat(geom) -> float:
+        """Return latitude, using centroid for non-Point geometries."""
+        return geom.y if geom.geom_type == 'Point' else geom.centroid.y
+
     def _create_facility_layer(
         self,
         gdf: gpd.GeoDataFrame,
@@ -389,8 +409,8 @@ class PyDeckVisualizer:
                 row = gdf.iloc[idx]
                 is_generated = 'generated' in gdf.columns and row.get('generated', False)
                 selected_rows.append({
-                    'lon': row.geometry.x,
-                    'lat': row.geometry.y,
+                    'lon': self._geom_lon(row.geometry),
+                    'lat': self._geom_lat(row.geometry),
                     'idx': idx,
                     'color': self.COLORS['generated'] if is_generated else self.COLORS['selected'],
                     'name': f"{'Generated ' if is_generated else ''}Facility {idx}",
@@ -434,8 +454,8 @@ class PyDeckVisualizer:
                 f_geom = facility_gdf.iloc[facility_idx].geometry
                 
                 lines.append({
-                    'start': [d_geom.x, d_geom.y],
-                    'end': [f_geom.x, f_geom.y],
+                    'start': [self._geom_lon(d_geom), self._geom_lat(d_geom)],
+                    'end': [self._geom_lon(f_geom), self._geom_lat(f_geom)],
                     'color': self.COLORS['assignment']
                 })
         
@@ -478,8 +498,8 @@ class PyDeckVisualizer:
             if 0 <= idx < len(facility_gdf):
                 geom = facility_gdf.iloc[idx].geometry
                 circles.append({
-                    'lon': geom.x,
-                    'lat': geom.y,
+                    'lon': self._geom_lon(geom),
+                    'lat': self._geom_lat(geom),
                     'radius': radius_meters,
                     'color': self.COLORS['service_area']
                 })

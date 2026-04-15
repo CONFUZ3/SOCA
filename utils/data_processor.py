@@ -429,86 +429,139 @@ class DataProcessor:
         return demand_data
     
     def generate_candidate_sites(
-        self, 
-        demand_gdf: gpd.GeoDataFrame, 
-        num_sites: int = 100, 
+        self,
+        demand_gdf: gpd.GeoDataFrame,
+        num_sites: int = 100,
         random_seed: Optional[int] = None
     ) -> gpd.GeoDataFrame:
         """
-        Generate random candidate sites within the extent of demand data.
-        For geographic coordinates (lat/lon), uses equal-area sampling on the sphere
-        to avoid bias towards poles.
-        
+        Generate random candidate sites within the actual extent of demand data.
+
+        Uses rejection sampling against the convex hull of the demand points so
+        that candidates are confined to the region where demand data actually
+        exists, not just the rectangular bounding box.  For geographic
+        coordinates (lat/lon) the candidate longitude is sampled uniformly and
+        latitude is sampled with an inverse-sine transform so that the spatial
+        density is equal-area on the sphere.
+
+        A thread-safe, instance-local ``numpy.random.Generator`` is used
+        instead of ``np.random.seed()`` so that the global NumPy RNG state is
+        never mutated.
+
         Args:
-            demand_gdf: Demand points GeoDataFrame to use for extent
-            num_sites: Number of candidate sites to generate (default: 100)
-            random_seed: Optional random seed for reproducibility
-            
+            demand_gdf: Demand points GeoDataFrame used to determine the
+                sampling region (its convex hull).
+            num_sites: Number of candidate sites to generate (default: 100).
+            random_seed: Optional integer seed for reproducibility.
+
         Returns:
-            GeoDataFrame with generated candidate sites
+            GeoDataFrame with generated candidate sites and columns
+            ``site_id``, ``x``, ``y``, ``generated``.  CRS matches
+            *demand_gdf*.
         """
-        import numpy as np
-        
+        from shapely.geometry import Point
+        from shapely.ops import unary_union
+
         if len(demand_gdf) == 0:
             raise ValueError("Demand dataset is empty, cannot generate candidate sites")
-        
-        # Set random seed if provided
+
+        # Use a local Generator — never mutate the global NumPy RNG state.
+        rng = np.random.default_rng(random_seed)
         if random_seed is not None:
-            np.random.seed(random_seed)
             logger.info(f"Using random seed {random_seed} for candidate site generation")
-        
+
+        # Build a containment polygon: convex hull of all demand geometries.
+        # This confines candidates to the actual study area rather than the
+        # rectangular bounding box (which may contain large void regions).
+        # If demand points are collinear or fewer than 3, the hull degenerates
+        # into a LineString or Point — contains() would always return False.
+        # In that case we skip containment checking and sample from the bbox.
+        containment_geom = None
+        try:
+            hull = unary_union(demand_gdf.geometry.values).convex_hull
+            if hull.geom_type in ("Polygon", "MultiPolygon") and not hull.is_empty:
+                containment_geom = hull
+            else:
+                logger.info(
+                    f"Demand convex hull is a {hull.geom_type} (degenerate); "
+                    "using bounding-box sampling without containment check."
+                )
+        except Exception as exc:
+            logger.warning(
+                f"Could not build convex hull for containment check ({exc}); "
+                "falling back to bounding-box sampling."
+            )
+
         # Get bounding box of demand data
         bounds = demand_gdf.total_bounds  # minx, miny, maxx, maxy
         minx, miny, maxx, maxy = bounds
-        
-        # Check if coordinates are geographic (Lat/Lon)
+
+        # Determine whether coordinates are geographic (lat/lon)
         is_geographic = False
         if demand_gdf.crs and demand_gdf.crs.is_geographic:
             is_geographic = True
         elif demand_gdf.crs is None:
-            # Heuristic check
             if -180 <= minx and maxx <= 180 and -90 <= miny and maxy <= 90:
                 is_geographic = True
-        
+
+        def _sample_candidate() -> Point:
+            """Draw one candidate point from the bounding box."""
+            x = rng.uniform(minx, maxx)
+            if is_geographic:
+                ymin_rad = np.radians(miny)
+                ymax_rad = np.radians(maxy)
+                sin_val = rng.uniform(np.sin(ymin_rad), np.sin(ymax_rad))
+                y = np.degrees(np.arcsin(sin_val))
+            else:
+                y = rng.uniform(miny, maxy)
+            return Point(x, y)
+
         if is_geographic:
-            # Use equal-area sampling on sphere for Lat/Lon
-            # Longitude is uniform
-            random_x = np.random.uniform(minx, maxx, num_sites)
-            
-            # Latitude needs inverse transform sampling: y = asin(uniform(sin(ymin), sin(ymax)))
-            # Convert to radians for calculation
-            ymin_rad = np.radians(miny)
-            ymax_rad = np.radians(maxy)
-            
-            # Uniformly sample in sin-space
-            sin_vals = np.random.uniform(np.sin(ymin_rad), np.sin(ymax_rad), num_sites)
-            
-            # Convert back to latitude degrees
-            random_y = np.degrees(np.arcsin(sin_vals))
-            
-            logger.info("Used sphere-aware sampling for geographic coordinates")
-        else:
-            # Standard uniform sampling for projected coordinates
-            random_x = np.random.uniform(minx, maxx, num_sites)
-            random_y = np.random.uniform(miny, maxy, num_sites)
-        
-        # Create GeoDataFrame with generated points
-        from shapely.geometry import Point
-        
-        geometry = [Point(x, y) for x, y in zip(random_x, random_y)]
-        
+            logger.info("Using sphere-aware sampling for geographic coordinates")
+
+        # Rejection-sample to keep only points inside the containment polygon.
+        # Allow up to 30× attempts per desired point.
+        MAX_ATTEMPTS = num_sites * 30
+        accepted: list[Point] = []
+        attempts = 0
+
+        while len(accepted) < num_sites and attempts < MAX_ATTEMPTS:
+            pt = _sample_candidate()
+            if containment_geom is None or containment_geom.contains(pt):
+                accepted.append(pt)
+            attempts += 1
+
+        if not accepted:
+            raise ValueError(
+                "Could not generate any candidate sites within the demand area. "
+                "The demand geometry may be too small or degenerate."
+            )
+
+        if len(accepted) < num_sites:
+            logger.warning(
+                f"Could only generate {len(accepted)}/{num_sites} candidate sites "
+                f"after {MAX_ATTEMPTS} attempts (thin or very non-convex demand area?)."
+            )
+
+        xs = [p.x for p in accepted]
+        ys = [p.y for p in accepted]
+        n_actual = len(accepted)
+
         candidate_gdf = gpd.GeoDataFrame(
             {
-                'generated': True,  # Mark as generated
-                'site_id': range(num_sites),
-                'x': random_x,
-                'y': random_y
+                "site_id": range(n_actual),
+                "x": xs,
+                "y": ys,
+                "generated": True,
             },
-            geometry=geometry,
-            crs=demand_gdf.crs  # Use same CRS as demand data
+            geometry=accepted,
+            crs=demand_gdf.crs,
         )
-        
-        logger.info(f"Generated {num_sites} candidate sites within demand extent: {bounds}")
+
+        logger.info(
+            f"Generated {n_actual} candidate sites within demand convex hull "
+            f"(bounding box: {bounds})"
+        )
         return candidate_gdf
     
     def load_raster_file(self, file: BinaryIO) -> Dict[str, Any]:

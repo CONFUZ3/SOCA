@@ -24,6 +24,7 @@ scipy>=1.12.0                   # scientific computing
 networkx>=3.2.1                 # network analysis
 
 # Data processing
+hdx-python-api>=6.0.0            # HDX API client for population data
 pandas>=2.2.0                    # allow upgrades but be cautious with breaking changes  
 numpy>=1.26.4                    # allow newer patches  
 openpyxl>=3.1.2                  # allow minor updates
@@ -46,6 +47,10 @@ pytest-cov>=4.1.0                # allow newer
 # Performance monitoring
 psutil>=5.9.0                    # system metrics monitoring
 
+overturemaps>=0.7.0              # Overture Maps cloud-native data (boundaries, POIs)
+pyarrow>=14.0.0                  # Required by overturemaps (Parquet/Arrow I/O)
+
 # Future enhancements (optional - may require additional system dependencies)
-# osmnx>=1.9.1                   # OPTIONAL: OpenStreetMap network analysis  
+# osmnx>=1.9.1                   # OPTIONAL: OpenStreetMap network analysis
 # contextily>=1.5.2              # OPTIONAL: basemap tiles
+# h3>=4.0.0                      # OPTIONAL: H3 hexagonal grid for population demand points

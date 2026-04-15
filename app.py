@@ -6,6 +6,7 @@ import pydeck as pdk
 import geopandas as gpd
 from pathlib import Path
 import os
+import re
 import logging
 import time
 import inspect
@@ -27,6 +28,7 @@ logger = logging.getLogger(__name__)
 from agent.conversation_manager import ConversationManager
 from solvers.registry import problem_registry
 from utils.data_processor import DataProcessor
+from utils.data_fetcher import DataFetcher, DataFetchError
 from utils.visualizer import MapVisualizer
 from utils.pydeck_visualizer import PyDeckVisualizer
 from utils.export_handler import ExportHandler
@@ -94,15 +96,16 @@ def initialize_session_state():
 
 I'm here to help you solve facility location problems using state-of-the-art optimization techniques.
 
-**To get started:**
-1. Upload your geospatial data using the sidebar
-   - **Demand points** (required): Locations with population/demand
-   - **Candidate sites** (optional): Potential facility locations
-2. Describe your optimization problem in natural language
-3. I'll guide you through the process and help you find the optimal solution
+**To get started, you have two options:**
 
-**New Feature: Automatic Candidate Site Generation**
-If you only upload demand data (no candidate sites), I'll automatically generate 100 random candidate sites within your demand extent. You can adjust the count and set a random seed for reproducibility in the sidebar.
+🌐 **Option A — Just describe your problem (fully automatic)**
+Tell me something like *"Place 5 hospitals in Lima, Peru"* and I'll automatically fetch:
+- The city boundary
+- A population demand grid
+- Existing facility locations from OpenStreetMap
+
+📁 **Option B — Upload your own data**
+Use the sidebar to upload GeoJSON, Shapefile, or CSV files, then describe your problem.
 
 **I can help you with:**
 - P-Median: Minimize average/total distance
@@ -160,6 +163,9 @@ What problem would you like to solve today?"""
     
     if "export_handler" not in st.session_state:
         st.session_state.export_handler = ExportHandler()
+    
+    if "data_fetcher" not in st.session_state:
+        st.session_state.data_fetcher = None  # Lazy-initialised on first use
 
 initialize_session_state()
 
@@ -172,6 +178,7 @@ with st.sidebar:
     # File upload section
     st.subheader("Upload Data")
     st.markdown("Upload geospatial data files (GeoJSON, Shapefile, CSV)")
+    st.caption("🌐 Or just describe your problem with a **location name** and I'll fetch data automatically!")
     
     uploaded_files = st.file_uploader(
         "Choose files",
@@ -316,7 +323,7 @@ with st.sidebar:
             data_type = st.session_state.data_processor.identify_data_type(gdf)
             if data_type == "demand_points" or "demand" in name.lower():
                 has_demand = True
-            elif data_type == "candidate_sites" or any(word in name.lower() for word in ['candidate', 'site', 'facility']):
+            if data_type == "candidate_sites" or any(word in name.lower() for word in ['candidate', 'site', 'facility']):
                 has_candidates = True
         
         # Show candidate generation controls if we have demand but no candidates
@@ -682,45 +689,82 @@ def render_map_fragment():
         try:
             data_items = st.session_state.problem_state["data"]
             data_processor = st.session_state.data_processor
-            has_demand_viz = False
-            has_candidates_viz = False
-            for fname, fgdf in data_items.items():
-                dtype = data_processor.identify_data_type(fgdf)
-                if dtype == "demand_points" or "demand" in fname.lower():
-                    has_demand_viz = True
-                if dtype == "candidate_sites" or any(w in fname.lower() for w in ["candidate", "site", "facility"]):
-                    has_candidates_viz = True
+
+            # Categorize datasets (reuse same logic as optimize handler)
+            _viz_boundary_keys = set()
+            _viz_poi_keys = set()
+            _viz_demand_keys = set()
+            for _fname, _fgdf in data_items.items():
+                _src = _fgdf.attrs.get("source", "")
+                _fkey = _fname.lower()
+                if _fkey.startswith("boundary_") or _src in (
+                    "auto_fetched", "overpass_boundary",
+                    "photon_bbox_fallback", "photon_then_overpass",
+                    "nominatim", "nominatim_bbox_fallback",
+                ):
+                    if len(_fgdf) > 0 and _fgdf.geometry.iloc[0].geom_type in ("Polygon", "MultiPolygon"):
+                        _viz_boundary_keys.add(_fname)
+                        continue
+                if "_facilities_" in _fkey or any(
+                    _fkey.startswith(_c + "_") for _c in [
+                        "health", "education", "food", "finance",
+                        "fire_station", "police", "library", "generated",
+                    ]
+                ) or _fkey == "generated_candidates":
+                    _viz_poi_keys.add(_fname)
+                    continue
+                _dtype = data_processor.identify_data_type(_fgdf)
+                if _dtype == "demand_points" or "demand" in _fkey:
+                    _viz_demand_keys.add(_fname)
+                elif _dtype == "candidate_sites" or any(
+                    w in _fkey for w in ["candidate", "site", "facility"]
+                ):
+                    _viz_poi_keys.add(_fname)
+                else:
+                    _viz_demand_keys.add(_fname)
+
+            has_demand_viz    = bool(_viz_demand_keys)
+            has_candidates_viz = bool(_viz_poi_keys)
 
             if has_demand_viz and not has_candidates_viz and "generated_candidates" not in data_items:
                 demand_gdf_viz = None
-                for fname, fgdf in data_items.items():
-                    dtype = data_processor.identify_data_type(fgdf)
-                    if dtype == "demand_points" or "demand" in fname.lower():
-                        demand_gdf_viz = fgdf
-                        break
-                if demand_gdf_viz is not None and len(demand_gdf_viz) > 0:
+                for _fname in _viz_demand_keys:
+                    demand_gdf_viz = data_items[_fname]
+                    break
+
+                boundary_gdf_viz = None
+                for _fname in _viz_boundary_keys:
+                    boundary_gdf_viz = data_items[_fname]
+                    break
+
+                sampling_gdf_viz = boundary_gdf_viz if boundary_gdf_viz is not None else demand_gdf_viz
+
+                if sampling_gdf_viz is not None and len(sampling_gdf_viz) > 0:
                     num_sites = st.session_state.get("generated_sites_count", 100)
                     random_seed = st.session_state.get("generated_sites_seed", None)
                     generated_candidates_viz = data_processor.generate_candidate_sites(
-                        demand_gdf_viz,
+                        sampling_gdf_viz,
                         num_sites=num_sites,
                         random_seed=random_seed
                     )
                     st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates_viz
+                    _viz_poi_keys.add("generated_candidates")
         except Exception as viz_gen_err:
             logger.warning(f"Could not auto-generate candidate sites for visualization: {viz_gen_err}")
-        
-        # Map data to expected format for visualizer
+
+        # Map data to expected format for visualizer (skip boundary/polygon datasets)
         data_processor = st.session_state.data_processor
         mapped_data = {}
-        
+
         for file_name, gdf in st.session_state.problem_state["data"].items():
-            data_type = data_processor.identify_data_type(gdf)
-            
-            if data_type == "demand_points" or "demand" in file_name.lower():
-                mapped_data["demand_points"] = gdf
-            elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
+            # Skip boundary polygons — they are not demand or candidates
+            if file_name in _viz_boundary_keys:
+                continue
+
+            if file_name in _viz_poi_keys:
                 mapped_data["candidate_sites"] = gdf
+            elif file_name in _viz_demand_keys:
+                mapped_data["demand_points"] = gdf
             elif "demand_points" not in mapped_data:
                 mapped_data["demand_points"] = gdf
             elif "candidate_sites" not in mapped_data:
@@ -953,49 +997,101 @@ with col1:
                             data_dict = {}
                             data_processor = st.session_state.data_processor
                             
-                            # Try to intelligently map uploaded files to required data
+                            # Build a set of dataset key names by role so we
+                            # can skip boundary GDFs in demand/candidate mapping.
+                            boundary_keys = set()
+                            poi_candidate_keys = set()  # auto-fetched POI / facility datasets
+                            demand_keys = set()
+
                             for file_name, gdf in st.session_state.problem_state["data"].items():
+                                src = gdf.attrs.get("source", "")
+                                fkey = file_name.lower()
+
+                                # Auto-fetched boundary datasets
+                                if fkey.startswith("boundary_") or src in (
+                                    "auto_fetched",
+                                    "overpass_boundary",
+                                    "photon_bbox_fallback",
+                                    "photon_then_overpass",
+                                    "nominatim",
+                                    "nominatim_bbox_fallback",
+                                ):
+                                    # Only treat as boundary if geometry is Polygon/MultiPolygon
+                                    if len(gdf) > 0 and gdf.geometry.iloc[0].geom_type in (
+                                        "Polygon", "MultiPolygon"
+                                    ):
+                                        boundary_keys.add(file_name)
+                                        continue
+
+                                # Auto-fetched POI / facility datasets -> candidate sites
+                                if "_facilities_" in fkey or any(
+                                    fkey.startswith(cat + "_") for cat in [
+                                        "health", "education", "food", "finance",
+                                        "fire_station", "police", "library",
+                                    ]
+                                ):
+                                    poi_candidate_keys.add(file_name)
+                                    continue
+
+                                # Generated candidates
+                                if fkey in ("generated_candidates",):
+                                    poi_candidate_keys.add(file_name)
+                                    continue
+
+                                # Column/name based detection
                                 data_type = data_processor.identify_data_type(gdf)
-                                
-                                if data_type == "demand_points" or "demand" in file_name.lower():
-                                    data_dict["demand_points"] = gdf
-                                elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
-                                    data_dict["candidate_sites"] = gdf
-                            
-                            # Fallback: if we still don't have both types, make educated guesses
+                                if data_type == "demand_points" or "demand" in fkey:
+                                    demand_keys.add(file_name)
+                                elif data_type == "candidate_sites" or any(
+                                    word in fkey for word in ["candidate", "site", "facility"]
+                                ):
+                                    poi_candidate_keys.add(file_name)
+                                else:
+                                    demand_keys.add(file_name)  # default to demand
+
+                            # Populate data_dict from categorized keys
+                            # (take first of each type; last-write wins if multiple)
+                            for file_name in demand_keys:
+                                data_dict["demand_points"] = st.session_state.problem_state["data"][file_name]
+                            for file_name in poi_candidate_keys:
+                                data_dict["candidate_sites"] = st.session_state.problem_state["data"][file_name]
+
+                            # Extract boundary GDF for candidate generation fallback
+                            boundary_gdf_for_gen = None
+                            for file_name in boundary_keys:
+                                boundary_gdf_for_gen = st.session_state.problem_state["data"][file_name]
+                                break
+
+                            # Last-resort: if neither demand nor candidates found, distribute
+                            # from all non-boundary data files
                             if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
-                                # If we have exactly 2 datasets, assume first is demand, second is candidates
-                                data_files = list(st.session_state.problem_state["data"].items())
-                                if len(data_files) == 2:
-                                    data_dict["demand_points"] = data_files[0][1]
-                                    data_dict["candidate_sites"] = data_files[1][1]
-                                elif len(data_files) == 1:
-                                    # Single dataset - assume it's demand points
-                                    data_dict["demand_points"] = data_files[0][1]
-                            elif "demand_points" not in data_dict:
-                                # We have candidates but no demand - use first remaining dataset as demand
-                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
-                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
-                                if remaining_files:
-                                    data_dict["demand_points"] = remaining_files[0][1]
-                            elif "candidate_sites" not in data_dict:
-                                # We have demand but no candidates - use first remaining dataset as candidates
-                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
-                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
-                                if remaining_files:
-                                    data_dict["candidate_sites"] = remaining_files[0][1]
+                                non_boundary = [
+                                    (name, gdf) for name, gdf
+                                    in st.session_state.problem_state["data"].items()
+                                    if name not in boundary_keys
+                                ]
+                                if len(non_boundary) >= 2:
+                                    data_dict["demand_points"]   = non_boundary[0][1]
+                                    data_dict["candidate_sites"] = non_boundary[1][1]
+                                elif len(non_boundary) == 1:
+                                    data_dict["demand_points"] = non_boundary[0][1]
+
                             
                             # Generate candidate sites if we have demand but no candidates
                             if "demand_points" in data_dict and "candidate_sites" not in data_dict:
-                                logger.info("No candidate sites found - generating random sites within demand extent")
+                                logger.info("No candidate sites found - generating random sites within demand/boundary extent")
                                 try:
                                     # Get generation parameters from session state
                                     num_sites = st.session_state.get("generated_sites_count", 100)
                                     random_seed = st.session_state.get("generated_sites_seed", None)
                                     
+                                    # Prefer boundary polygon for generation (avoids water)
+                                    # fall back to demand GDF convex hull if no boundary available
+                                    sampling_gdf = boundary_gdf_for_gen if boundary_gdf_for_gen is not None else data_dict["demand_points"]
+
                                     # Generate candidate sites
                                     generated_candidates = data_processor.generate_candidate_sites(
-                                        data_dict["demand_points"], 
+                                        sampling_gdf,
                                         num_sites=num_sites, 
                                         random_seed=random_seed
                                     )
@@ -1010,15 +1106,17 @@ with col1:
                                     
                                     # Add info message to chat
                                     seed_info = f" (seed: {random_seed})" if random_seed is not None else ""
+                                    source_info = "boundary polygon" if boundary_gdf_for_gen is not None else "demand extent"
                                     st.session_state.messages.append({
                                         "role": "assistant",
-                                        "content": f"Generated {num_sites} random candidate sites within demand extent{seed_info}."
+                                        "content": f"Generated {num_sites} random candidate sites within {source_info}{seed_info}."
                                     })
                                     
                                 except Exception as gen_error:
                                     logger.error(f"Failed to generate candidate sites: {gen_error}")
                                     st.error(f"Failed to generate candidate sites: {gen_error}")
                                     continue
+
                             
                             # Auto-detect and add variant-specific parameters from data
                             parameters = action.get("parameters", {}).copy()
@@ -1147,6 +1245,193 @@ with col1:
                             })
                             st.error(error_msg)
                             logger.error(f"Optimization error: {e}", exc_info=True)
+
+                elif action["action"] == "fetch_data":
+                    # ----------------------------------------------------------------
+                    # Automatic data fetching via DataFetcher
+                    # ----------------------------------------------------------------
+                    # Lazy-initialise the fetcher once
+                    if st.session_state.data_fetcher is None:
+                        st.session_state.data_fetcher = DataFetcher()
+                    fetcher: DataFetcher = st.session_state.data_fetcher
+
+                    steps = action.get("steps", [])
+                    fetch_results: list[str] = []   # Human-readable summary per step
+                    fetch_errors:  list[str] = []   # Per-step errors (non-fatal)
+
+                    # We need the boundary GDF for subsequent demand / POI steps.
+                    boundary_gdf: gpd.GeoDataFrame | None = None
+
+                    with st.spinner("Fetching geographic data from public sources…"):
+                        for step in steps:
+                            step_type = step.get("type", "")
+                            location  = step.get("location", "")
+
+                            # ---- boundaries ----
+                            if step_type == "boundaries":
+                                try:
+                                    gdf = fetcher.fetch_boundaries(location)
+                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
+                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
+                                    key  = f"boundary_{slug}"
+                                    gdf.attrs["source"] = "auto_fetched"
+                                    st.session_state.problem_state["data"][key] = gdf
+                                    boundary_gdf = gdf
+                                    msg = f"Boundary ({location}): 1 polygon"
+                                    fetch_results.append(msg)
+                                    logger.info(f"fetch_data: {msg}")
+                                except DataFetchError as exc:
+                                    err = f"Boundary fetch failed for '{location}': {exc}"
+                                    fetch_errors.append(err)
+                                    logger.error(err)
+
+                            # ---- demand / population grid ----
+                            elif step_type == "demand":
+                                if boundary_gdf is None:
+                                    fetch_errors.append(
+                                        "Demand step skipped: boundary not available yet."
+                                    )
+                                    continue
+                                try:
+                                    gdf = fetcher.fetch_population(boundary_gdf)
+                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
+                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
+                                    key  = f"demand_{slug}"
+                                    gdf.attrs["source"] = "auto_fetched"
+                                    st.session_state.problem_state["data"][key] = gdf
+                                    msg = (
+                                        f"Population grid ({location}): "
+                                        f"{len(gdf)} demand points (synthetic)"
+                                    )
+                                    fetch_results.append(msg)
+                                    logger.info(f"fetch_data: {msg}")
+                                except DataFetchError as exc:
+                                    err = f"Population fetch failed for '{location}': {exc}"
+                                    fetch_errors.append(err)
+                                    logger.error(err)
+
+                            # ---- POIs ----
+                            elif step_type == "pois":
+                                category = step.get("category", "health")
+                                if boundary_gdf is None:
+                                    fetch_errors.append(
+                                        f"POI step ('{category}') skipped: boundary not available."
+                                    )
+                                    continue
+                                try:
+                                    gdf = fetcher.fetch_pois(boundary_gdf, category)
+                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
+                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
+                                    key  = f"{category}_facilities_{slug}"
+                                    gdf.attrs["source"] = "auto_fetched"
+                                    st.session_state.problem_state["data"][key] = gdf
+                                    msg = (
+                                        f"{category.title()} facilities ({location}): "
+                                        f"{len(gdf)} points from OpenStreetMap"
+                                    )
+                                    fetch_results.append(msg)
+                                    logger.info(f"fetch_data: {msg}")
+                                except DataFetchError as exc:
+                                    err = (
+                                        f"{category.title()} facilities fetch failed "
+                                        f"for '{location}': {exc}"
+                                    )
+                                    fetch_errors.append(err)
+                                    logger.error(err)
+
+                            else:
+                                logger.warning(f"fetch_data: unknown step type '{step_type}' — skipped")
+
+                    # Build fetch summary message for the chat
+                    summary_lines: list[str] = []
+                    if fetch_results:
+                        summary_lines.append("**Fetched data successfully:**")
+                        for r in fetch_results:
+                            summary_lines.append(f"- {r}")
+                    if fetch_errors:
+                        summary_lines.append("\n**Some steps failed (partial data available):**")
+                        for e in fetch_errors:
+                            summary_lines.append(f"- ⚠️ {e}")
+                        summary_lines.append(
+                            "\nYou can upload data manually for the failed steps."
+                        )
+
+                    if summary_lines:
+                        st.session_state.messages.append({
+                            "role": "assistant",
+                            "content": "\n".join(summary_lines)
+                        })
+
+                    # Notify the agent about the newly available data so it can
+                    # propose optimization parameters.
+                    if fetch_results and st.session_state.problem_state["data"]:
+                        try:
+                            data_summary: dict = {}
+                            data_processor = st.session_state.data_processor
+                            for ds_name, ds_gdf in st.session_state.problem_state["data"].items():
+                                try:
+                                    dtypes = {c: str(ds_gdf[c].dtype)
+                                              for c in ds_gdf.columns if c != "geometry"}
+                                except Exception:
+                                    dtypes = {}
+
+                                cap_cols      = data_processor.identify_capacity_columns(ds_gdf)
+                                cost_cols     = data_processor.identify_cost_columns(ds_gdf)
+                                demand_cols   = data_processor.identify_demand_columns(ds_gdf)
+                                sample_values: dict = {}
+                                col_stats:    dict = {}
+                                for col in ds_gdf.columns:
+                                    if col.lower() in ["geometry", "shape"]:
+                                        continue
+                                    try:
+                                        non_null = ds_gdf[col].dropna()
+                                        if len(non_null) > 0:
+                                            sample_values[col] = non_null.iloc[0]
+                                            if ds_gdf[col].dtype in ["int64", "float64", "int32", "float32"]:
+                                                col_stats[col] = {
+                                                    "mean": float(ds_gdf[col].mean()),
+                                                    "max":  float(ds_gdf[col].max()),
+                                                }
+                                    except Exception:
+                                        pass
+
+                                # Tag auto-fetched data so the LLM sees the source
+                                ds_source = ds_gdf.attrs.get("source", "uploaded")
+
+                                data_summary[ds_name] = {
+                                    "num_features":   len(ds_gdf),
+                                    "geometry_type":  (
+                                        ds_gdf.geometry.type.unique()[0]
+                                        if len(ds_gdf) > 0 else "Unknown"
+                                    ),
+                                    "columns":      [c for c in ds_gdf.columns if c != "geometry"],
+                                    "dtypes":       dtypes,
+                                    "bounds":       ds_gdf.total_bounds.tolist() if len(ds_gdf) > 0 else [],
+                                    "capacity_columns": cap_cols,
+                                    "cost_columns":     cost_cols,
+                                    "demand_columns":   demand_cols,
+                                    "sample_values":    sample_values,
+                                    "column_stats":     col_stats,
+                                    "source":       ds_source,
+                                }
+
+                            with st.spinner("Letting the AI analyse the fetched data…"):
+                                notice_result = st.session_state.conversation_manager.notify_data_uploaded(
+                                    conversation_history=st.session_state.messages,
+                                    problem_state=st.session_state.problem_state,
+                                    uploaded_data_summary=data_summary,
+                                )
+
+                            st.session_state.problem_state = notice_result["updated_state"]
+                            st.session_state.messages.append({
+                                "role": "assistant",
+                                "content": notice_result["response"]
+                            })
+
+                        except Exception as notify_exc:
+                            logger.warning(
+                                f"Could not notify agent about fetched data: {notify_exc}"
+                            )
         
         st.rerun()
 

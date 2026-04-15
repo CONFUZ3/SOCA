@@ -233,7 +233,23 @@ class ConversationManager:
                     action_data['parameters'] = merged_params
                 
                 # Validate action
-                if action_data.get("action") == "optimize":
+                if action_data.get("action") == "fetch_data":
+                    # Non-destructive read action — no confirmation gate needed.
+                    # The agent's conversational text explaining what will be fetched
+                    # is preserved as text_response (not overridden here).
+                    steps = action_data.get("steps")
+                    if isinstance(steps, list) and len(steps) > 0:
+                        actions.append(action_data)
+                        logger.info(
+                            f"Conversation Manager: fetch_data action accepted "
+                            f"with {len(steps)} step(s)"
+                        )
+                    else:
+                        logger.warning(
+                            "Invalid fetch_data action: missing or empty 'steps' array"
+                        )
+
+                elif action_data.get("action") == "optimize":
                     # Validate required fields
                     if "problem_type" in action_data and "parameters" in action_data:
                         # Validate variant-specific parameters
