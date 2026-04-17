@@ -60,6 +60,11 @@ exports/
 Thumbs.db
 
 # ------------------------------
+# External library clones
+# ------------------------------
+urbanpy_temp/
+
+# ------------------------------
 # Keep publication datasets
 # ------------------------------
 !datasets/

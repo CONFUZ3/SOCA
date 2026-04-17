@@ -88,6 +88,19 @@ OVERTURE_CATEGORIES: dict[str, list[str]] = {
     "fire_station": ["fire_station"],
     "police": ["police_station"],
     "library": ["library"],
+    "transport": ["bus_stop", "train_station", "subway_station", "ferry_terminal", "airport", "transit_stop"],
+    "water": ["water_point", "water_well", "water_treatment_plant", "drinking_water"],
+    "emergency": ["emergency_shelter", "evacuation_center", "civil_defense"],
+}
+
+# Maps Overture division subtype to approximate OSM admin_level equivalent
+_OVERTURE_SUBTYPE_ADMIN_LEVEL: dict[str, int] = {
+    "country": 2,
+    "region": 4,
+    "county": 6,
+    "localadmin": 7,
+    "locality": 8,
+    "neighborhood": 10,
 }
 
 # Legacy Overpass QL tag filters (kept for fallback)
@@ -113,6 +126,19 @@ FACILITY_TAGS: dict[str, list[str]] = {
     ],
     "library": [
         '["amenity"="library"]',
+    ],
+    "transport": [
+        '["public_transport"~"stop_position|station|platform"]',
+        '["amenity"~"bus_station|ferry_terminal"]',
+        '["railway"~"station|halt"]',
+    ],
+    "water": [
+        '["amenity"~"water_point|drinking_water"]',
+        '["man_made"~"water_well|water_works"]',
+    ],
+    "emergency": [
+        '["amenity"="shelter"]',
+        '["emergency"~"assembly_point|evacuation_centre"]',
     ],
 }
 
@@ -152,18 +178,32 @@ class DataFetcher:
     # Public API
     # ------------------------------------------------------------------
 
-    def fetch_boundaries(self, location: str) -> gpd.GeoDataFrame:
+    def fetch_boundaries(
+        self,
+        location: str,
+        admin_level: Optional[int] = None,
+        scale: str = "city",
+    ) -> gpd.GeoDataFrame:
         """
         Fetch the administrative boundary polygon for *location*.
 
-        Uses a 3-tier fallback chain to maximise reliability:
-          1. Overpass API admin-boundary relation query (same OSM data,
-             different endpoint — avoids Nominatim 403 blocks).
-          2. Photon geocoder (komoot.io) with bbox polygon construction.
+        Uses a 4-tier fallback chain to maximise reliability:
+          0. Overture Maps division + division_area (primary — scale-aware bbox,
+             real population metadata, two-theme query for accuracy).
+          1. Photon geocoder (komoot.io) with bbox polygon construction.
+          2. Overpass API admin-boundary relation query.
           3. Nominatim as a last resort.
 
         Args:
-            location: Human-readable place name, e.g. ``"Lima, Peru"``.
+            location:    Human-readable place name, e.g. ``"Lima, Peru"``.
+            admin_level: Target OSM admin_level integer (2–10). When provided,
+                         the Overture and Overpass backends will prefer the
+                         administrative entity whose level is closest to this
+                         value, avoiding mis-matches (e.g. returning a country
+                         polygon when a city was requested).
+            scale:       One of "country", "region", "city", "neighborhood".
+                         Controls the Overture bbox buffer size so the query
+                         covers the right geographic extent.
 
         Returns:
             GeoDataFrame with one row containing the boundary polygon.
@@ -172,12 +212,17 @@ class DataFetcher:
         Raises:
             GeocodingError: If all backends fail or return no polygon.
         """
-        logger.info(f"DataFetcher: Fetching boundary for '{location}'")
+        logger.info(
+            f"DataFetcher: Fetching boundary for '{location}' "
+            f"(scale={scale}, admin_level={admin_level})"
+        )
 
-        # --- Tier 0: Overture Maps division_area (fastest, actual polygon) -
+        # --- Tier 0: Overture Maps division + division_area (primary) -------
         if _OVERTURE_AVAILABLE:
             try:
-                gdf = self._fetch_boundary_via_overture(location)
+                gdf = self._fetch_boundary_via_overture(
+                    location, admin_level=admin_level, scale=scale
+                )
                 return gdf
             except Exception as exc:
                 logger.warning(
@@ -201,7 +246,7 @@ class DataFetcher:
 
         # --- Tier 2: Overpass relation boundary search --------------------
         try:
-            gdf = self._fetch_boundary_via_overpass(location)
+            gdf = self._fetch_boundary_via_overpass(location, admin_level=admin_level)
             logger.info(
                 f"DataFetcher: Boundary for '{location}' obtained via Overpass "
                 f"(geom type: {gdf.geometry.iloc[0].geom_type})"
@@ -231,12 +276,16 @@ class DataFetcher:
     # Boundary backend implementations
     # ------------------------------------------------------------------
 
-    def _fetch_boundary_via_overpass(self, location: str) -> gpd.GeoDataFrame:
+    def _fetch_boundary_via_overpass(self, location: str, admin_level: Optional[int] = None) -> gpd.GeoDataFrame:
         """
         Fetch boundary polygon via Overpass ``relation[boundary=administrative]``.
 
         This queries the same OSM dataset as Nominatim but through a completely
         independent endpoint, sidestepping Nominatim rate-limiting / IP blocks.
+
+        When *admin_level* is provided, the relation whose ``admin_level`` tag
+        is numerically closest to the hint is preferred instead of always
+        picking the highest (most specific) level.
         """
         # Search multiple admin_level values (4=state/province, 5, 6=district, 8=city)
         # The query uses Overpass's ``name:en`` + ``name`` matching.
@@ -273,14 +322,24 @@ class DataFetcher:
                 f"Overpass returned no admin-boundary relations for '{location}'."
             )
 
-        # Pick the relation with the highest admin_level (most specific)
-        def _admin_level_sort(el: dict) -> int:
+        # Pick the best-matching relation:
+        # - When admin_level hint provided: pick the element whose admin_level tag
+        #   is numerically closest to the hint (avoids returning a whole country
+        #   when a city was requested, or vice-versa).
+        # - Otherwise: pick the element with the highest admin_level (most specific).
+        def _admin_level_int(el: dict) -> int:
             try:
                 return int(el.get("tags", {}).get("admin_level", 0))
             except (ValueError, TypeError):
                 return 0
 
-        elements_sorted = sorted(elements, key=_admin_level_sort, reverse=True)
+        if admin_level is not None:
+            elements_sorted = sorted(
+                elements,
+                key=lambda el: abs(_admin_level_int(el) - admin_level),
+            )
+        else:
+            elements_sorted = sorted(elements, key=_admin_level_int, reverse=True)
 
         # Reconstruct polygon from outer members
         geom = self._overpass_relation_to_shape(elements_sorted[0])
@@ -295,6 +354,7 @@ class DataFetcher:
             "location_query": location,
             "source": "overpass_boundary",
             "admin_level": tags.get("admin_level", ""),
+            "population": tags.get("population", ""),
         }
         return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
 
@@ -482,6 +542,7 @@ class DataFetcher:
             "polygon_geojson": 1,
             "limit": 1,
             "addressdetails": 0,
+            "extratags": 1,
         }
 
         try:
@@ -532,21 +593,40 @@ class DataFetcher:
         props = feature.get("properties", {})
         props["location_query"] = location
         props["source"] = "nominatim"
+        # Extract population from Nominatim extratags (available when extratags=1)
+        extratags = props.get("extratags") or {}
+        if isinstance(extratags, dict) and extratags.get("population"):
+            props["population"] = extratags["population"]
         return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
 
-    def _fetch_boundary_via_overture(self, location: str) -> gpd.GeoDataFrame:
-        """Fetch administrative boundary polygon from Overture Maps division_area theme.
+    def _fetch_boundary_via_overture(
+        self,
+        location: str,
+        admin_level: Optional[int] = None,
+        scale: str = "city",
+    ) -> gpd.GeoDataFrame:
+        """Fetch administrative boundary polygon from Overture Maps.
 
-        Uses Photon for a quick lat/lon geocode to seed the bbox, then queries
-        Overture's division_area theme for the actual polygon. Returns the
-        largest name-matched administrative area (locality, county, region, or country).
+        Two-step process:
+        1. Query the ``division`` theme to find the matching entity and read its
+           real ``population`` field plus the ``id`` used to join to geometry.
+        2. Query the ``division_area`` theme and match by ``division_id`` to get
+           the actual polygon geometry.
+
+        The bbox size is scale-aware (country=±15°, region=±5°, city=±2°,
+        neighborhood=±0.5°) so the query covers the right extent regardless of
+        geographic size. Name-matching uses both ``primary`` and ``common``
+        name fields to handle non-English place names globally.
         """
         if not _OVERTURE_AVAILABLE:
             raise DataFetchError("overturemaps package not available")
 
         import shapely.wkb as wkb
+        from utils.scale_classifier import get_bbox_buffer
 
-        # Step 1: Get a rough lat/lon from Photon to seed the bbox
+        # ------------------------------------------------------------------ #
+        # Step 1: Geocode location → (lon, lat) seed via Photon              #
+        # ------------------------------------------------------------------ #
         params = {"q": location, "limit": 1, "lang": "en"}
         try:
             resp = self._make_request(PHOTON_URL + "/api", params=params, timeout=15)
@@ -563,64 +643,151 @@ class DataFetcher:
             raise DataFetchError(f"Photon result has no coordinates for '{location}'")
 
         lon, lat = float(coords[0]), float(coords[1])
-        buf = 2.0
-        bbox = (lon - buf, lat - buf, lon + buf, lat + buf)
+        buf = get_bbox_buffer(scale)
+        bbox = (
+            max(-180.0, lon - buf),
+            max(-90.0,  lat - buf),
+            min(180.0,  lon + buf),
+            min(90.0,   lat + buf),
+        )
 
-        logger.info(f"DataFetcher: Querying Overture division_area for '{location}' bbox={bbox}")
+        logger.info(
+            f"DataFetcher: Querying Overture division for '{location}' "
+            f"bbox={bbox} (scale={scale}, buf={buf}°)"
+        )
 
-        # Step 2: Query Overture division_area theme
+        # ------------------------------------------------------------------ #
+        # Step 2: Query Overture 'division' theme for metadata + population  #
+        # ------------------------------------------------------------------ #
+        ADMIN_SUBTYPES = {"locality", "county", "region", "country", "localadmin", "neighborhood"}
+
         try:
-            reader = overturemaps.record_batch_reader("division_area", bbox=bbox)
-            if reader is None:
-                raise DataFetchError("Overture reader returned None")
-            table = reader.read_all()
+            div_reader = overturemaps.record_batch_reader("division", bbox=bbox)
+            if div_reader is None:
+                raise DataFetchError("Overture division reader returned None")
+            div_table = div_reader.read_all()
+        except Exception as exc:
+            raise DataFetchError(f"Overture division query failed: {exc}") from exc
+
+        if div_table.num_rows == 0:
+            raise DataFetchError(f"Overture division: no results near '{location}'")
+
+        div_df = div_table.to_pandas()
+
+        if "subtype" in div_df.columns:
+            div_df = div_df[div_df["subtype"].isin(ADMIN_SUBTYPES)].copy()
+
+        if div_df.empty:
+            raise DataFetchError(f"Overture division: no admin subtypes near '{location}'")
+
+        def _extract_names(names_val) -> list[str]:
+            """Return all name strings from Overture names struct (primary + common)."""
+            if not isinstance(names_val, dict):
+                return []
+            result = []
+            if names_val.get("primary"):
+                result.append(str(names_val["primary"]))
+            common = names_val.get("common") or {}
+            if isinstance(common, dict):
+                result.extend(str(v) for v in common.values() if v)
+            return result
+
+        primary_query = location.split(",")[0].strip().lower()
+
+        div_df["_all_names"] = div_df["names"].apply(_extract_names)
+        div_df["_name_match"] = div_df["_all_names"].apply(
+            lambda names: any(primary_query in n.lower() for n in names)
+        )
+        name_match = div_df[div_df["_name_match"]].copy()
+
+        if name_match.empty:
+            raise DataFetchError(
+                f"Overture division: no entity matched '{primary_query}' near '{location}'"
+            )
+
+        # Pick the entity whose subtype admin_level is closest to the hint
+        if admin_level is not None:
+            name_match["_al_dist"] = name_match["subtype"].map(
+                lambda s: abs(_OVERTURE_SUBTYPE_ADMIN_LEVEL.get(s, 8) - admin_level)
+            )
+            best_div = name_match.sort_values("_al_dist").iloc[0]
+        else:
+            best_div = name_match.iloc[0]
+
+        division_id = best_div.get("id", "")
+        population_raw = best_div.get("population", None)
+        best_names = best_div["_all_names"]
+        best_subtype = str(best_div.get("subtype", ""))
+
+        logger.info(
+            f"DataFetcher: Matched division '{best_names[0] if best_names else location}' "
+            f"(subtype={best_subtype}, id={division_id}, population={population_raw})"
+        )
+
+        # ------------------------------------------------------------------ #
+        # Step 3: Query 'division_area' theme; match by division_id          #
+        # ------------------------------------------------------------------ #
+        try:
+            area_reader = overturemaps.record_batch_reader("division_area", bbox=bbox)
+            if area_reader is None:
+                raise DataFetchError("Overture division_area reader returned None")
+            area_table = area_reader.read_all()
         except Exception as exc:
             raise DataFetchError(f"Overture division_area query failed: {exc}") from exc
 
-        if table.num_rows == 0:
-            raise DataFetchError(f"Overture returned no division_area results near '{location}'")
+        if area_table.num_rows == 0:
+            raise DataFetchError(f"Overture division_area: no results near '{location}'")
 
-        # Step 3: Filter to admin subtypes and match on name
-        df = table.to_pandas()
+        area_df = area_table.to_pandas()
 
-        ADMIN_SUBTYPES = {"locality", "county", "region", "country"}
-        if "subtype" in df.columns:
-            df = df[df["subtype"].isin(ADMIN_SUBTYPES)]
+        matched = None
 
-        if df.empty:
-            raise DataFetchError(f"No admin-level division_area found near '{location}'")
+        # Primary match: by division_id (most reliable)
+        if division_id and "division_id" in area_df.columns:
+            id_match = area_df[area_df["division_id"] == division_id]
+            if not id_match.empty:
+                matched = id_match
 
-        def _primary_name(names_val):
-            if isinstance(names_val, dict):
-                return names_val.get("primary") or ""
-            return ""
+        # Fallback match: by name substring
+        if matched is None or len(matched) == 0:
+            area_df["_area_name"] = area_df["names"].apply(
+                lambda n: n.get("primary", "") if isinstance(n, dict) else ""
+            )
+            name_area_match = area_df[
+                area_df["_area_name"].str.lower().str.contains(
+                    primary_query, na=False, regex=False
+                )
+            ]
+            if name_area_match.empty:
+                raise DataFetchError(
+                    f"Overture division_area: no polygon found for '{location}' "
+                    f"(division_id={division_id})"
+                )
+            matched = name_area_match
 
-        df = df.copy()
-        df["_name"] = df["names"].apply(_primary_name)
-
-        # Match on the first part of the query (before any comma)
-        primary_query = location.split(",")[0].strip().lower()
-        name_match = df[df["_name"].str.lower().str.contains(primary_query, na=False, regex=False)]
-
-        if name_match.empty:
-            raise DataFetchError(f"No Overture division_area matched name '{location}'")
-
-        # Pick the largest polygon among matches
-        geoms = [wkb.loads(g) for g in name_match["geometry"]]
-        areas = [g.area for g in geoms]
-        best_idx = areas.index(max(areas))
-        geom = geoms[best_idx]
-        best_row = name_match.iloc[best_idx]
+        # ------------------------------------------------------------------ #
+        # Step 4: Extract geometry and assemble result GeoDataFrame          #
+        # ------------------------------------------------------------------ #
+        try:
+            geom = wkb.loads(matched.iloc[0]["geometry"])
+        except Exception as exc:
+            raise DataFetchError(
+                f"Overture division_area: could not decode geometry for '{location}': {exc}"
+            ) from exc
 
         props = {
-            "name": best_row["_name"],
+            "name": best_names[0] if best_names else location,
             "location_query": location,
-            "source": "overture_division_area",
-            "subtype": best_row.get("subtype", ""),
+            "source": "overture_division",
+            "subtype": best_subtype,
+            "admin_level": str(_OVERTURE_SUBTYPE_ADMIN_LEVEL.get(best_subtype, "")),
+            "population": str(int(population_raw)) if population_raw else "",
+            "division_id": str(division_id),
         }
         logger.info(
             f"DataFetcher: Boundary for '{location}' obtained via Overture "
-            f"(subtype={props['subtype']}, name='{props['name']}')"
+            f"(subtype={best_subtype}, name='{props['name']}', "
+            f"population={props['population'] or 'unknown'})"
         )
         return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
 
@@ -851,17 +1018,27 @@ class DataFetcher:
     def fetch_population(
         self,
         boundary_gdf: gpd.GeoDataFrame,
-        n_points: int = 200,
+        n_points: Optional[int] = None,
         random_seed: int = 42,
     ) -> gpd.GeoDataFrame:
         """
-        Generate a synthetic population grid within *boundary_gdf*.
+        Generate a population demand grid within *boundary_gdf*.
 
         Uses rejection sampling to place *n_points* random Point geometries
-        strictly inside the boundary polygon (including water-exclusion when
-        the boundary geometry is a proper polygon rather than a rectangle).
-        Each point is assigned a population weight so the **total** always
-        equals :data:`_DEFAULT_TOTAL_POPULATION`.
+        strictly inside the boundary polygon.  Each point is assigned a
+        population weight derived from a real total-population estimate.
+
+        Population count resolution:
+        - When *n_points* is ``None`` (default), the count is derived from the
+          boundary area using ``compute_n_points_from_area()``:
+          ``n = clamp(sqrt(area_km²) × 8, 50, 2000)``.
+        - Pass an explicit integer to override.
+
+        Total population:
+        - Uses real population from Overture / OSM metadata on *boundary_gdf*
+          if the ``population`` column is populated.
+        - Falls back to area × 250 people/km² density estimate.
+        - Last resort: _DEFAULT_TOTAL_POPULATION constant.
 
         Prior to generating synthetic data, this method attempts to fetch
         real population estimates from the Humanitarian Data Exchange (HDX)
@@ -870,10 +1047,8 @@ class DataFetcher:
 
         Args:
             boundary_gdf: Region of interest (any CRS; reprojected internally).
-            n_points: Number of sample points to generate.
-            random_seed: Seed for the internal RNG (default 42 for
-                backward-compatibility).  Pass different values to get
-                statistically independent realisations.
+            n_points:     Demand-point count. ``None`` = auto-compute from area.
+            random_seed:  Seed for the internal RNG.
 
         Returns:
             GeoDataFrame with ``population`` column and Point geometry.
@@ -882,6 +1057,20 @@ class DataFetcher:
         Raises:
             PopulationDataError: If the boundary polygon is invalid or empty.
         """
+        # --- Auto-compute n_points from boundary area when not specified ----
+        if n_points is None:
+            try:
+                from utils.scale_classifier import compute_n_points_from_area
+                area_km2 = boundary_gdf.to_crs("EPSG:6933").geometry.area.sum() / 1e6
+                n_points = compute_n_points_from_area(area_km2)
+                logger.info(
+                    f"DataFetcher: Auto n_points={n_points} "
+                    f"from boundary area={area_km2:.1f} km²"
+                )
+            except Exception as exc:
+                logger.warning(f"Could not auto-compute n_points from area: {exc}. Using 200.")
+                n_points = 200
+
         # --- Tier 1: Try to fetch real population data from HDX open API ---
         try:
             pop_gdf = self._fetch_population_hdx(boundary_gdf)
@@ -954,10 +1143,9 @@ class DataFetcher:
                 f"after {MAX_ATTEMPTS} attempts (thin polygon?)."
             )
 
-        # Recompute pop_per_point from actual placed count so the total
-        # population always equals _DEFAULT_TOTAL_POPULATION regardless of
-        # how many points fit inside the (possibly thin) boundary polygon.
-        pop_per_point = _DEFAULT_TOTAL_POPULATION / len(points)
+        # Use a real population estimate so per-point weights are meaningful.
+        total_pop = self._estimate_total_population(boundary_gdf)
+        pop_per_point = total_pop / len(points)
 
         gdf = gpd.GeoDataFrame(
             {"population": [pop_per_point] * len(points)},
@@ -967,9 +1155,45 @@ class DataFetcher:
         gdf["data_source"] = "synthetic_uniform_grid"
         logger.info(
             f"DataFetcher: Generated {len(gdf)} synthetic population points "
-            f"({pop_per_point:.1f} pop each, total={_DEFAULT_TOTAL_POPULATION})"
+            f"({pop_per_point:.0f} pop each, total={total_pop:,.0f})"
         )
         return gdf
+
+    def _estimate_total_population(self, boundary_gdf: gpd.GeoDataFrame) -> int:
+        """
+        Derive a real population estimate for *boundary_gdf*.
+
+        Sources tried in order:
+        1. ``population`` column on *boundary_gdf* — populated by Overture
+           ``division`` theme or Nominatim ``extratags``.
+        2. Area × 250 people/km² (rough global average density).
+        3. :data:`_DEFAULT_TOTAL_POPULATION` constant (last resort).
+        """
+        # Source 1: metadata from Overture division or Nominatim extratags
+        if "population" in boundary_gdf.columns:
+            raw = str(boundary_gdf["population"].iloc[0] or "").replace(",", "").strip()
+            try:
+                pop = int(float(raw))
+                if pop > 0:
+                    logger.info(f"DataFetcher: Using metadata population: {pop:,}")
+                    return pop
+            except (ValueError, TypeError):
+                pass
+
+        # Source 2: area-based density estimate
+        try:
+            area_km2 = boundary_gdf.to_crs("EPSG:6933").geometry.area.sum() / 1e6
+            estimated = int(area_km2 * 250)
+            if estimated > 0:
+                logger.info(
+                    f"DataFetcher: Estimated population from area "
+                    f"{area_km2:.0f} km² × 250/km² = {estimated:,}"
+                )
+                return estimated
+        except Exception as exc:
+            logger.debug(f"Area-based population estimate failed: {exc}")
+
+        return _DEFAULT_TOTAL_POPULATION
 
     def _fetch_population_hdx(self, boundary_gdf: gpd.GeoDataFrame) -> Optional[gpd.GeoDataFrame]:
         """
@@ -1097,6 +1321,7 @@ class DataFetcher:
             all_candidates: list[tuple] = []
             for query in [
                 f"title:{country_norm}-high-resolution-population-density-maps-demographic-estimates",
+                f"{country_norm} kontur population",
                 f"{country_norm} hrsl",
                 f"{country_norm} population density",
             ]:
@@ -1130,8 +1355,14 @@ class DataFetcher:
             )
 
             # 3. Download the resource
+            # hdx-python-api versions differ: some return (url, path), others return
+            # just a path. Handle both and always convert to a plain string.
             try:
-                url, path = target_resource.download()
+                dl_result = target_resource.download()
+                if isinstance(dl_result, (list, tuple)) and len(dl_result) == 2:
+                    _url, path = dl_result
+                else:
+                    path = dl_result  # newer API returns path directly
             except Exception as e:
                 logger.error(f"Failed to download HDX resource: {e}")
                 return None
@@ -1140,6 +1371,7 @@ class DataFetcher:
                 logger.error("HDX resource download returned no path.")
                 return None
 
+            # Always convert to str — Path objects cause 'has no attribute endswith'
             path_str = str(path)
 
             # 4a. CSV handler

@@ -12,7 +12,7 @@ class Settings:
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
     
     # Model settings
-    GEMINI_MODEL = "models/gemini-2.5-pro"  # Latest Gemini Flash model
+    GEMINI_MODEL = "gemini-pro-latest"
     MAX_TOKENS = 4096
     
     # Solver preferences
@@ -45,6 +45,10 @@ class Settings:
     DEMAND_MARKER_COLOR = "blue"
     CANDIDATE_MARKER_COLOR = "gray"
     
+    # ADK agent settings
+    ADK_APP_NAME = "soca"
+    ADK_MAX_TOOL_CALLS_PER_TURN = 5   # guard against runaway tool loops
+
     # Academic
     CITATION_STYLE = "APA"
     

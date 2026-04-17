@@ -2,8 +2,9 @@
 streamlit>=1.32.0              # flexible version for compatibility
 python-dotenv>=1.0.0           # environment variables
 
-# Google Gemini
-google-generativeai>=0.8.0     # latest Gemini API SDK
+# Google Gemini + ADK
+google-genai>=1.0.0            # new unified Gemini API SDK (replaces deprecated google-generativeai)
+google-adk>=1.30.0             # Agent Development Kit — structured function calling, no regex parsing
 
 # Geospatial
 geopandas>=1.0.0               # flexible version (uses pyogrio by default, no fiona needed)

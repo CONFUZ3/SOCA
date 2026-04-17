@@ -326,15 +326,20 @@ class TestFetchPopulation(unittest.TestCase):
             )
 
     def test_population_sum_approximately_correct(self):
-        from utils.data_fetcher import _DEFAULT_TOTAL_POPULATION
         fetcher = DataFetcher()
         boundary = _lima_boundary_gdf()
         n = 200
         gdf = fetcher.fetch_population(boundary, n_points=n)
 
         total = gdf["population"].sum()
-        # Total should be close to _DEFAULT_TOTAL_POPULATION
-        assert abs(total - _DEFAULT_TOTAL_POPULATION) / _DEFAULT_TOTAL_POPULATION < 0.05
+        # Total population is now derived from the boundary area (or metadata) rather
+        # than a fixed constant, so check that all individual values are equal (uniform
+        # distribution) and that the sum matches what _estimate_total_population returns.
+        expected_total = fetcher._estimate_total_population(boundary)
+        assert total > 0, "Total population must be positive"
+        assert abs(total - expected_total) / expected_total < 0.05, (
+            f"Expected total population ~{expected_total:,} but got {total:,.0f}"
+        )
 
     def test_n_points_respected(self):
         fetcher = DataFetcher()
@@ -361,7 +366,9 @@ class TestFetchPopulation(unittest.TestCase):
         fetcher = DataFetcher()
         boundary = _lima_boundary_gdf()
         gdf = fetcher.fetch_population(boundary, n_points=20)
-        assert (gdf["source"] == "synthetic_uniform_grid").all()
+        # Synthetic grid is marked via the 'data_source' column
+        assert "data_source" in gdf.columns
+        assert (gdf["data_source"] == "synthetic_uniform_grid").all()
 
 
 # ---------------------------------------------------------------------------

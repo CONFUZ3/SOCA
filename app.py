@@ -9,7 +9,6 @@ import os
 import re
 import logging
 import time
-import inspect
 import hashlib
 import json
 
@@ -25,10 +24,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Imports from our modules
-from agent.conversation_manager import ConversationManager
+from agent.soca_agent import SOCAAgent
 from solvers.registry import problem_registry
 from utils.data_processor import DataProcessor
-from utils.data_fetcher import DataFetcher, DataFetchError
 from utils.visualizer import MapVisualizer
 from utils.pydeck_visualizer import PyDeckVisualizer
 from utils.export_handler import ExportHandler
@@ -150,7 +148,7 @@ What problem would you like to solve today?"""
             st.error("GEMINI_API_KEY not found. Please set it in .streamlit/secrets.toml or as an environment variable.")
             st.stop()
         
-        st.session_state.conversation_manager = ConversationManager(
+        st.session_state.conversation_manager = SOCAAgent(
             api_key=api_key,
             problem_registry=problem_registry
         )
@@ -250,6 +248,9 @@ with st.sidebar:
                 }
             try:
                 with st.spinner("Syncing uploaded data with AI..."):
+                    # Propagate generated-sites settings into problem_state for tools
+                    st.session_state.problem_state["_generated_sites_count"] = st.session_state.get("generated_sites_count", 100)
+                    st.session_state.problem_state["_generated_sites_seed"] = st.session_state.get("generated_sites_seed", None)
                     result = st.session_state.conversation_manager.notify_data_uploaded(
                         conversation_history=st.session_state.messages,
                         problem_state=st.session_state.problem_state,
@@ -940,499 +941,60 @@ with col1:
                     "column_stats": column_stats
                 }
         
-        # Call conversation manager
-        with st.spinner("Thinking..."):
+        # Propagate generated-sites settings into problem_state for ADK tools
+        st.session_state.problem_state["_generated_sites_count"] = st.session_state.get("generated_sites_count", 100)
+        st.session_state.problem_state["_generated_sites_seed"] = st.session_state.get("generated_sites_seed", None)
+
+        # Human-readable labels for ADK tool names shown in the status panel
+        _TOOL_LABELS = {
+            "fetch_city_data": "Fetching geographic data…",
+            "stage_optimization": "Staging optimization parameters…",
+            "confirm_optimization": "Running solver…",
+            "get_data_status": "Checking data status…",
+        }
+
+        # Call agent — use st.status() so users see what's happening
+        with st.status("Thinking…", expanded=True) as _status:
             try:
                 result = st.session_state.conversation_manager.chat(
                     user_message=prompt,
-                    conversation_history=st.session_state.messages[:-1],  # Exclude current message
+                    conversation_history=st.session_state.messages[:-1],
                     problem_state=st.session_state.problem_state,
-                    uploaded_data_summary=data_summary
+                    uploaded_data_summary=data_summary,
                 )
             except Exception as e:
                 st.error(f"Error communicating with AI: {e}")
                 result = {
                     "response": f"I encountered an error: {str(e)}",
                     "actions": [],
-                    "updated_state": st.session_state.problem_state
+                    "updated_state": st.session_state.problem_state,
+                    "tool_calls": [],
                 }
-        
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                for tc in tool_calls:
+                    _status.write(f"✓ {_TOOL_LABELS.get(tc, tc.replace('_', ' ').title())}")
+            _status.update(
+                label="Done" if tool_calls else "Response ready",
+                state="complete",
+                expanded=False,
+            )
+
         # Update state
         st.session_state.problem_state = result["updated_state"]
-        
+
+        # Toast notifications for key background actions
+        if "fetch_city_data" in tool_calls:
+            st.toast("Geographic data loaded — check the map!", icon="🗺️")
+        if "confirm_optimization" in tool_calls:
+            st.toast("Optimization complete — solution on map!", icon="✅")
+
         # Add assistant response to history
         st.session_state.messages.append({
             "role": "assistant",
             "content": result["response"]
         })
-        
-        # Handle actions (e.g., optimization trigger)
-        if result["actions"]:
-            logger.info(f"App: Processing {len(result['actions'])} action(s): {[a.get('action', 'unknown') for a in result['actions']]}")
-            
-            # Track processed actions to prevent duplicates
-            processed_actions = set()
-            
-            for i, action in enumerate(result["actions"]):
-                if action["action"] == "optimize":
-                    # Create a unique key for this action to prevent duplicates
-                    action_key = f"{action.get('problem_type', 'unknown')}_{action.get('parameters', {}).get('n_facilities', 'unknown')}_{action.get('parameters', {}).get('service_radius', 'unknown')}"
-                    
-                    if action_key in processed_actions:
-                        logger.warning(f"App: Skipping duplicate optimization action: {action_key}")
-                        continue
-                    
-                    processed_actions.add(action_key)
-                    logger.info(f"App: Processing optimization action {i+1}/{len(result['actions'])}: {action_key}")
-                    with st.spinner("Running optimization..."):
-                        try:
-                            # Get problem solver
-                            problem_solver = problem_registry.get_problem(action["problem_type"])
-                            
-                            if not problem_solver:
-                                st.error(f"Problem type '{action['problem_type']}' not found")
-                                continue
-                            
-                            # Prepare data mapping
-                            data_dict = {}
-                            data_processor = st.session_state.data_processor
-                            
-                            # Build a set of dataset key names by role so we
-                            # can skip boundary GDFs in demand/candidate mapping.
-                            boundary_keys = set()
-                            poi_candidate_keys = set()  # auto-fetched POI / facility datasets
-                            demand_keys = set()
 
-                            for file_name, gdf in st.session_state.problem_state["data"].items():
-                                src = gdf.attrs.get("source", "")
-                                fkey = file_name.lower()
-
-                                # Auto-fetched boundary datasets
-                                if fkey.startswith("boundary_") or src in (
-                                    "auto_fetched",
-                                    "overpass_boundary",
-                                    "photon_bbox_fallback",
-                                    "photon_then_overpass",
-                                    "nominatim",
-                                    "nominatim_bbox_fallback",
-                                ):
-                                    # Only treat as boundary if geometry is Polygon/MultiPolygon
-                                    if len(gdf) > 0 and gdf.geometry.iloc[0].geom_type in (
-                                        "Polygon", "MultiPolygon"
-                                    ):
-                                        boundary_keys.add(file_name)
-                                        continue
-
-                                # Auto-fetched POI / facility datasets -> candidate sites
-                                if "_facilities_" in fkey or any(
-                                    fkey.startswith(cat + "_") for cat in [
-                                        "health", "education", "food", "finance",
-                                        "fire_station", "police", "library",
-                                    ]
-                                ):
-                                    poi_candidate_keys.add(file_name)
-                                    continue
-
-                                # Generated candidates
-                                if fkey in ("generated_candidates",):
-                                    poi_candidate_keys.add(file_name)
-                                    continue
-
-                                # Column/name based detection
-                                data_type = data_processor.identify_data_type(gdf)
-                                if data_type == "demand_points" or "demand" in fkey:
-                                    demand_keys.add(file_name)
-                                elif data_type == "candidate_sites" or any(
-                                    word in fkey for word in ["candidate", "site", "facility"]
-                                ):
-                                    poi_candidate_keys.add(file_name)
-                                else:
-                                    demand_keys.add(file_name)  # default to demand
-
-                            # Populate data_dict from categorized keys
-                            # (take first of each type; last-write wins if multiple)
-                            for file_name in demand_keys:
-                                data_dict["demand_points"] = st.session_state.problem_state["data"][file_name]
-                            for file_name in poi_candidate_keys:
-                                data_dict["candidate_sites"] = st.session_state.problem_state["data"][file_name]
-
-                            # Extract boundary GDF for candidate generation fallback
-                            boundary_gdf_for_gen = None
-                            for file_name in boundary_keys:
-                                boundary_gdf_for_gen = st.session_state.problem_state["data"][file_name]
-                                break
-
-                            # Last-resort: if neither demand nor candidates found, distribute
-                            # from all non-boundary data files
-                            if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
-                                non_boundary = [
-                                    (name, gdf) for name, gdf
-                                    in st.session_state.problem_state["data"].items()
-                                    if name not in boundary_keys
-                                ]
-                                if len(non_boundary) >= 2:
-                                    data_dict["demand_points"]   = non_boundary[0][1]
-                                    data_dict["candidate_sites"] = non_boundary[1][1]
-                                elif len(non_boundary) == 1:
-                                    data_dict["demand_points"] = non_boundary[0][1]
-
-                            
-                            # Generate candidate sites if we have demand but no candidates
-                            if "demand_points" in data_dict and "candidate_sites" not in data_dict:
-                                logger.info("No candidate sites found - generating random sites within demand/boundary extent")
-                                try:
-                                    # Get generation parameters from session state
-                                    num_sites = st.session_state.get("generated_sites_count", 100)
-                                    random_seed = st.session_state.get("generated_sites_seed", None)
-                                    
-                                    # Prefer boundary polygon for generation (avoids water)
-                                    # fall back to demand GDF convex hull if no boundary available
-                                    sampling_gdf = boundary_gdf_for_gen if boundary_gdf_for_gen is not None else data_dict["demand_points"]
-
-                                    # Generate candidate sites
-                                    generated_candidates = data_processor.generate_candidate_sites(
-                                        sampling_gdf,
-                                        num_sites=num_sites, 
-                                        random_seed=random_seed
-                                    )
-                                    data_dict["candidate_sites"] = generated_candidates
-                                    # Persist generated candidates so they appear on the map and in state
-                                    try:
-                                        st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates
-                                    except Exception as persist_error:
-                                        logger.warning(f"Could not persist generated candidate sites to session state: {persist_error}")
-                                    
-                                    logger.info(f"Generated {num_sites} candidate sites with seed {random_seed}")
-                                    
-                                    # Add info message to chat
-                                    seed_info = f" (seed: {random_seed})" if random_seed is not None else ""
-                                    source_info = "boundary polygon" if boundary_gdf_for_gen is not None else "demand extent"
-                                    st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "content": f"Generated {num_sites} random candidate sites within {source_info}{seed_info}."
-                                    })
-                                    
-                                except Exception as gen_error:
-                                    logger.error(f"Failed to generate candidate sites: {gen_error}")
-                                    st.error(f"Failed to generate candidate sites: {gen_error}")
-                                    continue
-
-                            
-                            # Auto-detect and add variant-specific parameters from data
-                            parameters = action.get("parameters", {}).copy()
-                            
-                            # Only auto-detect data if variant is explicitly requested by user
-                            # Check if capacitated variant and no capacities provided
-                            if parameters.get("variant") == "capacitated" and "capacities" not in parameters:
-                                # First try to get capacity data from candidate sites
-                                if "candidate_sites" in data_dict:
-                                    capacity_data = data_processor.extract_capacity_data(data_dict["candidate_sites"])
-                                    if capacity_data:
-                                        parameters["capacities"] = capacity_data
-                                        logger.info(f"Auto-detected capacity data from candidate sites: {len(capacity_data)} values")
-                                    else:
-                                        # If no capacity data in candidate sites, calculate based on demand dataset population
-                                        if "demand_points" in data_dict:
-                                            demand_population = data_processor.extract_demand_data(data_dict["demand_points"])
-                                            if demand_population:
-                                                total_demand = sum(demand_population)
-                                                n_facilities = parameters.get("n_facilities", len(data_dict["candidate_sites"]))
-                                                # Distribute total demand among facilities
-                                                avg_capacity = total_demand / n_facilities
-                                                # Create capacity array for all candidate sites
-                                                capacity_data = [avg_capacity] * len(data_dict["candidate_sites"])
-                                                parameters["capacities"] = capacity_data
-                                                logger.info(f"Calculated capacity data based on demand population: {len(capacity_data)} values, avg capacity: {avg_capacity:.2f}")
-                                            else:
-                                                logger.warning("Capacitated variant requested but no population data found in demand dataset")
-                                        else:
-                                            logger.warning("Capacitated variant requested but no demand points data available")
-                            
-                            # Check if budget variant and no costs provided
-                            # Only auto-detect costs if variant is explicitly set to budget
-                            if parameters.get("variant") == "budget" and "facility_costs" not in parameters:
-                                if "candidate_sites" in data_dict:
-                                    cost_data = data_processor.extract_cost_data(data_dict["candidate_sites"])
-                                    if cost_data:
-                                        parameters["facility_costs"] = cost_data
-                                        logger.info(f"Auto-detected cost data: {len(cost_data)} values")
-                                    else:
-                                        logger.warning("Budget variant requested but no cost data found in candidate sites")
-                                        # Remove budget variant if no cost data available
-                                        parameters["variant"] = "base" if parameters.get("problem_type") == "p-median" else "classical"
-                                        logger.info(f"Reverted to {'base' if parameters.get('problem_type') == 'p-median' else 'classical'} variant due to missing cost data")
-                            
-                            # Add default weights if needed (use a non-conflicting column name)
-                            if "demand_points" in data_dict:
-                                data_dict["demand_points"] = data_processor.add_default_weights(data_dict["demand_points"], weight_column='default_weight')
-                            
-                            # Validate required data
-                            required_data = problem_solver.get_required_data()
-                            missing_data = [k for k, v in required_data.items() if v.get('required') and k not in data_dict]
-                            
-                            if missing_data:
-                                error_msg = f"Missing required data: {', '.join(missing_data)}"
-                                st.error(error_msg)
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"{error_msg}. Please upload the required data files."
-                                })
-                                st.rerun()
-                                continue
-                            
-                            # Solve with performance monitoring
-                            logger.info(f"App: Solving with parameters: {parameters}")
-                            start_time = time.time()
-                            
-                            try:
-                                solution = problem_solver.solve(
-                                    data=data_dict,
-                                    parameters=parameters,
-                                    constraints=action.get("constraints", {}),
-                                    distance_metric=action.get("distance_metric", "euclidean")
-                                )
-                                
-                                solve_time = time.time() - start_time
-                                logger.info(f"Optimization completed in {solve_time:.2f} seconds")
-                                
-                                # Log performance metrics
-                                if solution.get('status') in ['optimal', 'feasible']:
-                                    logger.info(f"Solution status: {solution.get('status')}")
-                                    logger.info(f"Objective value: {solution.get('objective_value', 'N/A')}")
-                                    logger.info(f"Selected facilities: {len(solution.get('selected_facilities', []))}")
-                                    
-                            except Exception as solve_error:
-                                solve_time = time.time() - start_time
-                                logger.error(f"Optimization failed after {solve_time:.2f} seconds: {solve_error}")
-                                raise
-                            
-                            st.session_state.problem_state["solution"] = solution
-                            st.session_state.problem_state["solution_history"].append(solution)
-                            
-                            # Generate explanation
-                            if solution.get('status') != 'error':
-                                # Build kwargs based on solver signature to avoid unexpected kwargs
-                                explain_sig = inspect.signature(problem_solver.explain_solution)
-                                explain_kwargs = {
-                                    "solution": solution,
-                                    "data": data_dict,
-                                    "detail_level": "standard",
-                                }
-                                if "objective_type" in explain_sig.parameters:
-                                    explain_kwargs["objective_type"] = parameters.get("objective", "total")
-                                explanation = problem_solver.explain_solution(**explain_kwargs)
-                                
-                                # Add explanation to chat
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"**Optimization Complete.**\n\n{explanation}"
-                                })
-                                
-                                st.success("Optimization completed! Check the map for results.")
-                            else:
-                                error_msg = f"Optimization failed: {solution.get('error', 'Unknown error')}"
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": error_msg
-                                })
-                                st.error(error_msg)
-                        
-                        except Exception as e:
-                            error_msg = f"Optimization error: {str(e)}"
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": error_msg
-                            })
-                            st.error(error_msg)
-                            logger.error(f"Optimization error: {e}", exc_info=True)
-
-                elif action["action"] == "fetch_data":
-                    # ----------------------------------------------------------------
-                    # Automatic data fetching via DataFetcher
-                    # ----------------------------------------------------------------
-                    # Lazy-initialise the fetcher once
-                    if st.session_state.data_fetcher is None:
-                        st.session_state.data_fetcher = DataFetcher()
-                    fetcher: DataFetcher = st.session_state.data_fetcher
-
-                    steps = action.get("steps", [])
-                    fetch_results: list[str] = []   # Human-readable summary per step
-                    fetch_errors:  list[str] = []   # Per-step errors (non-fatal)
-
-                    # We need the boundary GDF for subsequent demand / POI steps.
-                    boundary_gdf: gpd.GeoDataFrame | None = None
-
-                    with st.spinner("Fetching geographic data from public sources…"):
-                        for step in steps:
-                            step_type = step.get("type", "")
-                            location  = step.get("location", "")
-
-                            # ---- boundaries ----
-                            if step_type == "boundaries":
-                                try:
-                                    gdf = fetcher.fetch_boundaries(location)
-                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
-                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
-                                    key  = f"boundary_{slug}"
-                                    gdf.attrs["source"] = "auto_fetched"
-                                    st.session_state.problem_state["data"][key] = gdf
-                                    boundary_gdf = gdf
-                                    msg = f"Boundary ({location}): 1 polygon"
-                                    fetch_results.append(msg)
-                                    logger.info(f"fetch_data: {msg}")
-                                except DataFetchError as exc:
-                                    err = f"Boundary fetch failed for '{location}': {exc}"
-                                    fetch_errors.append(err)
-                                    logger.error(err)
-
-                            # ---- demand / population grid ----
-                            elif step_type == "demand":
-                                if boundary_gdf is None:
-                                    fetch_errors.append(
-                                        "Demand step skipped: boundary not available yet."
-                                    )
-                                    continue
-                                try:
-                                    gdf = fetcher.fetch_population(boundary_gdf)
-                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
-                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
-                                    key  = f"demand_{slug}"
-                                    gdf.attrs["source"] = "auto_fetched"
-                                    st.session_state.problem_state["data"][key] = gdf
-                                    msg = (
-                                        f"Population grid ({location}): "
-                                        f"{len(gdf)} demand points (synthetic)"
-                                    )
-                                    fetch_results.append(msg)
-                                    logger.info(f"fetch_data: {msg}")
-                                except DataFetchError as exc:
-                                    err = f"Population fetch failed for '{location}': {exc}"
-                                    fetch_errors.append(err)
-                                    logger.error(err)
-
-                            # ---- POIs ----
-                            elif step_type == "pois":
-                                category = step.get("category", "health")
-                                if boundary_gdf is None:
-                                    fetch_errors.append(
-                                        f"POI step ('{category}') skipped: boundary not available."
-                                    )
-                                    continue
-                                try:
-                                    gdf = fetcher.fetch_pois(boundary_gdf, category)
-                                    gdf = st.session_state.data_processor.preprocess_data(gdf)
-                                    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
-                                    key  = f"{category}_facilities_{slug}"
-                                    gdf.attrs["source"] = "auto_fetched"
-                                    st.session_state.problem_state["data"][key] = gdf
-                                    msg = (
-                                        f"{category.title()} facilities ({location}): "
-                                        f"{len(gdf)} points from OpenStreetMap"
-                                    )
-                                    fetch_results.append(msg)
-                                    logger.info(f"fetch_data: {msg}")
-                                except DataFetchError as exc:
-                                    err = (
-                                        f"{category.title()} facilities fetch failed "
-                                        f"for '{location}': {exc}"
-                                    )
-                                    fetch_errors.append(err)
-                                    logger.error(err)
-
-                            else:
-                                logger.warning(f"fetch_data: unknown step type '{step_type}' — skipped")
-
-                    # Build fetch summary message for the chat
-                    summary_lines: list[str] = []
-                    if fetch_results:
-                        summary_lines.append("**Fetched data successfully:**")
-                        for r in fetch_results:
-                            summary_lines.append(f"- {r}")
-                    if fetch_errors:
-                        summary_lines.append("\n**Some steps failed (partial data available):**")
-                        for e in fetch_errors:
-                            summary_lines.append(f"- ⚠️ {e}")
-                        summary_lines.append(
-                            "\nYou can upload data manually for the failed steps."
-                        )
-
-                    if summary_lines:
-                        st.session_state.messages.append({
-                            "role": "assistant",
-                            "content": "\n".join(summary_lines)
-                        })
-
-                    # Notify the agent about the newly available data so it can
-                    # propose optimization parameters.
-                    if fetch_results and st.session_state.problem_state["data"]:
-                        try:
-                            data_summary: dict = {}
-                            data_processor = st.session_state.data_processor
-                            for ds_name, ds_gdf in st.session_state.problem_state["data"].items():
-                                try:
-                                    dtypes = {c: str(ds_gdf[c].dtype)
-                                              for c in ds_gdf.columns if c != "geometry"}
-                                except Exception:
-                                    dtypes = {}
-
-                                cap_cols      = data_processor.identify_capacity_columns(ds_gdf)
-                                cost_cols     = data_processor.identify_cost_columns(ds_gdf)
-                                demand_cols   = data_processor.identify_demand_columns(ds_gdf)
-                                sample_values: dict = {}
-                                col_stats:    dict = {}
-                                for col in ds_gdf.columns:
-                                    if col.lower() in ["geometry", "shape"]:
-                                        continue
-                                    try:
-                                        non_null = ds_gdf[col].dropna()
-                                        if len(non_null) > 0:
-                                            sample_values[col] = non_null.iloc[0]
-                                            if ds_gdf[col].dtype in ["int64", "float64", "int32", "float32"]:
-                                                col_stats[col] = {
-                                                    "mean": float(ds_gdf[col].mean()),
-                                                    "max":  float(ds_gdf[col].max()),
-                                                }
-                                    except Exception:
-                                        pass
-
-                                # Tag auto-fetched data so the LLM sees the source
-                                ds_source = ds_gdf.attrs.get("source", "uploaded")
-
-                                data_summary[ds_name] = {
-                                    "num_features":   len(ds_gdf),
-                                    "geometry_type":  (
-                                        ds_gdf.geometry.type.unique()[0]
-                                        if len(ds_gdf) > 0 else "Unknown"
-                                    ),
-                                    "columns":      [c for c in ds_gdf.columns if c != "geometry"],
-                                    "dtypes":       dtypes,
-                                    "bounds":       ds_gdf.total_bounds.tolist() if len(ds_gdf) > 0 else [],
-                                    "capacity_columns": cap_cols,
-                                    "cost_columns":     cost_cols,
-                                    "demand_columns":   demand_cols,
-                                    "sample_values":    sample_values,
-                                    "column_stats":     col_stats,
-                                    "source":       ds_source,
-                                }
-
-                            with st.spinner("Letting the AI analyse the fetched data…"):
-                                notice_result = st.session_state.conversation_manager.notify_data_uploaded(
-                                    conversation_history=st.session_state.messages,
-                                    problem_state=st.session_state.problem_state,
-                                    uploaded_data_summary=data_summary,
-                                )
-
-                            st.session_state.problem_state = notice_result["updated_state"]
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": notice_result["response"]
-                            })
-
-                        except Exception as notify_exc:
-                            logger.warning(
-                                f"Could not notify agent about fetched data: {notify_exc}"
-                            )
-        
         st.rerun()
 
 with col2:
