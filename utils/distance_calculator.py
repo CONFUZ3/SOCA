@@ -334,23 +334,67 @@ class DistanceCalculator:
         return self._manhattan_distance(origins, destinations)
     
     def _network_distance(
-        self, 
-        origins: gpd.GeoDataFrame, 
-        destinations: gpd.GeoDataFrame, 
-        network_graph
+        self,
+        origins: gpd.GeoDataFrame,
+        destinations: gpd.GeoDataFrame,
+        network_graph,
     ) -> np.ndarray:
-        """Network-based distance using OSMnx (placeholder - not implemented)."""
-        try:
-            import osmnx as ox
-            import networkx as nx
-            
-            # Placeholder for future implementation
-            logger.warning("Network distance calculation not fully implemented yet. Using Euclidean as fallback.")
-            return self.euclidean_distance(origins, destinations)
-            
-        except ImportError:
-            logger.error("OSMnx not installed. Install with: pip install osmnx")
-            raise
+        """Road-network shortest-path distances via OSMnx + NetworkX Dijkstra.
+
+        network_graph must be a (G_proj, crs_proj) tuple as returned by
+        NetworkManager.get_graph(). Returns float64 matrix in metres.
+        Disconnected pairs fall back to geodesic distance with a warning.
+        """
+        import osmnx as ox
+        import networkx as nx
+
+        G_proj, crs_proj = network_graph
+
+        origins_proj = origins.to_crs(crs_proj)
+        destinations_proj = destinations.to_crs(crs_proj)
+
+        origin_xs = [g.x for g in origins_proj.geometry]
+        origin_ys = [g.y for g in origins_proj.geometry]
+        dest_xs = [g.x for g in destinations_proj.geometry]
+        dest_ys = [g.y for g in destinations_proj.geometry]
+
+        origin_nodes = ox.distance.nearest_nodes(G_proj, origin_xs, origin_ys)
+        dest_nodes = ox.distance.nearest_nodes(G_proj, dest_xs, dest_ys)
+
+        n_origins = len(origin_nodes)
+        n_dests = len(dest_nodes)
+        dist_matrix = np.full((n_origins, n_dests), np.inf, dtype=np.float64)
+
+        # Group destination columns by node to run one Dijkstra per unique dest node
+        unique_dest_nodes = list(dict.fromkeys(dest_nodes))  # preserve order, deduplicate
+        dest_node_to_cols: dict = {}
+        for col_idx, node in enumerate(dest_nodes):
+            dest_node_to_cols.setdefault(node, []).append(col_idx)
+
+        for dest_node in unique_dest_nodes:
+            try:
+                lengths = nx.single_source_dijkstra_path_length(
+                    G_proj, dest_node, weight="length"
+                )
+            except nx.NodeNotFound:
+                continue
+            cols = dest_node_to_cols[dest_node]
+            for row_idx, orig_node in enumerate(origin_nodes):
+                if orig_node in lengths:
+                    for col_idx in cols:
+                        dist_matrix[row_idx, col_idx] = lengths[orig_node]
+
+        # Geodesic fallback for disconnected pairs
+        inf_mask = np.isinf(dist_matrix)
+        if inf_mask.any():
+            n_inf = int(inf_mask.sum())
+            logger.warning(
+                "NetworkDistance: %d disconnected pairs replaced with geodesic fallback", n_inf
+            )
+            geodesic = self._geodesic_distance_matrix(origins, destinations)
+            dist_matrix[inf_mask] = geodesic[inf_mask]
+
+        return dist_matrix
     
     # Keep public alias for backward compatibility
     def network_distance(
@@ -368,7 +412,8 @@ class DistanceCalculator:
         destinations: gpd.GeoDataFrame,
         threshold: float,
         metric: str = "euclidean",
-        unit: Optional[str] = None
+        unit: Optional[str] = None,
+        network_graph: Optional[Any] = None,
     ) -> np.ndarray:
         """Calculate binary coverage matrix.
         
@@ -382,8 +427,9 @@ class DistanceCalculator:
         Returns:
             Binary matrix where 1 indicates destination is within threshold of origin
         """
-        distances = self.calculate_distance_matrix(origins, destinations, metric)
-        
+        distances = self.calculate_distance_matrix(origins, destinations, metric,
+                                                    network_graph=network_graph)
+
         # Convert threshold to meters
         threshold_meters = self._convert_to_meters(threshold, unit)
         

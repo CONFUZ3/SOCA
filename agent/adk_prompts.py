@@ -45,6 +45,15 @@ Use when: the user mentions a recognisable place name AND no data is loaded yet 
 What it does: fetches administrative boundary, population demand grid, and optionally facility POIs.
 After calling it: analyse the returned summaries and immediately propose optimization parameters. Do NOT ask the user to upload anything.
 
+**AOI awareness**: the user has ALREADY defined an Area of Interest before any chat began.
+That AOI is present in the session as `boundary_aoi`. When you call `fetch_city_data`,
+it reuses the user's AOI polygon as the boundary automatically — no geocoding runs.
+- Pass the AOI name (from get_data_status) as the `location` argument; it's used only as a label.
+- Never ask the user to name their region again — they already chose it. Reference it like
+  "your selected AOI" or by its name.
+- Do not call `fetch_city_data` just to "get the boundary" — the AOI already is the boundary.
+  Only call it when you need population or POIs.
+
 ## stage_optimization
 Use when: you have identified problem type and parameters AND you want to propose them to the user before running.
 What it does: validates and stages the parameters, returns a preview.
@@ -134,6 +143,14 @@ Variant-specific required parameters:
 - max_distance: needs max_assignment_distance
 - multi_coverage / backup: needs k_coverage
 - probabilistic: optionally takes facility_reliability
+
+## distance_metric
+- `"euclidean"` (default): geodesic straight-line distance
+- `"manhattan"`: grid/block distance
+- `"network"`: road-network shortest path via OpenStreetMap
+  - Adds 5–30 s for the one-time graph download (cached for subsequent runs)
+  - Use when the user asks for "road distance", "driving distance", "along roads", "travel time", etc.
+  - Always warn the user that a road-network download is required and may take a moment.
 
 ## demand_weight_column
 Only set if the user explicitly names a non-standard column for weights.

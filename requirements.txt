@@ -52,6 +52,6 @@ overturemaps>=0.7.0              # Overture Maps cloud-native data (boundaries, 
 pyarrow>=14.0.0                  # Required by overturemaps (Parquet/Arrow I/O)
 
 # Future enhancements (optional - may require additional system dependencies)
-# osmnx>=1.9.1                   # OPTIONAL: OpenStreetMap network analysis
+osmnx>=1.9.1                    # OpenStreetMap road-network analysis (network distance metric)
 # contextily>=1.5.2              # OPTIONAL: basemap tiles
 # h3>=4.0.0                      # OPTIONAL: H3 hexagonal grid for population demand points

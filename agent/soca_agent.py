@@ -225,6 +225,13 @@ class SOCAAgent:
         """Build the Content object passed to Runner.run_async() as new_message."""
         context_parts = [f"User message: {user_message}"]
 
+        aoi = problem_state.get("aoi")
+        if aoi:
+            context_parts.append(
+                f"\nUser AOI (already defined, reuse as boundary): name='{aoi.get('name')}', "
+                f"area={aoi.get('area_km2', 0):.1f} km², source={aoi.get('source')}."
+            )
+
         if problem_state.get("problem_type"):
             context_parts.append(
                 f"\nCurrent problem type: {problem_state['problem_type']}"
@@ -309,6 +316,7 @@ class SOCAAgent:
             problem_registry=self.problem_registry,
             generated_sites_count=problem_state.get("_generated_sites_count", 100),
             generated_sites_seed=problem_state.get("_generated_sites_seed"),
+            network_manager=problem_state.get("_network_manager"),
         )
 
         message = self._build_message(

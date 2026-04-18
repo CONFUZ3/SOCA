@@ -27,6 +27,7 @@ def set_current_context(
     problem_registry: Any,
     generated_sites_count: int = 100,
     generated_sites_seed: Optional[int] = None,
+    network_manager: Optional[Any] = None,
 ) -> None:
     """Store live session references for the current thread.
 
@@ -38,6 +39,7 @@ def set_current_context(
     _bridge.registry = problem_registry
     _bridge.generated_sites_count = generated_sites_count
     _bridge.generated_sites_seed = generated_sites_seed
+    _bridge.network_manager = network_manager
     logger.debug("state_bridge: context set (data keys=%s)", list(data.keys()))
 
 
@@ -62,3 +64,20 @@ def get_generated_sites_count() -> int:
 
 def get_generated_sites_seed() -> Optional[int]:
     return getattr(_bridge, "generated_sites_seed", None)
+
+
+def get_network_manager() -> Optional[Any]:
+    """Return the NetworkManager for the current session (may be None)."""
+    return getattr(_bridge, "network_manager", None)
+
+
+def get_aoi() -> Optional[Dict[str, Any]]:
+    """Return the confirmed AOI dict (or None) for the current session."""
+    ps = getattr(_bridge, "problem_state", {}) or {}
+    return ps.get("aoi")
+
+
+def get_aoi_boundary_gdf():
+    """Return the AOI as a one-row boundary GeoDataFrame, or None if no AOI."""
+    data = getattr(_bridge, "data", {}) or {}
+    return data.get("boundary_aoi")

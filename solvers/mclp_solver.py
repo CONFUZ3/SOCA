@@ -395,19 +395,21 @@ Where:
         
         # Calculate coverage and distance matrices
         dist_calc = DistanceCalculator()
-        
+
         # Get unit conversion info
         unit_info = dist_calc.get_unit_info(service_radius, service_radius_unit)
-        
+
+        network_graph = data.get('_network_graph')
         coverage_matrix = dist_calc.calculate_coverage_matrix(
-            demand_gdf, candidate_gdf, 
+            demand_gdf, candidate_gdf,
             threshold=service_radius,
             metric=distance_metric,
-            unit=service_radius_unit
+            unit=service_radius_unit,
+            network_graph=network_graph,
         )
-        
+
         distance_matrix = dist_calc.calculate_distance_matrix(
-            demand_gdf, candidate_gdf, metric=distance_metric
+            demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
         )
         
         # Extract optional parameters

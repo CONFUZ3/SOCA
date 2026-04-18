@@ -142,8 +142,9 @@ Where:
             
             # Calculate distance matrix
             dist_calc = DistanceCalculator()
+            network_graph = data.get('_network_graph')
             distance_matrix = dist_calc.calculate_distance_matrix(
-                demand_gdf, candidate_gdf, metric=distance_metric
+                demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
             )
             
             fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))

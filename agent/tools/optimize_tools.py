@@ -20,6 +20,7 @@ from .state_bridge import (
     get_problem_registry,
     get_generated_sites_count,
     get_generated_sites_seed,
+    get_network_manager,
 )
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,8 @@ def _categorise_data(data_store: dict) -> tuple:
 
         # Boundary detection
         if key_lower.startswith("boundary_") or src in (
-            "auto_fetched", "overpass_boundary", "photon_bbox_fallback",
-            "photon_then_overpass", "nominatim", "nominatim_bbox_fallback",
+            "auto_fetched", "osmnx", "photon_bbox_fallback",
+            "nominatim", "nominatim_bbox_fallback", "gadm",
         ):
             if len(gdf) > 0 and gdf.geometry.iloc[0].geom_type in (
                 "Polygon", "MultiPolygon"
@@ -432,6 +433,42 @@ def confirm_optimization(
             "status": "error",
             "error_message": f"Missing required data: {', '.join(missing)}",
         }
+
+    # Fetch road-network graph when distance_metric == "network"
+    network_graph = None
+    if distance_metric == "network":
+        nm = get_network_manager()
+        if nm is None:
+            return {
+                "status": "error",
+                "error_message": "NetworkManager not in session. Refresh the page and retry.",
+            }
+        if not nm.is_osmnx_available():
+            return {
+                "status": "error",
+                "error_message": "OSMnx is not installed. Run: pip install osmnx>=1.9.1",
+            }
+        demand_gdf = data_dict.get("demand_points")
+        boundary_gdf = next((data_store[n] for n in boundary_keys), None)
+        boundary_polygon = None
+        if boundary_gdf is not None and len(boundary_gdf) > 0:
+            from shapely.ops import unary_union
+            boundary_polygon = unary_union(boundary_gdf.geometry)
+        try:
+            G_proj, crs_proj = nm.get_graph(demand_gdf, boundary_polygon)
+            network_graph = (G_proj, crs_proj)
+        except Exception as exc:
+            logger.error("confirm_optimization: road network fetch error: %s", exc, exc_info=True)
+            return {
+                "status": "error",
+                "error_message": (
+                    f"Road network fetch failed: {exc}. "
+                    "Try switching to 'euclidean' distance."
+                ),
+            }
+
+    if network_graph is not None:
+        data_dict["_network_graph"] = network_graph
 
     # Run solver
     logger.info(

@@ -197,8 +197,9 @@ Where:
             
             # Calculate distance matrix
             dist_calc = DistanceCalculator()
+            network_graph = data.get('_network_graph')
             distance_matrix = dist_calc.calculate_distance_matrix(
-                demand_gdf, candidate_gdf, metric=distance_metric
+                demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
             )
             # For max-distance variant, compute a mask where assignments allowed
             distance_mask = None

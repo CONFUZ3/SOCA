@@ -8,19 +8,25 @@ from pathlib import Path
 import os
 import re
 import logging
+import sys
 import time
 import hashlib
 import json
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('spopt_app.log')
-    ]
-)
+# Set up logging — force UTF-8 so activity-log glyphs (✓ … • ✗) don't crash
+# the Windows cp1252 console. errors="replace" is a belt-and-braces fallback.
+try:
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+_log_fmt = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_stream_handler = logging.StreamHandler(stream=sys.stderr)
+_stream_handler.setFormatter(_log_fmt)
+_file_handler = logging.FileHandler('spopt_app.log', encoding='utf-8')
+_file_handler.setFormatter(_log_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 # Imports from our modules
@@ -30,6 +36,7 @@ from utils.data_processor import DataProcessor
 from utils.visualizer import MapVisualizer
 from utils.pydeck_visualizer import PyDeckVisualizer
 from utils.export_handler import ExportHandler
+from utils.aoi_selector import render_aoi_selector, aoi_to_boundary_gdf
 from config.settings import settings
 
 
@@ -87,32 +94,6 @@ def initialize_session_state():
     """Initialize all session state variables"""
     if "messages" not in st.session_state:
         st.session_state.messages = []
-        # Add welcome message
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": """Welcome to the Spatial Optimization Conversational Agent!
-
-I'm here to help you solve facility location problems using state-of-the-art optimization techniques.
-
-**To get started, you have two options:**
-
-🌐 **Option A — Just describe your problem (fully automatic)**
-Tell me something like *"Place 5 hospitals in Lima, Peru"* and I'll automatically fetch:
-- The city boundary
-- A population demand grid
-- Existing facility locations from OpenStreetMap
-
-📁 **Option B — Upload your own data**
-Use the sidebar to upload GeoJSON, Shapefile, or CSV files, then describe your problem.
-
-**I can help you with:**
-- P-Median: Minimize average/total distance
-- P-Center: Minimize maximum distance (worst-case)
-- MCLP: Maximize coverage within a service radius
-- LSCP: Minimize facilities needed for full coverage
-
-What problem would you like to solve today?"""
-        })
     
     if "problem_state" not in st.session_state:
         st.session_state.problem_state = {
@@ -121,7 +102,9 @@ What problem would you like to solve today?"""
             "constraints": {},
             "data": {},
             "solution": None,
-            "solution_history": []
+            "solution_history": [],
+            "aoi": None,
+            "aoi_confirmed": False,
         }
     
     if "raster_data" not in st.session_state:
@@ -165,7 +148,107 @@ What problem would you like to solve today?"""
     if "data_fetcher" not in st.session_state:
         st.session_state.data_fetcher = None  # Lazy-initialised on first use
 
+    if "network_manager" not in st.session_state:
+        from utils.network_manager import NetworkManager
+        st.session_state.network_manager = NetworkManager()
+
 initialize_session_state()
+
+# Inject NetworkManager into problem_state on every rerun so soca_agent can access it
+st.session_state.problem_state["_network_manager"] = st.session_state.network_manager
+
+
+def _reset_to_aoi_step() -> None:
+    """Fresh start: clear data, solution, chat and return to AOI selection."""
+    st.session_state.messages = []
+    st.session_state.problem_state = {
+        "problem_type": None,
+        "parameters": {},
+        "constraints": {},
+        "data": {},
+        "solution": None,
+        "solution_history": [],
+        "aoi": None,
+        "aoi_confirmed": False,
+        "_network_manager": st.session_state.network_manager,
+    }
+    st.session_state.raster_data = {}
+    # Clear AOI selector widget state
+    for k in (
+        "_aoi_search_result", "_aoi_current_geom", "_aoi_current_name",
+        "_aoi_current_source", "_aoi_search_input",
+    ):
+        if k in st.session_state:
+            st.session_state[k] = None if "input" not in k else ""
+    st.session_state["_aoi_map_key"] = st.session_state.get("_aoi_map_key", 0) + 1
+
+
+# ============================================================================
+# AOI GATE — Step 1 of the flow. Until AOI is confirmed, nothing else renders.
+# ============================================================================
+if not st.session_state.problem_state.get("aoi_confirmed"):
+    st.title("Spatial Optimization Conversational Agent")
+    confirmed = render_aoi_selector()
+    if confirmed is not None:
+        aoi_gdf = aoi_to_boundary_gdf(confirmed)
+        st.session_state.problem_state["aoi"] = confirmed
+        st.session_state.problem_state["aoi_confirmed"] = True
+        st.session_state.problem_state["data"]["boundary_aoi"] = aoi_gdf
+        # Seed a scoped welcome message
+        st.session_state.messages = [{
+            "role": "assistant",
+            "content": (
+                f"Great — your area of interest is **{confirmed['name']}** "
+                f"({confirmed['area_km2']:,.1f} km²).\n\n"
+                "Now tell me what you want to optimize. Examples:\n"
+                "- *Place 5 hospitals here to minimize travel distance*\n"
+                "- *Maximize clinic coverage within a 2 km radius using 4 facilities*\n"
+                "- *How many fire stations do I need to cover every block within 3 km?*\n\n"
+                "I can also fetch population grids and existing facility locations "
+                "for this area — just ask."
+            ),
+        }]
+        st.rerun()
+    st.stop()
+
+
+# ============================================================================
+# AOI HEADER — persistent chip showing current AOI with Change AOI button
+# ============================================================================
+_aoi = st.session_state.problem_state.get("aoi") or {}
+_hdr_cols = st.columns([6, 1])
+with _hdr_cols[0]:
+    st.markdown(
+        f"**AOI:** {_aoi.get('name', '—')} · "
+        f"{_aoi.get('area_km2', 0):,.1f} km² · "
+        f"source `{_aoi.get('source', '—')}`"
+    )
+with _hdr_cols[1]:
+    if st.button("Change AOI", use_container_width=True, help="Clears data, solutions, and chat"):
+        if st.session_state.problem_state.get("solution") or st.session_state.problem_state.get("data"):
+            st.session_state["_aoi_change_pending"] = True
+        else:
+            _reset_to_aoi_step()
+            st.rerun()
+
+if st.session_state.get("_aoi_change_pending"):
+    with st.container(border=True):
+        st.warning(
+            "Changing the AOI will clear loaded data, the current solution, "
+            "and the chat history. This cannot be undone."
+        )
+        c1, c2, _ = st.columns([1, 1, 4])
+        with c1:
+            if st.button("Confirm change", type="primary"):
+                st.session_state["_aoi_change_pending"] = False
+                _reset_to_aoi_step()
+                st.rerun()
+        with c2:
+            if st.button("Cancel"):
+                st.session_state["_aoi_change_pending"] = False
+                st.rerun()
+
+st.divider()
 
 # Sidebar
 with st.sidebar:
@@ -428,12 +511,13 @@ with st.sidebar:
             "constraints": {},
             "data": st.session_state.problem_state.get("data", {}),  # Keep data
             "solution": None,
-            "solution_history": []
+            "solution_history": [],
+            "aoi": st.session_state.problem_state.get("aoi"),
+            "aoi_confirmed": st.session_state.problem_state.get("aoi_confirmed", False),
         }
         st.rerun()
 
 # Main content area
-st.title("Spatial Optimization Conversational Agent")
 
 # Create two columns: chat and map
 col1, col2 = st.columns([1, 1])
@@ -699,9 +783,10 @@ def render_map_fragment():
                 _src = _fgdf.attrs.get("source", "")
                 _fkey = _fname.lower()
                 if _fkey.startswith("boundary_") or _src in (
-                    "auto_fetched", "overpass_boundary",
-                    "photon_bbox_fallback", "photon_then_overpass",
+                    "auto_fetched", "osmnx",
+                    "photon_bbox_fallback",
                     "nominatim", "nominatim_bbox_fallback",
+                    "gadm",
                 ):
                     if len(_fgdf) > 0 and _fgdf.geometry.iloc[0].geom_type in ("Polygon", "MultiPolygon"):
                         _viz_boundary_keys.add(_fname)

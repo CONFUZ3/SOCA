@@ -22,11 +22,9 @@ from utils.data_fetcher import (
     DataFetcher,
     DataFetchError,
     GeocodingError,
-    OverpassError,
     PopulationDataError,
-    FACILITY_TAGS,
+    _OSMNX_POI_TAGS,
     NOMINATIM_URL,
-    OVERPASS_URL,
 )
 
 
@@ -112,6 +110,19 @@ def _lima_boundary_gdf() -> gpd.GeoDataFrame:
 
 class TestFetchBoundaries(unittest.TestCase):
 
+    def setUp(self):
+        # Force OSMnx tier to miss so these tests exercise the Nominatim
+        # fallback path without needing a live osmnx / Overpass connection.
+        self._osmnx_patcher = patch.object(
+            DataFetcher,
+            "_fetch_boundary_via_osmnx",
+            side_effect=GeocodingError("osmnx disabled for test"),
+        )
+        self._osmnx_patcher.start()
+
+    def tearDown(self):
+        self._osmnx_patcher.stop()
+
     @patch("utils.data_fetcher.requests.get")
     def test_returns_geodataframe_with_polygon(self, mock_get):
         mock_get.return_value = _make_response(_nominatim_polygon_response())
@@ -138,23 +149,14 @@ class TestFetchBoundaries(unittest.TestCase):
         mock_get.return_value = _make_response({"features": []})
 
         fetcher = DataFetcher()
-        with pytest.raises(GeocodingError, match="no results"):
+        with pytest.raises(GeocodingError, match="no results|All geocoding backends failed"):
             fetcher.fetch_boundaries("Nonexistent Place XYZ123")
 
-    @patch("utils.data_fetcher.requests.post")
     @patch("utils.data_fetcher.requests.get")
-    def test_falls_back_to_bbox_when_no_polygon(self, mock_get, mock_post):
-        """When only a Point geometry is returned from Nominatim, fall back to bbox polygon.
-        Overpass POST is forced to fail; Photon GET returns empty features;
-        Nominatim GET returns a Point so the bbox-polygon fallback triggers."""
-        import requests as req_lib
-
-        # Force all Overpass POST attempts to fail (connection error)
-        mock_post.side_effect = req_lib.exceptions.ConnectionError("overpass down")
-
-        # First GET call goes to Photon — return empty features so Photon fails.
-        # Second GET call goes to Nominatim — return a Point so bbox fallback is exercised.
-        photon_empty = _make_response({"features": []})
+    def test_falls_back_to_bbox_when_no_polygon(self, mock_get):
+        """When Nominatim returns only a Point, its internal bbox fallback triggers
+        and returns a rectangular polygon with source='nominatim_bbox_fallback'."""
+        # OSMnx tier is already disabled by setUp — flow goes straight to Nominatim.
         nominatim_point = _make_response({
             "features": [
                 {
@@ -165,7 +167,7 @@ class TestFetchBoundaries(unittest.TestCase):
                 }
             ]
         })
-        mock_get.side_effect = [photon_empty, nominatim_point]
+        mock_get.return_value = nominatim_point
 
         fetcher = DataFetcher()
         gdf = fetcher.fetch_boundaries("Lima")
@@ -202,100 +204,97 @@ class TestFetchBoundaries(unittest.TestCase):
 # Tests: fetch_pois
 # ---------------------------------------------------------------------------
 
+def _osmnx_feature_gdf(rows: list[dict]) -> gpd.GeoDataFrame:
+    """Build a GeoDataFrame in the shape osmnx.features_from_polygon returns."""
+    if not rows:
+        return gpd.GeoDataFrame(columns=["name", "amenity", "geometry"], crs="EPSG:4326")
+    geoms = [Point(r["lon"], r["lat"]) for r in rows]
+    data = [{"name": r.get("name", ""), "amenity": r.get("amenity", "")} for r in rows]
+    return gpd.GeoDataFrame(data, geometry=geoms, crs="EPSG:4326")
+
+
+def _patch_osmnx_features(return_value=None, side_effect=None):
+    """Context manager that patches osmnx.features_from_polygon inside DataFetcher."""
+    import osmnx as ox
+    return patch.object(
+        ox, "features_from_polygon",
+        return_value=return_value, side_effect=side_effect,
+    )
+
+
 class TestFetchPois(unittest.TestCase):
 
-    @patch("utils.data_fetcher.requests.post")
-    def test_returns_geodataframe_with_expected_columns(self, mock_post):
-        mock_post.return_value = _make_response(_overpass_response(5))
+    def setUp(self):
+        # Disable the Overture tier so every POI test exercises the OSMnx
+        # path without hitting the real Overture Maps cloud parquet.
+        import utils.data_fetcher as df
+        self._overture_patch = patch.object(df, "_OVERTURE_AVAILABLE", False)
+        self._overture_patch.start()
 
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
-        gdf = fetcher.fetch_pois(boundary, "health")
+    def tearDown(self):
+        self._overture_patch.stop()
+
+    def test_returns_geodataframe_with_expected_columns(self):
+        rows = [
+            {"name": f"POI {i}", "amenity": "hospital", "lat": -12.1, "lon": -77.0}
+            for i in range(5)
+        ]
+        with _patch_osmnx_features(return_value=_osmnx_feature_gdf(rows)):
+            fetcher = DataFetcher()
+            boundary = _lima_boundary_gdf()
+            gdf = fetcher.fetch_pois(boundary, "health")
 
         assert isinstance(gdf, gpd.GeoDataFrame)
         assert "name" in gdf.columns
         assert "amenity" in gdf.columns
         assert gdf.crs.to_epsg() == 4326
 
-    @patch("utils.data_fetcher.requests.post")
-    def test_clips_to_boundary_polygon(self, mock_post):
+    def test_clips_to_boundary_polygon(self):
         """Points outside the boundary polygon should be removed."""
-        elements = [
-            # Inside Lima ~boundary
-            {"type": "node", "id": 1, "lat": -12.1, "lon": -77.0,
-             "tags": {"name": "Inside", "amenity": "hospital"}},
-            # Clearly outside (Bogotá coordinates)
-            {"type": "node", "id": 2, "lat": 4.7, "lon": -74.0,
-             "tags": {"name": "Outside", "amenity": "hospital"}},
+        rows = [
+            {"name": "Inside",  "amenity": "hospital", "lat": -12.1, "lon": -77.0},
+            {"name": "Outside", "amenity": "hospital", "lat":  4.7,  "lon": -74.0},  # Bogotá
         ]
-        mock_post.return_value = _make_response({"elements": elements})
-
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
-        gdf = fetcher.fetch_pois(boundary, "health")
+        with _patch_osmnx_features(return_value=_osmnx_feature_gdf(rows)):
+            fetcher = DataFetcher()
+            boundary = _lima_boundary_gdf()
+            gdf = fetcher.fetch_pois(boundary, "health")
 
         assert len(gdf) == 1
         assert gdf.iloc[0]["name"] == "Inside"
 
-    @patch("utils.data_fetcher.requests.post")
-    def test_returns_empty_gdf_when_no_elements(self, mock_post):
-        mock_post.return_value = _make_response({"elements": []})
-
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
-        gdf = fetcher.fetch_pois(boundary, "health")
+    def test_returns_empty_gdf_when_no_features(self):
+        with _patch_osmnx_features(return_value=_osmnx_feature_gdf([])):
+            fetcher = DataFetcher()
+            boundary = _lima_boundary_gdf()
+            gdf = fetcher.fetch_pois(boundary, "health")
 
         assert isinstance(gdf, gpd.GeoDataFrame)
         assert len(gdf) == 0
 
-    def test_raises_overpass_error_on_unknown_category(self):
+    def test_raises_data_fetch_error_on_unknown_category(self):
         fetcher = DataFetcher()
         boundary = _lima_boundary_gdf()
 
-        with pytest.raises(OverpassError, match="Unknown POI category"):
+        with pytest.raises(DataFetchError, match="Unknown POI category"):
             fetcher.fetch_pois(boundary, "unknown_category_xyz")
 
-    @patch("utils.data_fetcher.requests.post")
-    def test_raises_overpass_error_on_network_failure(self, mock_post):
-        import requests as req_lib
-        mock_post.side_effect = req_lib.exceptions.Timeout("timed out")
+    def test_raises_data_fetch_error_on_network_failure(self):
+        with _patch_osmnx_features(side_effect=RuntimeError("osmnx network down")):
+            fetcher = DataFetcher()
+            boundary = _lima_boundary_gdf()
 
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
+            with pytest.raises(DataFetchError):
+                fetcher.fetch_pois(boundary, "health")
 
-        with pytest.raises(OverpassError):
-            fetcher.fetch_pois(boundary, "health")
-
-    @patch("utils.data_fetcher.requests.post")
-    def test_all_facility_categories_accepted(self, mock_post):
-        """All categories in FACILITY_TAGS should not raise OverpassError."""
-        mock_post.return_value = _make_response({"elements": []})
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
-
-        for cat in FACILITY_TAGS:
-            gdf = fetcher.fetch_pois(boundary, cat)
-            assert isinstance(gdf, gpd.GeoDataFrame), f"category '{cat}' failed"
-
-    @patch("utils.data_fetcher.requests.post")
-    def test_handles_way_elements_with_center(self, mock_post):
-        """Way elements use 'center' lat/lon."""
-        elements = [
-            {
-                "type": "way",
-                "id": 99,
-                "center": {"lat": -12.1, "lon": -77.0},
-                "tags": {"name": "Big Hospital", "amenity": "hospital"},
-            }
-        ]
-        mock_post.return_value = _make_response({"elements": elements})
-
-        fetcher = DataFetcher()
-        boundary = _lima_boundary_gdf()
-        gdf = fetcher.fetch_pois(boundary, "health")
-
-        # Should have parsed the center and clipped correctly
-        assert len(gdf) >= 0  # may be 0 or 1 depending on polygon containment
+    def test_all_facility_categories_accepted(self):
+        """All categories in _OSMNX_POI_TAGS should not raise."""
+        with _patch_osmnx_features(return_value=_osmnx_feature_gdf([])):
+            fetcher = DataFetcher()
+            boundary = _lima_boundary_gdf()
+            for cat in _OSMNX_POI_TAGS:
+                gdf = fetcher.fetch_pois(boundary, cat)
+                assert isinstance(gdf, gpd.GeoDataFrame), f"category '{cat}' failed"
 
 
 # ---------------------------------------------------------------------------
@@ -459,30 +458,27 @@ class TestMakeRequestRetry(unittest.TestCase):
 
 class TestNominatimRateLimit(unittest.TestCase):
 
-    @patch("utils.data_fetcher.requests.post")
     @patch("utils.data_fetcher.requests.get")
     @patch("utils.data_fetcher.time.sleep", return_value=None)
-    def test_rate_limit_enforced_between_calls(self, mock_sleep, mock_get, mock_post):
-        """Nominatim rate-limit sleep is exercised when Overpass and Photon both fail."""
-        import requests as req_lib
+    def test_rate_limit_enforced_between_calls(self, mock_sleep, mock_get):
+        """Nominatim rate-limit sleep is exercised on the Nominatim tier."""
+        # Force OSMnx tier to miss so we reach Nominatim.
+        with patch.object(
+            DataFetcher,
+            "_fetch_boundary_via_osmnx",
+            side_effect=GeocodingError("osmnx disabled for test"),
+        ):
+            nominatim_ok = _make_response(_nominatim_polygon_response())
+            mock_get.return_value = nominatim_ok
 
-        # Force all Overpass mirrors to fail (connection error on POST)
-        mock_post.side_effect = req_lib.exceptions.ConnectionError("overpass down")
+            fetcher = DataFetcher()
+            # Simulate that the last Nominatim call happened only 0.1s ago.
+            fetcher._last_nominatim_call = time.monotonic()
 
-        # Photon GET returns empty features so Photon tier also fails
-        photon_empty = _make_response({"features": []})
-        # Nominatim GET returns a valid polygon
-        nominatim_ok = _make_response(_nominatim_polygon_response())
-        mock_get.side_effect = [photon_empty, nominatim_ok]
+            fetcher.fetch_boundaries("Lima, Peru")
 
-        fetcher = DataFetcher()
-        # Simulate that the last Nominatim call happened only 0.1s ago
-        fetcher._last_nominatim_call = time.monotonic()
-
-        fetcher.fetch_boundaries("Lima, Peru")
-
-        # time.sleep must have been called at least once for the rate-limit delay
-        assert mock_sleep.called
+            # time.sleep must have been called for the rate-limit delay.
+            assert mock_sleep.called
 
 
 # ---------------------------------------------------------------------------
@@ -493,9 +489,6 @@ class TestExceptionHierarchy(unittest.TestCase):
 
     def test_geocoding_error_is_data_fetch_error(self):
         assert issubclass(GeocodingError, DataFetchError)
-
-    def test_overpass_error_is_data_fetch_error(self):
-        assert issubclass(OverpassError, DataFetchError)
 
     def test_population_data_error_is_data_fetch_error(self):
         assert issubclass(PopulationDataError, DataFetchError)

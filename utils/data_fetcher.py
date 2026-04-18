@@ -41,6 +41,14 @@ try:
 except ImportError:
     _OVERTURE_AVAILABLE = False
 
+try:
+    import pygadm  # optional — used only for final-tier admin boundary lookup
+    _GADM_AVAILABLE = True
+except ImportError:
+    _GADM_AVAILABLE = False
+
+from utils.activity_log import log_event, timed
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,10 +64,6 @@ class GeocodingError(DataFetchError):
     """Raised when Nominatim geocoding / boundary retrieval fails."""
 
 
-class OverpassError(DataFetchError):
-    """Raised when the Overpass API returns an error or empty result."""
-
-
 class PopulationDataError(DataFetchError):
     """Raised when synthetic population-grid generation fails."""
 
@@ -69,15 +73,16 @@ class PopulationDataError(DataFetchError):
 # ---------------------------------------------------------------------------
 
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 HDX_BASE_URL = "https://data.humdata.org/api/3/action"
 PHOTON_URL = "https://photon.komoot.io"
-# Alternative Overpass instances (used as final fallback)
-OVERPASS_MIRRORS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-]
+
+# Shared User-Agent — Nominatim ToS requires an app-specific UA, not a library
+# default. Mirrors utils/geocoder.py:_USER_AGENT so both endpoints identify as
+# the same SOCA app. Also handed to osmnx via ox.settings.http_user_agent.
+_USER_AGENT = (
+    "SOCA/1.0 (Spatial Optimization Conversational Agent; "
+    "academic research; contact: soca@example.com)"
+)
 
 # Overture Maps Place Category Mapping (Singular forms as per 2024/2025 taxonomy)
 OVERTURE_CATEGORIES: dict[str, list[str]] = {
@@ -103,43 +108,23 @@ _OVERTURE_SUBTYPE_ADMIN_LEVEL: dict[str, int] = {
     "neighborhood": 10,
 }
 
-# Legacy Overpass QL tag filters (kept for fallback)
-FACILITY_TAGS: dict[str, list[str]] = {
-    "health": [
-        '["amenity"~"hospital|clinic|health_centre|doctors|pharmacy"]',
-    ],
-    "education": [
-        '["amenity"~"school|university|college|kindergarten"]',
-    ],
-    "food": [
-        '["amenity"~"marketplace|supermarket"]',
-        '["shop"~"supermarket|convenience|grocery"]',
-    ],
-    "finance": [
-        '["amenity"~"bank|atm"]',
-    ],
-    "fire_station": [
-        '["amenity"="fire_station"]',
-    ],
-    "police": [
-        '["amenity"="police"]',
-    ],
-    "library": [
-        '["amenity"="library"]',
-    ],
-    "transport": [
-        '["public_transport"~"stop_position|station|platform"]',
-        '["amenity"~"bus_station|ferry_terminal"]',
-        '["railway"~"station|halt"]',
-    ],
-    "water": [
-        '["amenity"~"water_point|drinking_water"]',
-        '["man_made"~"water_well|water_works"]',
-    ],
-    "emergency": [
-        '["amenity"="shelter"]',
-        '["emergency"~"assembly_point|evacuation_centre"]',
-    ],
+# OSMnx tag filters — dict-of-lists form expected by ox.features_from_polygon.
+_OSMNX_POI_TAGS: dict[str, dict] = {
+    "health":       {"amenity": ["hospital", "clinic", "doctors", "pharmacy", "health_centre"]},
+    "education":    {"amenity": ["school", "university", "college", "kindergarten"]},
+    "food":         {"amenity": ["marketplace", "supermarket"],
+                     "shop":    ["supermarket", "convenience", "grocery"]},
+    "finance":      {"amenity": ["bank", "atm"]},
+    "fire_station": {"amenity": "fire_station"},
+    "police":       {"amenity": "police"},
+    "library":      {"amenity": "library"},
+    "transport":    {"public_transport": True,
+                     "railway":          ["station", "halt"],
+                     "amenity":          ["bus_station", "ferry_terminal"]},
+    "water":        {"amenity":  ["water_point", "drinking_water"],
+                     "man_made": ["water_well", "water_works"]},
+    "emergency":    {"amenity":   "shelter",
+                     "emergency": ["assembly_point", "evacuation_centre"]},
 }
 
 # Default total synthetic population spread over all grid points
@@ -148,6 +133,23 @@ _DEFAULT_TOTAL_POPULATION = 100_000
 # Retry parameters
 _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1  # seconds — doubles each retry
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _is_bbox_only(gdf: gpd.GeoDataFrame) -> bool:
+    """True when the returned boundary is just a rectangle (bbox fallback)."""
+    if gdf is None or len(gdf) == 0:
+        return True
+    src = ""
+    try:
+        src = str(gdf.iloc[0].get("source", ""))
+    except Exception:
+        pass
+    return "bbox_fallback" in src
 
 
 # ---------------------------------------------------------------------------
@@ -183,24 +185,28 @@ class DataFetcher:
         location: str,
         admin_level: Optional[int] = None,
         scale: str = "city",
+        *,
+        hint: Optional[object] = None,
+        prefer_polygon: bool = True,
     ) -> gpd.GeoDataFrame:
         """
         Fetch the administrative boundary polygon for *location*.
 
-        Uses a 4-tier fallback chain to maximise reliability:
-          0. Overture Maps division + division_area (primary — scale-aware bbox,
-             real population metadata, two-theme query for accuracy).
-          1. Photon geocoder (komoot.io) with bbox polygon construction.
-          2. Overpass API admin-boundary relation query.
-          3. Nominatim as a last resort.
+        Fallback chain (no Overpass direct):
+          -1. OSMnx by OSM id     (if hint supplied an osm_id + osm_type)
+           0. Overture Maps       (scale-aware, real population metadata)
+           1. OSMnx by place name (ox.geocode_to_gdf — Nominatim+Overpass wrapped)
+           2. Nominatim /search   (polygon_geojson=1, ToS-compliant 1 req/s)
+           3. Photon bbox         (rectangular fallback)
+           4. GADM                (last resort; country/state admin levels)
 
         Args:
             location:    Human-readable place name, e.g. ``"Lima, Peru"``.
             admin_level: Target OSM admin_level integer (2–10). When provided,
-                         the Overture and Overpass backends will prefer the
-                         administrative entity whose level is closest to this
-                         value, avoiding mis-matches (e.g. returning a country
-                         polygon when a city was requested).
+                         the Overture backend prefers the administrative entity
+                         whose level is closest to this value, avoiding
+                         mis-matches (e.g. returning a country polygon when a
+                         city was requested).
             scale:       One of "country", "region", "city", "neighborhood".
                          Controls the Overture bbox buffer size so the query
                          covers the right geographic extent.
@@ -214,222 +220,220 @@ class DataFetcher:
         """
         logger.info(
             f"DataFetcher: Fetching boundary for '{location}' "
-            f"(scale={scale}, admin_level={admin_level})"
+            f"(scale={scale}, admin_level={admin_level}, hint={hint is not None})"
         )
+        log_event(
+            "boundary.fetch", "info",
+            f'"{location}" (scale={scale}, admin_level={admin_level})',
+        )
+
+        # --- Tier -1: Direct OSM relation lookup via hint -----------------
+        # When the caller has already disambiguated the place (e.g. from the
+        # AOI picker's autocomplete), hand osmnx the prefixed OSM id directly.
+        # osmnx caches the Overpass response, handles retries, and returns a
+        # proper polygon — no hand-rolled mirror rotation needed.
+        hint_osm_id = getattr(hint, "osm_id", None) if hint is not None else None
+        hint_osm_type = getattr(hint, "osm_type", None) if hint is not None else None
+        if hint_osm_id and hint_osm_type in ("R", "W", "N"):
+            try:
+                gdf = self._fetch_boundary_via_osmnx(
+                    location, osm_type=hint_osm_type, osm_id=hint_osm_id
+                )
+                return gdf
+            except Exception as exc:
+                logger.warning(
+                    f"OSMnx id lookup failed for {hint_osm_type}{hint_osm_id}: {exc}. "
+                    "Falling back to full tier chain."
+                )
 
         # --- Tier 0: Overture Maps division + division_area (primary) -------
         if _OVERTURE_AVAILABLE:
             try:
-                gdf = self._fetch_boundary_via_overture(
-                    location, admin_level=admin_level, scale=scale
-                )
+                with timed("boundary.fetch", source="Overture", detail=location) as t:
+                    gdf = self._fetch_boundary_via_overture(
+                        location, admin_level=admin_level, scale=scale
+                    )
+                    t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
                 return gdf
             except Exception as exc:
                 logger.warning(
                     f"Overture boundary fetch failed for '{location}': {exc}. "
                     "Falling back to Photon."
                 )
+                log_event(
+                    "boundary.fetch", "fail", str(exc)[:140], source="Overture",
+                )
 
-        # --- Tier 1: Photon geocoder (komoot.io) --------------------------
+        # --- Tier 1: OSMnx by place name ---------------------------------
+        # osmnx.geocode_to_gdf wraps Nominatim + Overpass with proper caching,
+        # retries, and the Overpass rate limit — no mirror rotation needed.
         try:
-            gdf = self._fetch_boundary_via_photon(location)
-            logger.info(
-                f"DataFetcher: Boundary for '{location}' obtained via Photon "
-                f"(geom type: {gdf.geometry.iloc[0].geom_type})"
-            )
+            gdf = self._fetch_boundary_via_osmnx(location)
             return gdf
         except Exception as exc:
             logger.warning(
-                f"Photon boundary fetch failed for '{location}': {exc}. "
-                "Falling back to Overpass."
-            )
-
-        # --- Tier 2: Overpass relation boundary search --------------------
-        try:
-            gdf = self._fetch_boundary_via_overpass(location, admin_level=admin_level)
-            logger.info(
-                f"DataFetcher: Boundary for '{location}' obtained via Overpass "
-                f"(geom type: {gdf.geometry.iloc[0].geom_type})"
-            )
-            return gdf
-        except Exception as exc:
-            logger.warning(
-                f"Overpass boundary fetch failed for '{location}': {exc}. "
+                f"OSMnx boundary fetch failed for '{location}': {exc}. "
                 "Falling back to Nominatim."
             )
 
-        # --- Tier 3: Nominatim (last resort) ------------------------------
+        # --- Tier 2: Nominatim /search with polygon_geojson=1 -------------
         try:
-            gdf = self._fetch_boundary_via_nominatim(location)
-            logger.info(
-                f"DataFetcher: Boundary for '{location}' obtained via Nominatim "
-                f"(geom type: {gdf.geometry.iloc[0].geom_type})"
-            )
+            with timed("boundary.fetch", source="Nominatim", detail=location) as t:
+                gdf = self._fetch_boundary_via_nominatim(location)
+                t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
             return gdf
         except Exception as exc:
-            raise GeocodingError(
-                f"All geocoding backends failed for '{location}'. "
-                f"Last error: {exc}"
-            ) from exc
+            logger.warning(
+                f"Nominatim boundary fetch failed for '{location}': {exc}. "
+                "Falling back to Photon bbox."
+            )
+            log_event("boundary.fetch", "fail", str(exc)[:140], source="Nominatim")
+
+        # --- Tier 3: Photon bbox (rectangular fallback) -------------------
+        try:
+            with timed("boundary.fetch", source="Photon", detail=location) as t:
+                gdf = self._fetch_boundary_via_photon(location)
+                src = gdf.iloc[0].get("source", "photon") if len(gdf) else "photon"
+                t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type} · via {src}'
+            return gdf
+        except Exception as exc:
+            logger.warning(
+                f"Photon bbox fetch failed for '{location}': {exc}. Falling back to GADM."
+            )
+            log_event("boundary.fetch", "fail", str(exc)[:140], source="Photon")
+
+        # --- Tier 4: GADM (last resort, country / state only) -------------
+        if _GADM_AVAILABLE:
+            try:
+                with timed("boundary.fetch", source="GADM", detail=location) as t:
+                    gdf = self._fetch_boundary_via_gadm(location, admin_level=admin_level)
+                    t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
+                return gdf
+            except Exception as exc:
+                log_event("boundary.fetch", "fail", str(exc)[:140], source="GADM")
+                raise GeocodingError(
+                    f"All geocoding backends (incl. GADM) failed for '{location}'. "
+                    f"Last error: {exc}"
+                ) from exc
+
+        raise GeocodingError(
+            f"All geocoding backends failed for '{location}'."
+        )
 
     # ------------------------------------------------------------------
     # Boundary backend implementations
     # ------------------------------------------------------------------
 
-    def _fetch_boundary_via_overpass(self, location: str, admin_level: Optional[int] = None) -> gpd.GeoDataFrame:
-        """
-        Fetch boundary polygon via Overpass ``relation[boundary=administrative]``.
+    def _configure_osmnx_once(self):
+        """Idempotent osmnx.settings configuration. Returns the osmnx module."""
+        import osmnx as ox
+        if getattr(self, "_osmnx_configured", False):
+            return ox
+        ox.settings.use_cache = True
+        ox.settings.requests_timeout = 180
+        ox.settings.overpass_rate_limit = True
+        ox.settings.log_console = False
+        # Per Nominatim/Overpass ToS: identify as this specific app.
+        ox.settings.http_user_agent = _USER_AGENT
+        self._osmnx_configured = True
+        return ox
 
-        This queries the same OSM dataset as Nominatim but through a completely
-        independent endpoint, sidestepping Nominatim rate-limiting / IP blocks.
+    def _fetch_boundary_via_osmnx(
+        self,
+        location: str,
+        *,
+        osm_type: Optional[str] = None,   # "R" | "W" | "N"
+        osm_id: Optional[int] = None,
+    ) -> gpd.GeoDataFrame:
+        """Fetch an admin-boundary polygon via osmnx.geocode_to_gdf.
 
-        When *admin_level* is provided, the relation whose ``admin_level`` tag
-        is numerically closest to the hint is preferred instead of always
-        picking the highest (most specific) level.
+        When *osm_type* + *osm_id* are supplied (e.g. from the AOI picker's
+        geocoder autocomplete), we hand osmnx the prefixed id (``R358002``)
+        and it skips disambiguation. Otherwise we pass the free-text location.
         """
-        # Search multiple admin_level values (4=state/province, 5, 6=district, 8=city)
-        # The query uses Overpass's ``name:en`` + ``name`` matching.
-        escaped = location.replace('"', r'\"')
-        query = (
-            "[out:json][timeout:30];\n"
-            "(\n"
-            f'  relation["boundary"="administrative"]["name"~"{escaped}",i];\n'
-            f'  relation["boundary"="administrative"]["name:en"~"{escaped}",i];\n'
-            ");\n"
-            "out geom;"
+        ox = self._configure_osmnx_once()
+
+        source = "OSMnx/id" if (osm_type and osm_id) else "OSMnx"
+        detail = f"{osm_type}{osm_id}" if (osm_type and osm_id) else location
+        with timed("boundary.fetch", source=source, detail=detail) as t:
+            if osm_type and osm_id:
+                # osmnx 2.x requires type-prefixed queries: "R358002".
+                query = f"{osm_type}{int(osm_id)}"
+                gdf = ox.geocode_to_gdf([query], by_osmid=True)
+            else:
+                gdf = ox.geocode_to_gdf(location, which_result=1)
+
+            if gdf is None or len(gdf) == 0:
+                raise GeocodingError(f"OSMnx returned no polygon for '{location}'")
+
+            gdf = gdf.to_crs("EPSG:4326")
+            geom = gdf.geometry.iloc[0]
+            if geom is None or geom.is_empty:
+                raise GeocodingError(f"OSMnx returned empty geometry for '{location}'")
+
+            row0 = gdf.iloc[0]
+            props = {
+                "name": str(row0.get("display_name", location)),
+                "location_query": location,
+                "source": "osmnx",
+                "osm_id": osm_id if osm_id else row0.get("osm_id"),
+                "osm_type": osm_type or row0.get("osm_type", ""),
+            }
+            t.detail = f"{detail} · {geom.geom_type}"
+            return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
+
+    def _fetch_boundary_via_gadm(
+        self,
+        location: str,
+        admin_level: Optional[int] = None,
+    ) -> gpd.GeoDataFrame:
+        """Fetch admin boundary from GADM (final fallback, requires ``pygadm``).
+
+        GADM is the gold-standard open admin-boundary dataset for levels 0–3
+        (country / state / county). Only runs when all OSM-backed tiers have
+        failed and ``pygadm`` is installed.
+        """
+        if not _GADM_AVAILABLE:
+            raise DataFetchError("pygadm not installed; GADM tier unavailable")
+
+        # pygadm exposes Items() to query by name across admin levels.
+        # Heuristic: country-like queries (short, single-token) → level 0;
+        # anything else → level 1. We don't have a perfect way to resolve
+        # nested places without geocoding, so keep this tier deliberately
+        # conservative — users asking for a specific city shouldn't reach it.
+        level = 0 if admin_level is not None and admin_level <= 2 else 1
+        try:
+            gdf = pygadm.Items(name=location, admin=level)
+        except Exception as exc:
+            raise DataFetchError(f"pygadm lookup failed: {exc}") from exc
+
+        if gdf is None or len(gdf) == 0:
+            raise GeocodingError(f"GADM returned no results for '{location}'")
+
+        # Normalise output schema to match other tiers.
+        gdf = gdf.to_crs("EPSG:4326") if gdf.crs and gdf.crs.to_epsg() != 4326 else gdf
+        name_col = next(
+            (c for c in ("NAME_1", "NAME_0", "name") if c in gdf.columns),
+            None,
+        )
+        name = str(gdf.iloc[0][name_col]) if name_col else location
+        props = {
+            "name": name,
+            "location_query": location,
+            "source": "gadm",
+            "admin_level": str(level),
+        }
+        return gpd.GeoDataFrame(
+            [props], geometry=[gdf.geometry.iloc[0]], crs="EPSG:4326"
         )
 
-        # Try each Overpass mirror
-        last_exc: Optional[Exception] = None
-        for mirror_url in OVERPASS_MIRRORS:
-            try:
-                resp = self._make_request(
-                    mirror_url, params={"data": query}, method="POST", timeout=60
-                )
-                data = resp.json()
-                break
-            except Exception as exc:
-                last_exc = exc
-                logger.warning(f"Overpass mirror {mirror_url} failed: {exc}")
-        else:
-            raise DataFetchError(
-                f"All Overpass mirrors failed for boundary query. Last: {last_exc}"
-            )
-
-        elements = data.get("elements", [])
-        if not elements:
-            raise GeocodingError(
-                f"Overpass returned no admin-boundary relations for '{location}'."
-            )
-
-        # Pick the best-matching relation:
-        # - When admin_level hint provided: pick the element whose admin_level tag
-        #   is numerically closest to the hint (avoids returning a whole country
-        #   when a city was requested, or vice-versa).
-        # - Otherwise: pick the element with the highest admin_level (most specific).
-        def _admin_level_int(el: dict) -> int:
-            try:
-                return int(el.get("tags", {}).get("admin_level", 0))
-            except (ValueError, TypeError):
-                return 0
-
-        if admin_level is not None:
-            elements_sorted = sorted(
-                elements,
-                key=lambda el: abs(_admin_level_int(el) - admin_level),
-            )
-        else:
-            elements_sorted = sorted(elements, key=_admin_level_int, reverse=True)
-
-        # Reconstruct polygon from outer members
-        geom = self._overpass_relation_to_shape(elements_sorted[0])
-        if geom is None or geom.is_empty:
-            raise GeocodingError(
-                f"Could not reconstruct polygon from Overpass relation for '{location}'."
-            )
-
-        tags = elements_sorted[0].get("tags", {})
-        props = {
-            "name": tags.get("name:en", tags.get("name", location)),
-            "location_query": location,
-            "source": "overpass_boundary",
-            "admin_level": tags.get("admin_level", ""),
-            "population": tags.get("population", ""),
-        }
-        return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
-
-    def _overpass_relation_to_shape(self, element: dict):
-        """Convert an Overpass relation element (with ``geometry`` members) to a Shapely geometry."""
-        from shapely.geometry import LinearRing, Polygon, MultiPolygon
-        from shapely.ops import polygonize, unary_union
-
-        outer_coords: list[list] = []
-        inner_coords: list[list] = []
-
-        members = element.get("members", [])
-        for member in members:
-            if member.get("type") != "way":
-                continue
-            role = member.get("role", "outer")
-            geometry = member.get("geometry", [])
-            coords = [(pt["lon"], pt["lat"]) for pt in geometry if "lon" in pt and "lat" in pt]
-            if len(coords) < 2:
-                continue
-            if role == "outer":
-                outer_coords.append(coords)
-            elif role == "inner":
-                inner_coords.append(coords)
-
-        if not outer_coords:
-            # Fallback: some relations store geometry directly as nodes
-            geometry = element.get("geometry", [])
-            if geometry:
-                coords = [(pt["lon"], pt["lat"]) for pt in geometry if "lon" in pt and "lat" in pt]
-                if len(coords) >= 3:
-                    return Polygon(coords)
-            return None
-
-        # Build outer polygon(s) via polygonize
-        from shapely.geometry import LineString
-        outer_lines = [LineString(c) for c in outer_coords if len(c) >= 2]
-        outer_polys = list(polygonize(outer_lines))
-
-        if not outer_polys:
-            # Try directly if ways are already closed rings
-            outer_polys = []
-            for c in outer_coords:
-                if len(c) >= 3:
-                    try:
-                        poly = Polygon(c)
-                        if poly.is_valid:
-                            outer_polys.append(poly)
-                    except Exception:
-                        pass
-
-        if not outer_polys:
-            return None
-
-        outer_geom = unary_union(outer_polys)
-
-        # Subtract inner (holes)
-        if inner_coords:
-            inner_lines = [LineString(c) for c in inner_coords if len(c) >= 2]
-            inner_polys = list(polygonize(inner_lines))
-            if inner_polys:
-                inner_geom = unary_union(inner_polys)
-                outer_geom = outer_geom.difference(inner_geom)
-
-        return outer_geom
-
     def _fetch_boundary_via_photon(self, location: str) -> gpd.GeoDataFrame:
-        """
-        Fetch boundary via Photon geocoder (photon.komoot.io).
+        """Fetch a rectangular-bbox boundary via Photon (photon.komoot.io).
 
-        When Photon returns an OSM relation ID we try to retrieve the actual
-        polygon from Overpass (same data, just via Photon for the lookup).
-        If that fails we fall back to the extent/bbox bounding box so callers
-        always get a polygon.  The bbox fallback is intentionally the *last*
-        resort because a plain rectangle often covers the ocean.
+        Used as a last-resort fallback once OSMnx and Nominatim have failed.
+        Returns a plain bbox polygon (or small point buffer) — a rectangle
+        often covers ocean near coasts, so callers should treat this as low
+        quality and prefer upstream tiers when available.
         """
         params = {"q": location, "limit": 5, "lang": "en"}
         try:
@@ -448,66 +452,16 @@ class DataFetcher:
                 f"Photon returned no results for '{location}'."
             )
 
-        # Prefer features that have an ``extent`` (bbox of the actual polygon)
         best = None
         for feat in features:
             p = feat.get("properties", {})
-            # Prefer administrative-type results with an OSM relation
-            if p.get("osm_type") == "R" and p.get("extent"):
+            if p.get("extent"):
                 best = feat
                 break
-            if p.get("extent"):
-                best = feat  # take first with extent, keep looking for relation
         if best is None:
             best = features[0]
 
         props_raw = best.get("properties", {})
-
-        # --- Tier A: Try to get a real polygon via Overpass using the OSM relation ID
-        osm_type = props_raw.get("osm_type", "")
-        osm_id   = props_raw.get("osm_id")
-        if osm_type == "R" and osm_id:
-            try:
-                rel_query = (
-                    "[out:json][timeout:30];\n"
-                    f"relation({osm_id});\n"
-                    "out geom;"
-                )
-                for mirror_url in OVERPASS_MIRRORS:
-                    try:
-                        rel_resp = self._make_request(
-                            mirror_url, params={"data": rel_query},
-                            method="POST", timeout=60
-                        )
-                        rel_data = rel_resp.json()
-                        break
-                    except Exception:
-                        continue
-                else:
-                    rel_data = {}
-
-                rel_elements = rel_data.get("elements", [])
-                if rel_elements:
-                    geom = self._overpass_relation_to_shape(rel_elements[0])
-                    if geom is not None and not geom.is_empty:
-                        tags = rel_elements[0].get("tags", {})
-                        props = {
-                            "name": tags.get("name:en", tags.get("name", props_raw.get("name", location))),
-                            "location_query": location,
-                            "source": "photon_then_overpass",
-                            "country": props_raw.get("country", ""),
-                        }
-                        logger.info(
-                            f"DataFetcher: Retrieved actual polygon from Overpass "
-                            f"for OSM relation {osm_id} (from Photon lookup)"
-                        )
-                        return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
-            except Exception as rel_exc:
-                logger.warning(
-                    f"Could not fetch Overpass polygon for OSM relation {osm_id}: {rel_exc}"
-                )
-
-        # --- Tier B: Use the extent bbox (rectangular — less accurate)
         extent = props_raw.get("extent")  # [minx, miny, maxx, maxy]
         if extent and len(extent) == 4:
             geom = box(extent[0], extent[1], extent[2], extent[3])
@@ -706,13 +660,24 @@ class DataFetcher:
             )
 
         # Pick the entity whose subtype admin_level is closest to the hint
+        _SCALE_PREFERRED_SUBTYPES: dict[str, list[str]] = {
+            "country": ["country"],
+            "region": ["region", "county", "localadmin"],
+            "city": ["locality", "localadmin", "county", "region"],
+            "neighborhood": ["neighborhood", "locality", "localadmin"],
+        }
         if admin_level is not None:
             name_match["_al_dist"] = name_match["subtype"].map(
                 lambda s: abs(_OVERTURE_SUBTYPE_ADMIN_LEVEL.get(s, 8) - admin_level)
             )
             best_div = name_match.sort_values("_al_dist").iloc[0]
         else:
-            best_div = name_match.iloc[0]
+            preferred = _SCALE_PREFERRED_SUBTYPES.get(scale, ["locality", "localadmin", "county"])
+            name_match = name_match.copy()
+            name_match["_subtype_rank"] = name_match["subtype"].apply(
+                lambda s: preferred.index(s) if s in preferred else len(preferred)
+            )
+            best_div = name_match.sort_values("_subtype_rank").iloc[0]
 
         division_id = best_div.get("id", "")
         population_raw = best_div.get("population", None)
@@ -800,13 +765,13 @@ class DataFetcher:
         Fetch Points of Interest (POIs) within *boundary_gdf*.
 
         Attempts to use Overture Maps (via cloud-native GeoParquet) first
-        for speed and reliability. Falls back to Overpass if Overture
-        is unavailable or fails.
+        for speed and reliability. Falls back to OSMnx
+        (ox.features_from_polygon) if Overture is unavailable or fails.
 
         Args:
             boundary_gdf: GeoDataFrame with at least one geometry row
                           representing the region of interest.
-            category: One of the keys in :data:`OVERTURE_CATEGORIES` or :data:`FACILITY_TAGS`.
+            category: One of the keys in :data:`OVERTURE_CATEGORIES` or :data:`_OSMNX_POI_TAGS`.
 
         Returns:
             GeoDataFrame of POI points with columns ``name``, ``amenity``,
@@ -828,14 +793,14 @@ class DataFetcher:
                     )
                     return pois_gdf
             except Exception as exc:
-                logger.warning(f"Overture POI fetch failed for '{category}': {exc}. Falling back to Overpass.")
+                logger.warning(f"Overture POI fetch failed for '{category}': {exc}. Falling back to OSMnx.")
 
-        # --- Tier 2: Overpass (Legacy Fallback) ---------------------------
+        # --- Tier 2: OSMnx features_from_polygon --------------------------
         try:
-            pois_gdf = self._fetch_pois_via_overpass(boundary_gdf, category)
+            pois_gdf = self._fetch_pois_via_osmnx(boundary_gdf, category)
             return pois_gdf
         except Exception as exc:
-            raise OverpassError(
+            raise DataFetchError(
                 f"All POI retrieval methods failed for category '{category}'. Last error: {exc}"
             )
 
@@ -906,101 +871,61 @@ class DataFetcher:
         )
         return pois_gdf.reset_index(drop=True)
 
-    def _fetch_pois_via_overpass(
+    def _fetch_pois_via_osmnx(
         self,
         boundary_gdf: gpd.GeoDataFrame,
         category: str,
     ) -> gpd.GeoDataFrame:
-        """Original Overpass POI fetcher refactored as a helper."""
-        if category not in FACILITY_TAGS:
-            raise OverpassError(
-                f"Unknown POI category '{category}' for Overpass. "
-                f"Supported: {sorted(FACILITY_TAGS.keys())}"
+        """Fetch POIs inside *boundary_gdf* via osmnx.features_from_polygon.
+
+        osmnx handles Overpass requests (with caching + rate-limit + retries)
+        internally, so we don't maintain any Overpass mirror logic here.
+        """
+        if category not in _OSMNX_POI_TAGS:
+            raise DataFetchError(
+                f"Unknown POI category '{category}'. "
+                f"Supported: {sorted(_OSMNX_POI_TAGS.keys())}"
             )
 
-        tag_filters = FACILITY_TAGS[category]
+        ox = self._configure_osmnx_once()
+        tags = _OSMNX_POI_TAGS[category]
 
-        # Get bounding box in (south, west, north, east) Overpass convention
-        bounds = boundary_gdf.to_crs("EPSG:4326").total_bounds  # minx, miny, maxx, maxy
-        bbox_str = f"{bounds[1]},{bounds[0]},{bounds[3]},{bounds[2]}"
+        polygon = unary_union(boundary_gdf.to_crs("EPSG:4326").geometry.values)
+        if polygon.is_empty:
+            return gpd.GeoDataFrame(columns=["name", "amenity", "geometry"], crs="EPSG:4326")
 
-        # Build compound Overpass QL query (node + way for each tag filter, OR'd)
-        union_parts: list[str] = []
-        for tag_filter in tag_filters:
-            union_parts.append(f"node{tag_filter}({bbox_str});")
-            union_parts.append(f"way{tag_filter}({bbox_str});")
-
-        query = (
-            "[out:json][timeout:60];\n"
-            "(\n"
-            + "".join(f"  {part}\n" for part in union_parts)
-            + ");\n"
-            "out center;"
-        )
-
-        logger.info(
-            f"DataFetcher: Querying Overpass (Fallback) for category='{category}' "
-            f"bbox={bbox_str}"
-        )
-
-        # Try each Overpass mirror in sequence
-        last_exc: Optional[Exception] = None
-        response = None
-        for mirror_url in OVERPASS_MIRRORS:
+        with timed("pois.fetch", source="OSMnx", detail=category) as t:
             try:
-                response = self._make_request(
-                    mirror_url,
-                    params={"data": query},
-                    method="POST",
-                    timeout=120,
-                )
-                break  # success
-            except DataFetchError as exc:
-                last_exc = exc
-                logger.warning(
-                    f"Overpass POI mirror {mirror_url} failed: {exc}. Trying next..."
-                )
+                feats = ox.features_from_polygon(polygon, tags=tags)
+            except Exception as exc:
+                raise DataFetchError(
+                    f"OSMnx POI fetch failed for '{category}': {exc}"
+                ) from exc
 
-        if response is None:
-            raise OverpassError(
-                f"Network error fetching POIs ({category}): All Overpass mirrors failed. "
-                f"Last error: {last_exc}"
+            if feats is None or len(feats) == 0:
+                t.detail = f"{category} → 0"
+                return gpd.GeoDataFrame(columns=["name", "amenity", "geometry"], crs="EPSG:4326")
+
+            feats = feats.to_crs("EPSG:4326").reset_index()
+            # osmnx returns mixed Point/Polygon/LineString geometries; reduce
+            # polygons/lines to their centroid so downstream solvers get points.
+            feats["geometry"] = feats.geometry.apply(
+                lambda g: g if g.geom_type == "Point" else g.centroid
             )
-
-        try:
-            data = response.json()
-        except Exception as exc:
-            raise OverpassError(
-                f"Invalid JSON from Overpass for category '{category}': {exc}"
-            ) from exc
-
-        elements = data.get("elements", [])
-        if not elements:
-            return gpd.GeoDataFrame(columns=["name", "amenity", "geometry"], crs="EPSG:4326")
-
-        rows = []
-        for el in elements:
-            if el.get("type") == "node":
-                lat, lon = el.get("lat"), el.get("lon")
-            else:
-                center = el.get("center", {})
-                lat, lon = center.get("lat"), center.get("lon")
-
-            if lat is None or lon is None:
-                continue
-
-            tags = el.get("tags", {})
-            rows.append({
-                "name": tags.get("name", ""),
-                "amenity": tags.get("amenity", tags.get("shop", "")),
-                "geometry": Point(lon, lat),
-            })
-
-        if not rows:
-            return gpd.GeoDataFrame(columns=["name", "amenity", "geometry"], crs="EPSG:4326")
-
-        pois_gdf = gpd.GeoDataFrame(rows, geometry="geometry", crs="EPSG:4326")
-        return self._clip_to_boundary(pois_gdf, boundary_gdf)
+            name_col = "name" if "name" in feats.columns else None
+            amen_col = "amenity" if "amenity" in feats.columns else None
+            shop_col = "shop" if "shop" in feats.columns else None
+            rows = {
+                "name": feats[name_col].fillna("").astype(str) if name_col else "",
+                "amenity": (
+                    feats[amen_col].fillna(feats[shop_col] if shop_col else "").astype(str)
+                    if amen_col else (feats[shop_col].astype(str) if shop_col else category)
+                ),
+            }
+            pois_gdf = gpd.GeoDataFrame(rows, geometry=feats.geometry.values, crs="EPSG:4326")
+            pois_gdf = self._clip_to_boundary(pois_gdf, boundary_gdf)
+            t.detail = f"{category} → {len(pois_gdf)}"
+            return pois_gdf
 
     def _clip_to_boundary(self, gdf: gpd.GeoDataFrame, boundary_gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
         """Clip a GeoDataFrame to the actual boundary polygon."""
@@ -1250,7 +1175,21 @@ class DataFetcher:
                     rev_data = rev_resp.json()
                     features = rev_data.get("features", [])
                     if features:
-                        country_raw = features[0].get("properties", {}).get("country", "")
+                        feat = features[0]
+                        feat_coords = feat.get("geometry", {}).get("coordinates", [])
+                        if feat_coords and len(feat_coords) >= 2:
+                            feat_lon, feat_lat = float(feat_coords[0]), float(feat_coords[1])
+                            # Reject if the returned point is implausibly far from our centroid
+                            if abs(feat_lon - centroid.x) < 15 and abs(feat_lat - centroid.y) < 15:
+                                country_raw = feat.get("properties", {}).get("country", "")
+                            else:
+                                logger.warning(
+                                    f"Photon reverse geocode returned a location far from centroid "
+                                    f"({feat_lat:.2f},{feat_lon:.2f} vs "
+                                    f"{centroid.y:.2f},{centroid.x:.2f}); ignoring."
+                                )
+                        else:
+                            country_raw = feat.get("properties", {}).get("country", "")
                 except Exception as e:
                     logger.debug(f"Reverse geocode failed: {e}")
 
@@ -1318,9 +1257,9 @@ class DataFetcher:
                 return 0
 
             # Collect all candidate (dataset, resource, kind) tuples across queries
+            # Note: Facebook/Meta HR population maps are excluded — discontinued since 2024.
             all_candidates: list[tuple] = []
             for query in [
-                f"title:{country_norm}-high-resolution-population-density-maps-demographic-estimates",
                 f"{country_norm} kontur population",
                 f"{country_norm} hrsl",
                 f"{country_norm} population density",

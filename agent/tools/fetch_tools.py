@@ -13,7 +13,7 @@ from typing import Optional
 
 from google.adk.tools.tool_context import ToolContext
 
-from .state_bridge import get_data, get_problem_state
+from .state_bridge import get_data, get_problem_state, get_aoi, get_aoi_boundary_gdf
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +43,15 @@ def fetch_city_data(
     optionally Points of Interest. No manual upload is required. Datasets are
     stored in the session and will appear on the map.
 
+    AOI awareness: if the user has already defined an Area of Interest in the
+    app (boundary_aoi present in the session), this tool REUSES that polygon
+    as the boundary and only fetches population/POIs clipped to it. In that
+    case the `location` argument is used only as a label; no geocoding runs.
+
     Args:
         location: Place name with country, e.g. "Lima, Peru" or "Nairobi, Kenya".
+                  If an AOI is already set, this is just a label — pass the AOI
+                  name (available via get_data_status).
         scale: Geographic scope – one of: "country", "region", "city",
                "neighborhood". Determines the boundary admin level used.
         admin_level: OSM admin_level integer (2-10). Typical values:
@@ -87,15 +94,26 @@ def fetch_city_data(
     processor = DataProcessor()
     data_store = get_data()
 
-    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_")
+    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_") or "aoi"
 
     fetched_datasets: list = []
     summaries: list = []
     errors: list = []
     boundary_gdf = None
 
-    # ---- Step 1: Boundaries ----
-    if include_boundaries:
+    # ---- AOI short-circuit: reuse user-defined AOI as the boundary ----
+    aoi_info = get_aoi()
+    aoi_gdf = get_aoi_boundary_gdf()
+    if aoi_info is not None and aoi_gdf is not None and len(aoi_gdf) > 0:
+        boundary_gdf = aoi_gdf
+        aoi_name = aoi_info.get("name", "AOI")
+        summaries.append(
+            f"Using user-defined AOI '{aoi_name}' "
+            f"({aoi_info.get('area_km2', 0):,.1f} km²) as boundary — skipping geocoding."
+        )
+        logger.info("fetch_city_data: AOI short-circuit for '%s'", aoi_name)
+    elif include_boundaries:
+        # ---- Step 1: Boundaries (only when no AOI) ----
         try:
             gdf = fetcher.fetch_boundaries(
                 location, admin_level=admin_level, scale=scale
