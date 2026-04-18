@@ -76,12 +76,16 @@ NOMINATIM_URL = "https://nominatim.openstreetmap.org"
 HDX_BASE_URL = "https://data.humdata.org/api/3/action"
 PHOTON_URL = "https://photon.komoot.io"
 
-# Shared User-Agent — Nominatim ToS requires an app-specific UA, not a library
-# default. Mirrors utils/geocoder.py:_USER_AGENT so both endpoints identify as
-# the same SOCA app. Also handed to osmnx via ox.settings.http_user_agent.
+# Shared User-Agent — Nominatim ToS requires an app-specific UA and actively
+# blocks requests whose UA contains placeholder domains ("example.com",
+# "example.org") or library defaults. We therefore identify this app by its
+# public repository URL, which Nominatim's policy accepts as valid contact
+# information. Mirrors utils/geocoder.py:_USER_AGENT so both endpoints
+# identify as the same SOCA app. Also handed to osmnx via
+# ox.settings.http_user_agent.
 _USER_AGENT = (
-    "SOCA/1.0 (Spatial Optimization Conversational Agent; "
-    "academic research; contact: soca@example.com)"
+    "SOCA-spopt/1.0 (Spatial Optimization Conversational Agent; "
+    "academic research; +https://github.com/soca-spopt/soca)"
 )
 
 # Overture Maps Place Category Mapping (Singular forms as per 2024/2025 taxonomy)
@@ -192,13 +196,14 @@ class DataFetcher:
         """
         Fetch the administrative boundary polygon for *location*.
 
-        Fallback chain (no Overpass direct):
-          -1. OSMnx by OSM id     (if hint supplied an osm_id + osm_type)
-           0. Overture Maps       (scale-aware, real population metadata)
-           1. OSMnx by place name (ox.geocode_to_gdf — Nominatim+Overpass wrapped)
-           2. Nominatim /search   (polygon_geojson=1, ToS-compliant 1 req/s)
-           3. Photon bbox         (rectangular fallback)
-           4. GADM                (last resort; country/state admin levels)
+        Fallback chain, ordered by *measured* round-trip time (fastest first)
+        so users are never left waiting for a slow tier when a fast one works:
+
+           1. Nominatim /lookup    — direct OSM id (when hint supplied); ~0.5 s
+           2. Nominatim /search    — polygon_geojson=1; ~1–2 s, ToS-compliant
+           3. Overture division    — slow cloud-native GeoParquet; 30 s–3 min
+           4. Photon bbox          — rectangular fallback; ~1 s
+           5. GADM                 — last-resort country/state admin boundaries
 
         Args:
             location:    Human-readable place name, e.g. ``"Lima, Peru"``.
@@ -227,26 +232,49 @@ class DataFetcher:
             f'"{location}" (scale={scale}, admin_level={admin_level})',
         )
 
-        # --- Tier -1: Direct OSM relation lookup via hint -----------------
+        last_exc: Optional[Exception] = None
+
+        # --- Tier 1: Direct OSM id lookup via Nominatim /lookup -----------
         # When the caller has already disambiguated the place (e.g. from the
-        # AOI picker's autocomplete), hand osmnx the prefixed OSM id directly.
-        # osmnx caches the Overpass response, handles retries, and returns a
-        # proper polygon — no hand-rolled mirror rotation needed.
+        # AOI picker's autocomplete) we know the exact relation/way/node id.
+        # Nominatim /lookup returns a polygon in one round-trip (<1 s) — the
+        # fastest path by far. We call it directly with our compliant UA so
+        # we don't depend on osmnx's User-Agent handling.
         hint_osm_id = getattr(hint, "osm_id", None) if hint is not None else None
         hint_osm_type = getattr(hint, "osm_type", None) if hint is not None else None
         if hint_osm_id and hint_osm_type in ("R", "W", "N"):
             try:
-                gdf = self._fetch_boundary_via_osmnx(
-                    location, osm_type=hint_osm_type, osm_id=hint_osm_id
-                )
+                with timed(
+                    "boundary.fetch", source="Nominatim/id",
+                    detail=f"{hint_osm_type}{hint_osm_id}",
+                ) as t:
+                    gdf = self._fetch_boundary_via_nominatim_lookup(
+                        osm_type=hint_osm_type, osm_id=int(hint_osm_id),
+                        location=location,
+                    )
+                    t.detail = f"{hint_osm_type}{hint_osm_id} · {gdf.geometry.iloc[0].geom_type}"
                 return gdf
             except Exception as exc:
+                last_exc = exc
                 logger.warning(
-                    f"OSMnx id lookup failed for {hint_osm_type}{hint_osm_id}: {exc}. "
+                    f"Nominatim id lookup failed for {hint_osm_type}{hint_osm_id}: {exc}. "
                     "Falling back to full tier chain."
                 )
 
-        # --- Tier 0: Overture Maps division + division_area (primary) -------
+        # --- Tier 2: Nominatim /search with polygon_geojson=1 -------------
+        try:
+            with timed("boundary.fetch", source="Nominatim", detail=location) as t:
+                gdf = self._fetch_boundary_via_nominatim(location)
+                t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
+            return gdf
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"Nominatim boundary fetch failed for '{location}': {exc}. "
+                "Falling back to Overture."
+            )
+
+        # --- Tier 3: Overture Maps division + division_area (slow) --------
         if _OVERTURE_AVAILABLE:
             try:
                 with timed("boundary.fetch", source="Overture", detail=location) as t:
@@ -256,40 +284,13 @@ class DataFetcher:
                     t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
                 return gdf
             except Exception as exc:
+                last_exc = exc
                 logger.warning(
                     f"Overture boundary fetch failed for '{location}': {exc}. "
                     "Falling back to Photon."
                 )
-                log_event(
-                    "boundary.fetch", "fail", str(exc)[:140], source="Overture",
-                )
 
-        # --- Tier 1: OSMnx by place name ---------------------------------
-        # osmnx.geocode_to_gdf wraps Nominatim + Overpass with proper caching,
-        # retries, and the Overpass rate limit — no mirror rotation needed.
-        try:
-            gdf = self._fetch_boundary_via_osmnx(location)
-            return gdf
-        except Exception as exc:
-            logger.warning(
-                f"OSMnx boundary fetch failed for '{location}': {exc}. "
-                "Falling back to Nominatim."
-            )
-
-        # --- Tier 2: Nominatim /search with polygon_geojson=1 -------------
-        try:
-            with timed("boundary.fetch", source="Nominatim", detail=location) as t:
-                gdf = self._fetch_boundary_via_nominatim(location)
-                t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
-            return gdf
-        except Exception as exc:
-            logger.warning(
-                f"Nominatim boundary fetch failed for '{location}': {exc}. "
-                "Falling back to Photon bbox."
-            )
-            log_event("boundary.fetch", "fail", str(exc)[:140], source="Nominatim")
-
-        # --- Tier 3: Photon bbox (rectangular fallback) -------------------
+        # --- Tier 4: Photon bbox (rectangular fallback) -------------------
         try:
             with timed("boundary.fetch", source="Photon", detail=location) as t:
                 gdf = self._fetch_boundary_via_photon(location)
@@ -297,12 +298,12 @@ class DataFetcher:
                 t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type} · via {src}'
             return gdf
         except Exception as exc:
+            last_exc = exc
             logger.warning(
                 f"Photon bbox fetch failed for '{location}': {exc}. Falling back to GADM."
             )
-            log_event("boundary.fetch", "fail", str(exc)[:140], source="Photon")
 
-        # --- Tier 4: GADM (last resort, country / state only) -------------
+        # --- Tier 5: GADM (last resort, country / state only) -------------
         if _GADM_AVAILABLE:
             try:
                 with timed("boundary.fetch", source="GADM", detail=location) as t:
@@ -310,14 +311,11 @@ class DataFetcher:
                     t.detail = f'{location} · {gdf.geometry.iloc[0].geom_type}'
                 return gdf
             except Exception as exc:
-                log_event("boundary.fetch", "fail", str(exc)[:140], source="GADM")
-                raise GeocodingError(
-                    f"All geocoding backends (incl. GADM) failed for '{location}'. "
-                    f"Last error: {exc}"
-                ) from exc
+                last_exc = exc
 
         raise GeocodingError(
-            f"All geocoding backends failed for '{location}'."
+            f"All geocoding backends failed for '{location}'. "
+            f"Last error: {last_exc}"
         )
 
     # ------------------------------------------------------------------
@@ -325,7 +323,11 @@ class DataFetcher:
     # ------------------------------------------------------------------
 
     def _configure_osmnx_once(self):
-        """Idempotent osmnx.settings configuration. Returns the osmnx module."""
+        """Idempotent osmnx.settings configuration. Returns the osmnx module.
+
+        Used by the POI fetch tier only — boundary lookups now hit Nominatim
+        directly for predictable latency and UA control.
+        """
         import osmnx as ox
         if getattr(self, "_osmnx_configured", False):
             return ox
@@ -333,54 +335,96 @@ class DataFetcher:
         ox.settings.requests_timeout = 180
         ox.settings.overpass_rate_limit = True
         ox.settings.log_console = False
-        # Per Nominatim/Overpass ToS: identify as this specific app.
         ox.settings.http_user_agent = _USER_AGENT
         self._osmnx_configured = True
         return ox
 
-    def _fetch_boundary_via_osmnx(
+    def _fetch_boundary_via_nominatim_lookup(
         self,
-        location: str,
         *,
-        osm_type: Optional[str] = None,   # "R" | "W" | "N"
-        osm_id: Optional[int] = None,
+        osm_type: str,
+        osm_id: int,
+        location: str,
     ) -> gpd.GeoDataFrame:
-        """Fetch an admin-boundary polygon via osmnx.geocode_to_gdf.
+        """Fetch a polygon from Nominatim /lookup by prefixed OSM id.
 
-        When *osm_type* + *osm_id* are supplied (e.g. from the AOI picker's
-        geocoder autocomplete), we hand osmnx the prefixed id (``R358002``)
-        and it skips disambiguation. Otherwise we pass the free-text location.
+        The /lookup endpoint resolves one or more OSM ids to full objects in
+        a single round-trip — the fastest boundary path available. We request
+        polygon_geojson=1 so the response already contains the geometry.
         """
-        ox = self._configure_osmnx_once()
+        type_map = {"R": "R", "W": "W", "N": "N",
+                    "relation": "R", "way": "W", "node": "N"}
+        t_prefix = type_map.get(osm_type)
+        if t_prefix is None:
+            raise GeocodingError(
+                f"Invalid osm_type '{osm_type}' (expected one of R/W/N)."
+            )
 
-        source = "OSMnx/id" if (osm_type and osm_id) else "OSMnx"
-        detail = f"{osm_type}{osm_id}" if (osm_type and osm_id) else location
-        with timed("boundary.fetch", source=source, detail=detail) as t:
-            if osm_type and osm_id:
-                # osmnx 2.x requires type-prefixed queries: "R358002".
-                query = f"{osm_type}{int(osm_id)}"
-                gdf = ox.geocode_to_gdf([query], by_osmid=True)
-            else:
-                gdf = ox.geocode_to_gdf(location, which_result=1)
+        self._nominatim_rate_limit()
+        params = {
+            "osm_ids": f"{t_prefix}{int(osm_id)}",
+            "format": "geojson",
+            "polygon_geojson": 1,
+            "addressdetails": 1,
+            "extratags": 1,
+        }
+        try:
+            response = self._make_request(
+                NOMINATIM_URL + "/lookup", params=params, timeout=20
+            )
+        except DataFetchError as exc:
+            raise GeocodingError(
+                f"Network error in Nominatim lookup for {t_prefix}{osm_id}: {exc}"
+            ) from exc
 
-            if gdf is None or len(gdf) == 0:
-                raise GeocodingError(f"OSMnx returned no polygon for '{location}'")
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise GeocodingError(
+                f"Invalid JSON from Nominatim lookup: {exc}"
+            ) from exc
 
-            gdf = gdf.to_crs("EPSG:4326")
-            geom = gdf.geometry.iloc[0]
-            if geom is None or geom.is_empty:
-                raise GeocodingError(f"OSMnx returned empty geometry for '{location}'")
+        features = data.get("features", [])
+        if not features:
+            raise GeocodingError(
+                f"Nominatim /lookup returned no feature for {t_prefix}{osm_id}."
+            )
 
-            row0 = gdf.iloc[0]
-            props = {
-                "name": str(row0.get("display_name", location)),
-                "location_query": location,
-                "source": "osmnx",
-                "osm_id": osm_id if osm_id else row0.get("osm_id"),
-                "osm_type": osm_type or row0.get("osm_type", ""),
-            }
-            t.detail = f"{detail} · {geom.geom_type}"
-            return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
+        feature = features[0]
+        try:
+            geom = shape(feature["geometry"])
+        except Exception as exc:
+            raise GeocodingError(
+                f"Could not parse geometry from Nominatim /lookup: {exc}"
+            ) from exc
+
+        if geom.is_empty:
+            raise GeocodingError(
+                f"Nominatim /lookup returned empty geometry for {t_prefix}{osm_id}."
+            )
+        if geom.geom_type not in ("Polygon", "MultiPolygon"):
+            raise GeocodingError(
+                f"Nominatim /lookup returned non-polygon geometry "
+                f"({geom.geom_type}) for {t_prefix}{osm_id}."
+            )
+
+        props = feature.get("properties", {}) or {}
+        extratags = props.get("extratags") or {}
+        address = props.get("address") or {}
+
+        out_props = {
+            "name": props.get("display_name") or props.get("name") or location,
+            "location_query": location,
+            "source": "nominatim_lookup",
+            "osm_id": osm_id,
+            "osm_type": t_prefix,
+            "country": address.get("country", ""),
+            "country_code": (address.get("country_code") or "").upper(),
+        }
+        if isinstance(extratags, dict) and extratags.get("population"):
+            out_props["population"] = str(extratags["population"])
+
+        return gpd.GeoDataFrame([out_props], geometry=[geom], crs="EPSG:4326")
 
     def _fetch_boundary_via_gadm(
         self,
@@ -487,15 +531,21 @@ class DataFetcher:
         return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
 
     def _fetch_boundary_via_nominatim(self, location: str) -> gpd.GeoDataFrame:
-        """Original Nominatim boundary fetch (kept as last-resort fallback)."""
+        """Fetch boundary polygon via Nominatim /search with polygon_geojson=1.
+
+        Primary boundary backend — returns proper admin polygons in 1–2 s.
+        Also captures country + country_code from addressdetails and any
+        population tag from extratags, so downstream HDX lookups don't need
+        a second round-trip.
+        """
         self._nominatim_rate_limit()
 
         params = {
             "q": location,
             "format": "geojson",
             "polygon_geojson": 1,
-            "limit": 1,
-            "addressdetails": 0,
+            "limit": 3,
+            "addressdetails": 1,
             "extratags": 1,
         }
 
@@ -544,13 +594,24 @@ class DataFetcher:
                 f"Could not parse geometry from Nominatim result: {exc}"
             ) from exc
 
-        props = feature.get("properties", {})
-        props["location_query"] = location
-        props["source"] = "nominatim"
-        # Extract population from Nominatim extratags (available when extratags=1)
-        extratags = props.get("extratags") or {}
+        raw_props = feature.get("properties", {}) or {}
+        address = raw_props.get("address") or {}
+        extratags = raw_props.get("extratags") or {}
+
+        # Flatten to a scalar schema for downstream tools — GeoPandas attrs
+        # don't round-trip nested dicts reliably.
+        props: dict = {
+            "name": raw_props.get("display_name") or raw_props.get("name") or location,
+            "location_query": location,
+            "source": "nominatim",
+            "osm_id": raw_props.get("osm_id"),
+            "osm_type": raw_props.get("osm_type", ""),
+            "country": address.get("country", ""),
+            "country_code": (address.get("country_code") or "").upper(),
+        }
         if isinstance(extratags, dict) and extratags.get("population"):
-            props["population"] = extratags["population"]
+            props["population"] = str(extratags["population"])
+
         return gpd.GeoDataFrame([props], geometry=[geom], crs="EPSG:4326")
 
     def _fetch_boundary_via_overture(
@@ -1122,22 +1183,33 @@ class DataFetcher:
 
     def _fetch_population_hdx(self, boundary_gdf: gpd.GeoDataFrame) -> Optional[gpd.GeoDataFrame]:
         """
-        Attempt to fetch population data from Humanitarian Data Exchange (HDX) Facebook Maps.
-        Uses the hdx-python-api to find the country dataset and process its CSV resource.
-        Returns None (rather than raising) if data is unavailable or file is too large.
+        Attempt to fetch population data from Humanitarian Data Exchange (HDX).
+
+        Prefers Kontur Population (H3 hexagons, global, CC-BY) which has a
+        per-country GeoPackage for every UN member state. Returns None (rather
+        than raising) if data is unavailable or the file exceeds the size
+        safety limit.
+
+        Country resolution uses ``hdx-python-country``'s fuzzy matcher, which
+        handles native scripts ("پاکستان" → PAK), accented Latin names
+        ("Perú" → PER), and abbreviations. This prevents the catastrophic
+        failure mode where an unrecognised country string silently causes
+        HDX search to return the first global dataset (which previously was
+        Lebanon's Kontur file — totally unrelated).
         """
-        import unicodedata
         import zipfile
         import os
-        
+
         try:
-            from hdx.utilities.easy_logging import setup_logging
             from hdx.api.configuration import Configuration
             from hdx.data.dataset import Dataset
+            from hdx.location.country import Country
         except ImportError:
-            logger.warning("hdx-python-api is not installed. Population fetching from HDX will be skipped.")
+            logger.warning(
+                "hdx-python-api is not installed. Population fetch from HDX skipped."
+            )
             return None
-        
+
         try:
             boundary_4326 = boundary_gdf.to_crs("EPSG:4326")
             boundary_union = unary_union(boundary_4326.geometry.values)
@@ -1147,29 +1219,79 @@ class DataFetcher:
             minx, miny, maxx, maxy = boundary_union.bounds
             centroid = boundary_union.centroid
 
-            # 1. Determine country name — prefer metadata already on the boundary GDF,
-            #    fall back to Photon reverse geocoding on the centroid.
-            country_raw = ""
+            # ---------------------------------------------------------- #
+            # Step 1: Resolve ISO3 country code                           #
+            # ---------------------------------------------------------- #
+            # Priority order: explicit country_code on GDF → country name
+            # on GDF → location_query trailer → Photon reverse geocode.
+            iso3: Optional[str] = None
+            country_display: str = ""
 
-            # Check boundary GDF for a pre-populated country field
-            for col in ("country", "country_code", "country_name"):
+            def _try_iso(raw: str) -> Optional[str]:
+                raw = (raw or "").strip()
+                if not raw:
+                    return None
+                # 2-letter code first (returns bare string or None)
+                if len(raw) == 2:
+                    try:
+                        code = Country.get_iso3_from_iso2(raw.upper())
+                        if code:
+                            return code
+                    except Exception:
+                        pass
+                # 3-letter code passthrough
+                if len(raw) == 3 and raw.isalpha():
+                    try:
+                        info = Country.get_country_info_from_iso3(raw.upper())
+                        if info:
+                            return raw.upper()
+                    except Exception:
+                        pass
+                # Fuzzy match on full name
+                try:
+                    code, matched = Country.get_iso3_country_code_fuzzy(raw)
+                    if matched and code:
+                        return code
+                except Exception:
+                    pass
+                return None
+
+            # GDF columns
+            for col in ("country_code", "iso3", "iso_a3"):
                 if col in boundary_4326.columns:
                     val = str(boundary_4326[col].iloc[0] or "").strip()
-                    if val:
-                        country_raw = val
+                    iso3 = _try_iso(val)
+                    if iso3:
+                        country_display = val
                         break
 
-            # Also try the location_query column (e.g. "Bahawalpur, Pakistan")
-            if not country_raw and "location_query" in boundary_4326.columns:
+            if not iso3:
+                for col in ("country", "country_name"):
+                    if col in boundary_4326.columns:
+                        val = str(boundary_4326[col].iloc[0] or "").strip()
+                        iso3 = _try_iso(val)
+                        if iso3:
+                            country_display = val
+                            break
+
+            # location_query trailer (e.g. "Bahawalpur, Pakistan")
+            if not iso3 and "location_query" in boundary_4326.columns:
                 lq = str(boundary_4326["location_query"].iloc[0] or "")
                 parts = [p.strip() for p in lq.split(",")]
                 if len(parts) >= 2:
-                    country_raw = parts[-1]  # last part is usually the country
+                    iso3 = _try_iso(parts[-1])
+                    if iso3:
+                        country_display = parts[-1]
 
-            # Final fallback: Photon /reverse on the centroid
-            if not country_raw:
+            # Photon reverse geocode — request English names so HDX fuzzy
+            # matcher doesn't have to handle native scripts.
+            if not iso3:
                 reverse_url = PHOTON_URL + "/reverse"
-                rev_params = {"lat": centroid.y, "lon": centroid.x}
+                rev_params = {
+                    "lat": centroid.y,
+                    "lon": centroid.x,
+                    "lang": "en",
+                }
                 try:
                     rev_resp = self._make_request(reverse_url, params=rev_params, timeout=20)
                     rev_data = rev_resp.json()
@@ -1179,139 +1301,274 @@ class DataFetcher:
                         feat_coords = feat.get("geometry", {}).get("coordinates", [])
                         if feat_coords and len(feat_coords) >= 2:
                             feat_lon, feat_lat = float(feat_coords[0]), float(feat_coords[1])
-                            # Reject if the returned point is implausibly far from our centroid
                             if abs(feat_lon - centroid.x) < 15 and abs(feat_lat - centroid.y) < 15:
-                                country_raw = feat.get("properties", {}).get("country", "")
+                                p = feat.get("properties", {}) or {}
+                                countrycode = (p.get("countrycode") or "").strip().upper()
+                                country_en = (p.get("country") or "").strip()
+                                iso3 = _try_iso(countrycode) or _try_iso(country_en)
+                                if iso3:
+                                    country_display = country_en or countrycode
                             else:
                                 logger.warning(
-                                    f"Photon reverse geocode returned a location far from centroid "
+                                    "Photon reverse returned a location far from centroid "
                                     f"({feat_lat:.2f},{feat_lon:.2f} vs "
                                     f"{centroid.y:.2f},{centroid.x:.2f}); ignoring."
                                 )
-                        else:
-                            country_raw = feat.get("properties", {}).get("country", "")
                 except Exception as e:
                     logger.debug(f"Reverse geocode failed: {e}")
 
-            if not country_raw:
-                logger.warning("Could not determine country for HDX population fetch.")
+            if not iso3:
+                logger.warning(
+                    "HDX: could not resolve ISO3 country code for boundary; skipping."
+                )
                 return None
 
-            logger.info(f"HDX population: resolved country as '{country_raw}'")
-
-            # Normalize country name (e.g., 'Perú' -> 'peru', 'United Kingdom' -> 'united-kingdom')
-            country_norm = unicodedata.normalize('NFKD', country_raw).encode('ASCII', 'ignore').decode('utf-8')
-            country_norm = country_norm.lower().replace(" ", "-")
-
-            # 2. Search HDX for population density dataset
+            # Canonical English country name for log + HDX queries
             try:
-                Configuration.create(hdx_site="prod", user_agent="SOCA_spopt_agent", hdx_read_only=True)
+                country_en = Country.get_country_name_from_iso3(iso3) or country_display or iso3
             except Exception:
-                pass  # configuration already set up
-            
-            # 2. Search HDX — try multiple query patterns in priority order
-            _SIZE_LIMIT = 60 * 1024 * 1024  # 60 MB
-            _SKIP_KEYWORDS = ["children", "elderly", "youth", "men", "women",
-                              "under_five", "reproductive", "15_24", "60_plus"]
-            _SKIP_FORMATS = {"geotiff", "tif", "tiff"}
+                country_en = country_display or iso3
+
+            logger.info(f"HDX population: resolved country as '{country_en}' ({iso3})")
+
+            # ---------------------------------------------------------- #
+            # Step 2: Ensure HDX is configured                            #
+            # ---------------------------------------------------------- #
+            try:
+                Configuration.create(
+                    hdx_site="prod",
+                    user_agent="SOCA_spopt_agent",
+                    hdx_read_only=True,
+                )
+            except Exception:
+                pass  # already configured
+
+            # ---------------------------------------------------------- #
+            # Step 3: Find a matching dataset for *this* country.         #
+            #                                                             #
+            # Strategy: Kontur Maps publishes per-country H3-hexagon      #
+            # GeoPackages with a predictable slug:                        #
+            #     kontur-population-<english-country-name>                #
+            # e.g. 'kontur-population-pakistan', 'kontur-population-peru'.#
+            # A direct Dataset.read_from_hdx() is ~0.5 s and is           #
+            # guaranteed to hit the right country, so it replaces the     #
+            # old text-search heuristic that could pick Lebanon data for  #
+            # a Pakistan boundary.                                        #
+            # ---------------------------------------------------------- #
+            # Size ceiling lets us skip massive country files (e.g. US ~300MB,
+            # Russia ~200MB) on constrained environments while still using
+            # Kontur for most of the world. Opt-in override via env var.
+            import os as _os
+            _SIZE_LIMIT = int(
+                _os.environ.get("SOCA_HDX_MAX_RESOURCE_MB", "400")
+            ) * 1024 * 1024
+            _SKIP_KEYWORDS = ("children", "elderly", "youth",
+                              "under_five", "reproductive", "15_24", "60_plus",
+                              "indicator", "health-statistics", "statistics",
+                              "indicators", "who-")
+
+            def _resource_size_mb(r) -> int:
+                try:
+                    return int((r.get("size") or 0)) // 1024 // 1024
+                except Exception:
+                    return 0
 
             def _pick_resource(ds):
-                """Return (resource, kind) where kind is 'csv' or 'gpkg', or None."""
-                resources = ds.get_resources()
-                # Priority 1: general-population CSV < size limit
+                """Return the best (resource, kind) for population density.
+
+                Prefers the newest Kontur GeoPackage; falls back to CSV.
+                """
+                try:
+                    resources = ds.get_resources()
+                except Exception:
+                    return None, None
+
+                gpkg_matches = []
+                csv_matches = []
                 for r in resources:
-                    fmt = r.get_format().lower()
-                    name = r.get("name", "").lower()
-                    if any(x in fmt for x in ("csv",)) or name.endswith((".csv", ".csv.zip")):
-                        if any(kw in name for kw in _SKIP_KEYWORDS):
+                    try:
+                        fmt = (r.get_format() or "").lower()
+                        name = (r.get("name") or "").lower()
+                    except Exception:
+                        continue
+                    if any(kw in name for kw in _SKIP_KEYWORDS):
+                        continue
+                    sz = r.get("size", 0) or 0
+                    if sz > _SIZE_LIMIT:
+                        continue
+                    if "gpkg" in fmt or "geopackage" in fmt or name.endswith((".gpkg", ".gpkg.gz")):
+                        gpkg_matches.append(r)
+                    elif "csv" in fmt or name.endswith((".csv", ".csv.zip")):
+                        if "part_1" in name or "part_2" in name:
                             continue
-                        if "part_1" in name:
-                            continue
-                        sz = r.get("size", 0) or 0
-                        if sz > _SIZE_LIMIT:
-                            continue
-                        if "general" in name or "overall" in name or "population_" in name:
-                            return r, "csv"
-                # Priority 2: GeoPackage (Kontur-style) < size limit
-                for r in resources:
-                    fmt = r.get_format().lower()
-                    name = r.get("name", "").lower()
-                    if "gpkg" in fmt or name.endswith(".gpkg"):
-                        if any(kw in name for kw in _SKIP_KEYWORDS):
-                            continue
-                        sz = r.get("size", 0) or 0
-                        if sz > _SIZE_LIMIT:
-                            continue
-                        return r, "gpkg"
+                        csv_matches.append(r)
+
+                def _newest(rs):
+                    # Sort by name (Kontur names include date e.g. _20231101)
+                    return sorted(rs, key=lambda r: r.get("name") or "", reverse=True)[0] if rs else None
+
+                r = _newest(gpkg_matches)
+                if r is not None:
+                    return r, "gpkg"
+                r = _newest(csv_matches)
+                if r is not None:
+                    return r, "csv"
                 return None, None
 
-            def _dataset_score(ds):
-                """Higher score = more suitable for demand-point generation."""
-                title = ds.get("title", "").lower()
-                if "population density" in title or "h3 hexagon" in title:
-                    return 3
-                if "hrsl" in title or "high resolution population" in title:
-                    return 2
-                if "population" in title and "administrative" not in title and "boundary" not in title:
-                    return 1
-                return 0
-
-            # Collect all candidate (dataset, resource, kind) tuples across queries
-            # Note: Facebook/Meta HR population maps are excluded — discontinued since 2024.
-            all_candidates: list[tuple] = []
-            for query in [
-                f"{country_norm} kontur population",
-                f"{country_norm} hrsl",
-                f"{country_norm} population density",
-            ]:
+            def _dataset_matches_country(ds, iso3_upper: str) -> bool:
+                """True when the dataset's HDX groups confirm this country."""
                 try:
-                    found = Dataset.search_in_hdx(query, rows=5)
-                except Exception as search_exc:
-                    logger.warning(f"HDX search failed for query '{query}': {search_exc}")
-                    continue
-                for ds in found:
-                    r, kind = _pick_resource(ds)
-                    if r is not None:
-                        all_candidates.append((_dataset_score(ds), ds, r, kind))
+                    for g in ds.get("groups") or []:
+                        g_name = (g.get("name") or "").lower().strip()
+                        if not g_name:
+                            continue
+                        # HDX group names are ISO3 lowercase (e.g. 'pak').
+                        if g_name.upper() == iso3_upper:
+                            return True
+                except Exception:
+                    pass
+                return False
 
-            if not all_candidates:
-                logger.warning(f"No usable HDX population resource found for '{country_norm}'.")
-                return None
+            iso3_upper = iso3.upper()
 
-            # Pick the highest-scored candidate
-            all_candidates.sort(key=lambda x: x[0], reverse=True)
-            _, best_ds, target_resource, resource_kind = all_candidates[0]
-            datasets = [best_ds]
+            # --- Attempt 1: direct Kontur slug lookup (fastest path) ----
+            # Kontur publishes per-country datasets at predictable slugs.
+            country_slug = country_en.lower()
+            # Normalise common punctuation that HDX strips from slugs
+            for ch in [",", "'", "`", "(", ")", "."]:
+                country_slug = country_slug.replace(ch, "")
+            country_slug = "-".join(country_slug.split())
+            direct_slug = f"kontur-population-{country_slug}"
 
-            if not target_resource:
-                logger.warning(f"No usable HDX population resource found for '{country_norm}'.")
-                return None
+            best_ds = None
+            target_resource = None
+            resource_kind = None
 
-            logger.info(
-                f"HDX: downloading '{target_resource.get('name')}' "
-                f"({resource_kind}, {(target_resource.get('size') or 0)//1024//1024}MB) "
-                f"from '{datasets[0].get('title')}'"
+            try:
+                ds = Dataset.read_from_hdx(direct_slug)
+            except Exception as exc:
+                logger.debug(f"HDX direct slug '{direct_slug}' error: {exc}")
+                ds = None
+
+            if ds is not None and _dataset_matches_country(ds, iso3_upper):
+                r, kind = _pick_resource(ds)
+                if r is not None:
+                    best_ds = ds
+                    target_resource = r
+                    resource_kind = kind
+                    logger.info(f"HDX: using direct Kontur slug '{direct_slug}'")
+
+            # --- Attempt 2: search-based fallback ----------------------
+            # Only accept datasets whose title marks them as spatial population
+            # density products (Kontur, HRSL, WorldPop). A generic "population"
+            # hit is not enough — old logic accidentally returned Lebanon data
+            # for a Pakistan boundary and USA health-indicator CSVs for
+            # Brooklyn.
+            _SPATIAL_POP_KEYWORDS = (
+                "kontur", "h3 hexagon", "high resolution population",
+                "hrsl", "worldpop", "population density",
             )
 
-            # 3. Download the resource
-            # hdx-python-api versions differ: some return (url, path), others return
-            # just a path. Handle both and always convert to a plain string.
+            if target_resource is None:
+                queries = [
+                    f'"{country_en}" kontur population density',
+                    f'"{country_en}" worldpop population',
+                    f'"{country_en}" hrsl population',
+                ]
+                for query in queries:
+                    try:
+                        found = Dataset.search_in_hdx(query, rows=10)
+                    except Exception as search_exc:
+                        logger.warning(f"HDX search failed for '{query}': {search_exc}")
+                        continue
+                    for cand_ds in found:
+                        if not _dataset_matches_country(cand_ds, iso3_upper):
+                            continue
+                        title_lower = (cand_ds.get("title") or "").lower()
+                        if not any(kw in title_lower for kw in _SPATIAL_POP_KEYWORDS):
+                            continue
+                        r, kind = _pick_resource(cand_ds)
+                        if r is not None:
+                            best_ds = cand_ds
+                            target_resource = r
+                            resource_kind = kind
+                            break
+                    if target_resource is not None:
+                        break
+
+            if target_resource is None:
+                logger.warning(
+                    f"No country-matched HDX population resource found for "
+                    f"'{country_en}' ({iso3_upper}); will use synthetic grid."
+                )
+                return None
+
+            # 3. Download the resource — cached under ~/.cache/soca/hdx.
+            # HDX's Resource.download() doesn't check if the file already
+            # exists locally, so we maintain our own simple on-disk cache
+            # keyed by resource id to skip re-downloading 300MB GeoPackages.
+            import hashlib
+            from pathlib import Path as _Path
+
+            cache_dir = _Path(
+                _os.environ.get("SOCA_HDX_CACHE_DIR")
+                or _Path.home() / ".cache" / "soca" / "hdx"
+            )
             try:
-                dl_result = target_resource.download()
+                cache_dir.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                cache_dir = None  # fall back to fresh download each time
+
+            res_name = target_resource.get("name") or "resource"
+            res_id = target_resource.get("id") or hashlib.sha1(
+                res_name.encode("utf-8", "ignore")
+            ).hexdigest()[:16]
+            cache_path: Optional[_Path] = None
+            if cache_dir is not None:
+                safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", res_name)[:80]
+                cache_path = cache_dir / f"{res_id}_{safe_name}"
+
+            path_str: Optional[str] = None
+            if cache_path is not None and cache_path.exists() and cache_path.stat().st_size > 0:
+                logger.info(
+                    f"HDX: using cached '{res_name}' from {cache_path} "
+                    f"({cache_path.stat().st_size // 1024 // 1024}MB)"
+                )
+                path_str = str(cache_path)
+            else:
+                logger.info(
+                    f"HDX: downloading '{res_name}' "
+                    f"({resource_kind}, {_resource_size_mb(target_resource)}MB) "
+                    f"from '{best_ds.get('title')}'"
+                )
+                try:
+                    dl_result = target_resource.download()
+                except Exception as e:
+                    logger.error(f"Failed to download HDX resource: {e}")
+                    return None
+                # hdx-python-api versions differ: (url, path) vs just path.
                 if isinstance(dl_result, (list, tuple)) and len(dl_result) == 2:
-                    _url, path = dl_result
+                    _url, dl_path = dl_result
                 else:
-                    path = dl_result  # newer API returns path directly
-            except Exception as e:
-                logger.error(f"Failed to download HDX resource: {e}")
-                return None
+                    dl_path = dl_result
+                if not dl_path:
+                    logger.error("HDX resource download returned no path.")
+                    return None
+                dl_path = str(dl_path)
 
-            if not path:
-                logger.error("HDX resource download returned no path.")
-                return None
+                if cache_path is not None:
+                    import shutil as _shutil
+                    try:
+                        _shutil.move(dl_path, cache_path)
+                        path_str = str(cache_path)
+                    except Exception as mv_exc:
+                        logger.debug(f"HDX cache move failed: {mv_exc}")
+                        path_str = dl_path
+                else:
+                    path_str = dl_path
 
-            # Always convert to str — Path objects cause 'has no attribute endswith'
-            path_str = str(path)
+            # We should delete downloaded-but-not-cached files when done.
+            _is_cached = (cache_path is not None and str(cache_path) == path_str)
 
             # 4a. CSV handler
             if resource_kind == "csv":
@@ -1324,7 +1581,7 @@ class DataFetcher:
                     logger.error(f"Failed to read HDX CSV: {e}")
                     return None
                 finally:
-                    if os.path.exists(path_str):
+                    if not _is_cached and os.path.exists(path_str):
                         try:
                             os.unlink(path_str)
                         except Exception:
@@ -1394,14 +1651,37 @@ class DataFetcher:
                 except Exception as prep_exc:
                     logger.warning(f"HDX GeoPackage pre-processing failed: {prep_exc}")
 
+                # Use pyogrio's bbox filter when available — avoids loading
+                # the entire country file (Kontur PK is ~50 MB, >600k hexes).
+                # The Kontur CRS is EPSG:3857 so reproject the bbox to match.
                 try:
-                    pop_gdf_raw = gpd.read_file(gpkg_path)
+                    bbox_3857 = gpd.GeoSeries(
+                        [box(minx, miny, maxx, maxy)], crs="EPSG:4326"
+                    ).to_crs("EPSG:3857").total_bounds
+                except Exception:
+                    bbox_3857 = None
+
+                try:
+                    read_kwargs = {}
+                    if bbox_3857 is not None:
+                        read_kwargs["bbox"] = tuple(bbox_3857)
+                    try:
+                        pop_gdf_raw = gpd.read_file(gpkg_path, **read_kwargs)
+                    except Exception:
+                        # Some drivers/layers don't support bbox — retry without.
+                        pop_gdf_raw = gpd.read_file(gpkg_path)
                 except Exception as e:
                     logger.error(f"Failed to read HDX GeoPackage: {e}")
                     return None
                 finally:
-                    for p in ({path_str} | extra_files):
-                        if os.path.exists(p):
+                    # Keep the cached original download; delete only the
+                    # decompressed/renamed working copies and any non-cached
+                    # direct download.
+                    _paths_to_clean = set(extra_files)
+                    if not _is_cached:
+                        _paths_to_clean.add(path_str)
+                    for p in _paths_to_clean:
+                        if p and os.path.exists(p):
                             try:
                                 os.unlink(p)
                             except Exception:
@@ -1409,7 +1689,8 @@ class DataFetcher:
 
                 pop_gdf_raw = pop_gdf_raw.to_crs("EPSG:4326")
 
-                # Clip to boundary bbox first, then intersect
+                # Secondary bbox clip (idempotent — safe even if pyogrio
+                # already filtered).
                 pop_gdf_raw = pop_gdf_raw.cx[minx:maxx, miny:maxy]
                 if pop_gdf_raw.empty:
                     logger.warning("HDX GeoPackage has no features within boundary bbox.")
@@ -1430,8 +1711,14 @@ class DataFetcher:
                     return None
 
                 clipped = clipped[clipped[pop_col] > 0].copy()
-                # Reproject to a metric CRS for accurate centroids, then back to WGS-84
-                clipped["geometry"] = clipped.to_crs("EPSG:3857").geometry.centroid.to_crs("EPSG:4326")
+                # Reproject to a metric CRS for accurate centroids, then back to WGS-84.
+                # GeoPandas' centroid on WGS-84 emits a CRS warning and is
+                # inaccurate near the poles, so we round-trip via EPSG:3857.
+                centroids_3857 = gpd.GeoSeries(
+                    clipped.to_crs("EPSG:3857").geometry.centroid,
+                    crs="EPSG:3857",
+                )
+                clipped["geometry"] = centroids_3857.to_crs("EPSG:4326").values
                 clipped = clipped.rename(columns={pop_col: "population"})
                 result = clipped[["population", "geometry"]].copy()
                 result["data_source"] = "hdx_kontur_population"
@@ -1480,9 +1767,9 @@ class DataFetcher:
             DataFetchError: After all retries are exhausted.
         """
         headers = {
-            "User-Agent": "SOCA/1.0 (Spatial Optimization Conversational Agent; "
-                          "academic research; contact: soca@example.com)",
+            "User-Agent": _USER_AGENT,
             "Accept": "application/json",
+            "Accept-Language": "en",
         }
 
         last_exc: Optional[Exception] = None

@@ -111,17 +111,17 @@ def _lima_boundary_gdf() -> gpd.GeoDataFrame:
 class TestFetchBoundaries(unittest.TestCase):
 
     def setUp(self):
-        # Force OSMnx tier to miss so these tests exercise the Nominatim
-        # fallback path without needing a live osmnx / Overpass connection.
-        self._osmnx_patcher = patch.object(
-            DataFetcher,
-            "_fetch_boundary_via_osmnx",
-            side_effect=GeocodingError("osmnx disabled for test"),
-        )
-        self._osmnx_patcher.start()
+        # Force Overture + Photon + GADM tiers to miss so these tests
+        # exercise only the Nominatim /search path (the primary backend).
+        import utils.data_fetcher as df
+        self._overture_patch = patch.object(df, "_OVERTURE_AVAILABLE", False)
+        self._gadm_patch = patch.object(df, "_GADM_AVAILABLE", False)
+        self._overture_patch.start()
+        self._gadm_patch.start()
 
     def tearDown(self):
-        self._osmnx_patcher.stop()
+        self._overture_patch.stop()
+        self._gadm_patch.stop()
 
     @patch("utils.data_fetcher.requests.get")
     def test_returns_geodataframe_with_polygon(self, mock_get):
@@ -156,7 +156,7 @@ class TestFetchBoundaries(unittest.TestCase):
     def test_falls_back_to_bbox_when_no_polygon(self, mock_get):
         """When Nominatim returns only a Point, its internal bbox fallback triggers
         and returns a rectangular polygon with source='nominatim_bbox_fallback'."""
-        # OSMnx tier is already disabled by setUp — flow goes straight to Nominatim.
+        # Overture/GADM tiers are already disabled by setUp — flow goes to Nominatim.
         nominatim_point = _make_response({
             "features": [
                 {
@@ -302,6 +302,17 @@ class TestFetchPois(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestFetchPopulation(unittest.TestCase):
+
+    def setUp(self):
+        # Population tests assert on the synthetic-grid path — disable the
+        # live HDX lookup so no network is required.
+        self._hdx_patch = patch.object(
+            DataFetcher, "_fetch_population_hdx", return_value=None
+        )
+        self._hdx_patch.start()
+
+    def tearDown(self):
+        self._hdx_patch.stop()
 
     def test_returns_geodataframe_with_population_column(self):
         fetcher = DataFetcher()
@@ -462,12 +473,10 @@ class TestNominatimRateLimit(unittest.TestCase):
     @patch("utils.data_fetcher.time.sleep", return_value=None)
     def test_rate_limit_enforced_between_calls(self, mock_sleep, mock_get):
         """Nominatim rate-limit sleep is exercised on the Nominatim tier."""
-        # Force OSMnx tier to miss so we reach Nominatim.
-        with patch.object(
-            DataFetcher,
-            "_fetch_boundary_via_osmnx",
-            side_effect=GeocodingError("osmnx disabled for test"),
-        ):
+        # Force downstream tiers to miss; Nominatim is now the primary backend.
+        import utils.data_fetcher as df
+        with patch.object(df, "_OVERTURE_AVAILABLE", False), \
+             patch.object(df, "_GADM_AVAILABLE", False):
             nominatim_ok = _make_response(_nominatim_polygon_response())
             mock_get.return_value = nominatim_ok
 
