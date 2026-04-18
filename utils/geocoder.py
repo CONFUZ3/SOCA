@@ -37,8 +37,8 @@ PHOTON_URL = "https://photon.komoot.io"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org"
 
 _USER_AGENT = (
-    "SOCA/1.0 (Spatial Optimization Conversational Agent; "
-    "academic research; contact: soca@example.com)"
+    "SOCA-spopt/1.0 (Spatial Optimization Conversational Agent; "
+    "academic research; +https://github.com/soca-spopt/soca)"
 )
 
 # Min chars before we hit an API — anything shorter is too ambiguous and wastes

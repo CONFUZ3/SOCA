@@ -86,9 +86,11 @@ class NetworkManager:
         ox.settings.requests_timeout = 180
         ox.settings.overpass_rate_limit = True
         ox.settings.log_console = False
+        # Nominatim's ToS blocks placeholder-domain UA strings. Identify via
+        # the public repo URL so this client isn't rate-limited / blocked.
         ox.settings.http_user_agent = (
-            "SOCA/1.0 (Spatial Optimization Conversational Agent; "
-            "academic research; contact: soca@example.com)"
+            "SOCA-spopt/1.0 (Spatial Optimization Conversational Agent; "
+            "academic research; +https://github.com/soca-spopt/soca)"
         )
 
         network_type = self.DEFAULT_NETWORK_TYPE
