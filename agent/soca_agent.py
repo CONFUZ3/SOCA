@@ -91,6 +91,120 @@ class SOCAAgent:
                 "tool_calls": [],
             }
 
+    async def chat_stream(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        problem_state: Dict[str, Any],
+        uploaded_data_summary: Optional[Dict] = None,
+    ):
+        """Async generator yielding structured events as the turn progresses.
+
+        Event shapes (dict):
+          {"type": "tool_call_start",  "name": str, "args": dict}
+          {"type": "tool_call_result", "name": str, "summary": Any}
+          {"type": "token",            "text": str}
+          {"type": "final",            "text": str, "tool_calls": list[str]}
+          {"type": "error",            "message": str}
+
+        Designed for FastAPI SSE: the handler translates each dict into an
+        SSE frame. On exception the generator emits an ``error`` event then
+        returns — it never raises to the caller.
+        """
+        try:
+            runner = self._get_runner()
+            session = self._get_or_create_session(problem_state)
+            self._sync_state_to_session(session, problem_state)
+
+            set_current_context(
+                data=problem_state.get("data", {}),
+                problem_state=problem_state,
+                problem_registry=self.problem_registry,
+                generated_sites_count=problem_state.get("_generated_sites_count", 100),
+                generated_sites_seed=problem_state.get("_generated_sites_seed"),
+                network_manager=problem_state.get("_network_manager"),
+            )
+
+            message = self._build_message(
+                user_message,
+                conversation_history,
+                problem_state,
+                uploaded_data_summary,
+            )
+
+            tool_calls: list[str] = []
+            text_parts: list[str] = []
+
+            async for event in runner.run_async(
+                user_id=_USER_ID,
+                session_id=session.id,
+                new_message=message,
+            ):
+                if event.content and event.content.parts:
+                    for part in event.content.parts:
+                        fc = getattr(part, "function_call", None)
+                        if fc is not None:
+                            name = getattr(fc, "name", None)
+                            args = getattr(fc, "args", None) or {}
+                            try:
+                                args = dict(args)
+                            except Exception:
+                                args = {}
+                            if name:
+                                tool_calls.append(name)
+                                yield {
+                                    "type": "tool_call_start",
+                                    "name": name,
+                                    "args": args,
+                                }
+
+                        fr = getattr(part, "function_response", None)
+                        if fr is not None:
+                            name = getattr(fr, "name", None)
+                            response = getattr(fr, "response", None)
+                            summary: Any
+                            try:
+                                summary = dict(response) if response else {}
+                            except Exception:
+                                summary = {"raw": str(response)}
+                            yield {
+                                "type": "tool_call_result",
+                                "name": name,
+                                "summary": summary,
+                            }
+
+                        text = getattr(part, "text", None)
+                        if text:
+                            is_final = True
+                            if hasattr(event, "is_final_response"):
+                                try:
+                                    is_final = bool(event.is_final_response())
+                                except Exception:
+                                    is_final = True
+                            if is_final:
+                                text_parts.append(text)
+                                yield {"type": "token", "text": text}
+
+            refreshed = await self._session_service.get_session(
+                app_name=_APP_NAME,
+                user_id=_USER_ID,
+                session_id=session.id,
+            )
+            if refreshed:
+                self._sync_state_from_session(refreshed, problem_state)
+
+            final_text = "\n".join(text_parts) if text_parts else (
+                "I processed your request. Check the map and data panel for updates."
+            )
+            yield {
+                "type": "final",
+                "text": final_text,
+                "tool_calls": tool_calls,
+            }
+        except Exception as exc:
+            logger.error("SOCAAgent.chat_stream error: %s", exc, exc_info=True)
+            yield {"type": "error", "message": self._friendly_error(exc)}
+
     def notify_data_uploaded(
         self,
         conversation_history: List[Dict[str, str]],

@@ -21,15 +21,23 @@ Design notes:
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Any, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 _MAX_EVENTS = 50
 _STATE_KEY = "_activity_log"
 _FALLBACK: list["ActivityEvent"] = []
+
+# Pluggable sinks — functions that receive every published event.
+# Used by the FastAPI backend to mirror log events into per-session queues
+# so the React client can stream them via SSE. Streamlit never registers
+# a sink, so this change is a no-op when running under Streamlit.
+_SINKS_LOCK = threading.RLock()
+_SINKS: list[Callable[["ActivityEvent"], None]] = []
 
 # status → (glyph, rank) — rank used for "auto-expand on first error"
 _STATUS_GLYPHS = {
@@ -91,9 +99,50 @@ def log_event(
     if len(buf) > _MAX_EVENTS:
         del buf[: len(buf) - _MAX_EVENTS]
 
+    # Fan-out to any registered sinks (e.g. per-session SSE queues for the
+    # React backend). Sink exceptions never propagate — activity logging
+    # must not break the producing code path.
+    with _SINKS_LOCK:
+        sinks = list(_SINKS)
+    for sink in sinks:
+        try:
+            sink(evt)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("activity_log: sink raised")
+
     level = logging.WARNING if status == "fail" else logging.INFO
     logger.log(level, "%s", evt.format())
     return evt
+
+
+def register_sink(sink: Callable[["ActivityEvent"], None]) -> Callable[[], None]:
+    """Register a callable invoked for every subsequent event.
+
+    Returns a zero-arg function that unregisters the sink. Safe to call from
+    any thread; sinks run on the producer's thread.
+    """
+    with _SINKS_LOCK:
+        _SINKS.append(sink)
+
+    def _unregister() -> None:
+        with _SINKS_LOCK:
+            try:
+                _SINKS.remove(sink)
+            except ValueError:
+                pass
+
+    return _unregister
+
+
+def clear_sinks() -> None:
+    """Remove all sinks (primarily for tests)."""
+    with _SINKS_LOCK:
+        _SINKS.clear()
+
+
+def event_to_dict(evt: "ActivityEvent") -> dict:
+    """Return a JSON-serialisable snapshot of an ``ActivityEvent``."""
+    return asdict(evt)
 
 
 class timed:
