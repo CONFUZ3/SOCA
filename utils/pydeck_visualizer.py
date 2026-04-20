@@ -39,6 +39,8 @@ class PyDeckVisualizer:
         'assignment': [158, 158, 158, 100],  # Light gray
         'violation': [244, 67, 54, 200],     # Red
         'service_area': [66, 133, 244, 50],  # Light blue
+        'boundary_fill': [33, 150, 243, 28],  # Light translucent blue fill
+        'boundary_line': [21, 101, 192, 220],  # Strong blue outline
     }
     
     def __init__(self, basemap_style: str = 'light'):
@@ -71,6 +73,7 @@ class PyDeckVisualizer:
         parameters: Optional[Dict[str, Any]] = None,
         constraints: Optional[Dict[str, Any]] = None,
         basemap_style: Optional[str] = None,
+        boundary: Optional[gpd.GeoDataFrame] = None,
         **kwargs  # Accept extra args for compatibility
     ) -> pdk.Deck:
         """
@@ -94,13 +97,27 @@ class PyDeckVisualizer:
             demand_gdf = data.get('demand_points')
             candidate_gdf = data.get('candidate_sites')
             
-            # Calculate view state from data bounds
-            view_state = self._calculate_view_state(data)
+            # Calculate view state from data bounds (include boundary so the
+            # camera frames the AOI even when no points are loaded yet).
+            view_state = self._calculate_view_state(
+                data,
+                boundary=boundary,
+            )
             
             # Get selected facilities from solution
             selected_indices = solution.get('selected_facilities', []) if solution else []
             assignments = solution.get('assignments', {}) if solution else {}
-            
+
+            # 0. Add AOI boundary outline (rendered underneath everything else).
+            if (
+                boundary is not None
+                and len(boundary) > 0
+                and (viz_config is None or viz_config.get('show_boundary', True))
+            ):
+                boundary_layer = self._create_boundary_layer(boundary)
+                if boundary_layer is not None:
+                    layers.append(boundary_layer)
+
             # 1. Add assignment lines (render first, below points)
             if (solution and assignments and demand_gdf is not None and candidate_gdf is not None 
                 and (viz_config is None or viz_config.get('show_assignments', True))):
@@ -226,7 +243,10 @@ class PyDeckVisualizer:
   </div>
 """
 
+        boundary_blue = "rgb(21,101,192)"
+
         legend_html += f"""
+  <p style="margin:0;"><span style="color:{boundary_blue};">▭</span> AOI Boundary</p>
   <p style="margin:0;"><span style="color:{blue};">●</span> Demand Points</p>
   <p style="margin:0;"><span style="color:{gray};">●</span> Candidate Sites</p>
   <p style="margin:0;"><span style="color:{orange};">●</span> Generated Sites</p>
@@ -248,10 +268,16 @@ class PyDeckVisualizer:
         legend_html += "\n</div>\n"
         return textwrap.dedent(legend_html).strip()
     
-    def _calculate_view_state(self, data: Dict[str, gpd.GeoDataFrame]) -> pdk.ViewState:
-        """Calculate optimal view state from data bounds"""
+    def _calculate_view_state(
+        self,
+        data: Dict[str, gpd.GeoDataFrame],
+        boundary: Optional[gpd.GeoDataFrame] = None,
+    ) -> pdk.ViewState:
+        """Calculate optimal view state from data + boundary bounds."""
         all_gdfs = [gdf for gdf in data.values() if gdf is not None and len(gdf) > 0]
-        
+        if boundary is not None and len(boundary) > 0:
+            all_gdfs.append(boundary)
+
         if not all_gdfs:
             return pdk.ViewState(latitude=40.7128, longitude=-74.0060, zoom=10)
         
@@ -316,6 +342,55 @@ class PyDeckVisualizer:
         
         return df
     
+    def _create_boundary_layer(
+        self,
+        boundary_gdf: gpd.GeoDataFrame,
+    ) -> Optional[pdk.Layer]:
+        """Render the AOI boundary as a GeoJsonLayer (filled outline).
+
+        Keeps only Polygon / MultiPolygon rows and reprojects to EPSG:4326 if
+        needed. A light-blue translucent fill plus a strong blue stroke makes
+        the AOI visible but unobtrusive behind the point layers.
+        """
+        try:
+            gdf = boundary_gdf
+            if gdf.crs is not None and str(gdf.crs) not in ("EPSG:4326", "epsg:4326"):
+                try:
+                    gdf = gdf.to_crs("EPSG:4326")
+                except Exception:
+                    pass
+
+            poly_mask = gdf.geometry.type.isin(("Polygon", "MultiPolygon"))
+            gdf = gdf[poly_mask]
+            if len(gdf) == 0:
+                return None
+
+            feature_collection = {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": geom.__geo_interface__,
+                        "properties": {"name": "AOI"},
+                    }
+                    for geom in gdf.geometry
+                ],
+            }
+
+            return pdk.Layer(
+                "GeoJsonLayer",
+                data=feature_collection,
+                pickable=False,
+                stroked=True,
+                filled=True,
+                get_fill_color=self.COLORS["boundary_fill"],
+                get_line_color=self.COLORS["boundary_line"],
+                line_width_min_pixels=2,
+            )
+        except Exception as exc:
+            logger.warning("PyDeckVisualizer: could not build boundary layer: %s", exc)
+            return None
+
     def _create_demand_layer(
         self, 
         gdf: gpd.GeoDataFrame,

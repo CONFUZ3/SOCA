@@ -74,7 +74,7 @@ class SpatialOptimizationProblem(ABC):
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
         """
         Solves the optimization problem.

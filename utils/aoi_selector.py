@@ -175,6 +175,21 @@ def _fetch_boundary_for(
 
     gdf = _simplify_for_edit(gdf)
     geom = gdf.geometry.iloc[0]
+
+    # Preserve country metadata from the resolved boundary so downstream
+    # population lookups (e.g. HDX Kontur) can resolve ISO3 without a second
+    # network round-trip. The fetcher already extracted these from Nominatim's
+    # addressdetails; fall back to the hint candidate's country name if the
+    # fetcher-specific columns are missing (e.g. Overture / GADM tiers).
+    first_row = gdf.iloc[0] if len(gdf) else None
+    country_name = ""
+    country_code = ""
+    if first_row is not None:
+        country_name = str(first_row.get("country") or "").strip()
+        country_code = str(first_row.get("country_code") or "").strip().upper()
+    if not country_name and hint is not None:
+        country_name = (hint.country or "").strip()
+
     st.session_state["_aoi_search_result"] = {
         "name": hint.short_name if hint is not None else query,
         "display_name": hint.display_name if hint is not None else query,
@@ -183,6 +198,8 @@ def _fetch_boundary_for(
         "admin_level": gdf.attrs.get("admin_level") if hasattr(gdf, "attrs") else None,
         "osm_id": hint.osm_id if hint is not None else None,
         "source_tier": str(gdf.iloc[0].get("source", "unknown")) if len(gdf) else "unknown",
+        "country": country_name,
+        "country_code": country_code,
     }
     st.session_state["_aoi_map_key"] = st.session_state.get("_aoi_map_key", 0) + 1
     st.rerun()
@@ -402,6 +419,8 @@ def render_aoi_selector() -> Optional[dict]:
                     "area_km2": area,
                     "admin_level": (search_result or {}).get("admin_level"),
                     "osm_id": (search_result or {}).get("osm_id"),
+                    "country": (search_result or {}).get("country", ""),
+                    "country_code": (search_result or {}).get("country_code", ""),
                 }
 
     # --- Activity log (always visible — transparency) -------------------
@@ -457,12 +476,29 @@ def _render_suggestions(query: str) -> None:
 
 
 def aoi_to_boundary_gdf(aoi: dict) -> gpd.GeoDataFrame:
-    """Convert a confirmed AOI dict into a one-row boundary GeoDataFrame (EPSG:4326)."""
+    """Convert a confirmed AOI dict into a one-row boundary GeoDataFrame (EPSG:4326).
+
+    Carries through country metadata (country name, ISO 3166-1 alpha-2 code)
+    and a composed ``location_query`` trailer so downstream consumers such
+    as :py:meth:`DataFetcher._fetch_population_hdx` can resolve the ISO3
+    country code without a separate reverse-geocode call.
+    """
     geom = shape(aoi["geometry_geojson"])
-    gdf = gpd.GeoDataFrame(
-        {"name": [aoi.get("name", "AOI")]},
-        geometry=[geom],
-        crs="EPSG:4326",
-    )
+    name = aoi.get("name", "AOI")
+    country = str(aoi.get("country") or "").strip()
+    country_code = str(aoi.get("country_code") or "").strip().upper()
+
+    # "Name, Country" gives HDX's ISO3 fuzzy matcher a high-signal string
+    # even when explicit country/country_code columns are absent (manual
+    # drawn polygons, legacy AOIs persisted without the new fields, etc.).
+    location_query = f"{name}, {country}" if country else name
+
+    row: dict = {
+        "name": [name],
+        "location_query": [location_query],
+        "country": [country],
+        "country_code": [country_code],
+    }
+    gdf = gpd.GeoDataFrame(row, geometry=[geom], crs="EPSG:4326")
     gdf.attrs["source"] = f"aoi_{aoi.get('source', 'user')}"
     return gdf

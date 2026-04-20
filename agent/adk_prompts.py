@@ -145,12 +145,26 @@ Variant-specific required parameters:
 - probabilistic: optionally takes facility_reliability
 
 ## distance_metric
-- `"euclidean"` (default): geodesic straight-line distance
-- `"manhattan"`: grid/block distance
-- `"network"`: road-network shortest path via OpenStreetMap
-  - Adds 5–30 s for the one-time graph download (cached for subsequent runs)
-  - Use when the user asks for "road distance", "driving distance", "along roads", "travel time", etc.
-  - Always warn the user that a road-network download is required and may take a moment.
+- `"network"` (default): road-network shortest path via OpenStreetMap.
+  - The road graph is pre-fetched in the background as soon as the user
+    confirms the AOI, so most optimisations run against a warm cache with no
+    perceivable delay. You do NOT need to warn the user about a download
+    unless the sidebar activity log shows the fetch is still in progress.
+  - If the road-network fetch fails (offline, Overpass timeout, osmnx
+    unavailable) the solver automatically falls back to geodesic distance
+    and returns a `warnings` list on the `confirm_optimization` result. You
+    MUST relay any such warning to the user in your reply.
+- `"euclidean"`: geodesic straight-line ("as-the-crow-flies") distance.
+  - Use only when the user explicitly asks for straight-line / geodesic
+    distance, needs a faster run, or the activity log shows the road-network
+    fetch has failed.
+- `"manhattan"`: grid/block distance. Use only on explicit user request
+  (e.g. Manhattan-style street grids where diagonal travel is not possible).
+
+If the user insists that the solution MUST use road-network distance (for
+reproducibility or a publication), pass `strict_network=True` to
+`stage_optimization` so that a fetch failure becomes a hard error instead
+of silently falling back.
 
 ## demand_weight_column
 Only set if the user explicitly names a non-standard column for weights.

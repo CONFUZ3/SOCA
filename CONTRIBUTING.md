@@ -182,9 +182,13 @@ class YourProblemSolver(SpatialOptimizationProblem):
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
-        # Implementation
+        # Implementation. distance_metric defaults to "network" (OSM road
+        # shortest path); "euclidean" (geodesic straight-line) and "manhattan"
+        # are opt-outs. When distance_metric == "network", read the graph from
+        # data.get("_network_graph") -- it is pre-fetched and injected by
+        # agent/tools/optimize_tools.confirm_optimization.
         pass
     
     def explain_solution(

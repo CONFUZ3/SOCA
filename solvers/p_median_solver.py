@@ -156,7 +156,7 @@ Where:
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
         """Solve the P-Median problem"""
         start_time = time.time()

@@ -123,7 +123,8 @@ def stage_optimization(
     facility_reliability: Optional[float] = None,
     demand_weight_column: Optional[str] = None,
     objective: str = "total",
-    distance_metric: str = "euclidean",
+    distance_metric: str = "network",
+    strict_network: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """Stage an optimization run for user confirmation.
@@ -150,7 +151,18 @@ def stage_optimization(
         demand_weight_column: Column name for demand weights (only needed for
                               non-standard column names).
         objective: Objective type for p-median: "total" or "average".
-        distance_metric: Distance calculation method: "euclidean" or "geodesic".
+        distance_metric: Distance calculation method. Default is "network"
+                         (road-network shortest path via OpenStreetMap; the road
+                         graph is pre-fetched in the background when the AOI is
+                         confirmed, so most runs see a warm cache). Use
+                         "euclidean" for straight-line/geodesic distance or
+                         "manhattan" for grid distance. On a network-fetch
+                         failure the tool auto-falls back to geodesic and
+                         surfaces a warning unless strict_network=True.
+        strict_network: If True, abort with an error when the road-network
+                        fetch fails instead of falling back to geodesic.
+                        Default False. Set True only when the user insists on
+                        road-network distance for reproducibility.
 
     Returns:
         dict with keys:
@@ -230,7 +242,7 @@ def stage_optimization(
         parameters["demand_weight_column"] = demand_weight_column
     if objective != "total":
         parameters["objective"] = objective
-    if distance_metric != "euclidean":
+    if distance_metric != "network":
         parameters["distance_metric"] = distance_metric
 
     # Variant-specific validation warnings
@@ -273,6 +285,7 @@ def stage_optimization(
         "parameters": parameters,
         "constraints": {},
         "distance_metric": distance_metric,
+        "strict_network": bool(strict_network),
     }
     if tool_context is not None:
         tool_context.state["pending_optimization"] = pending
@@ -318,6 +331,12 @@ def confirm_optimization(
           num_facilities_selected (int | None)
           solution_summary (str): human-readable result
           error_message (str | None)
+          warnings (list[str]): non-fatal warnings (e.g. a road-network fetch
+                                failure that triggered the geodesic fallback).
+                                The agent should relay these to the user.
+          distance_metric_used (str): the metric actually used for this run
+                                      (may differ from the requested metric
+                                      when the network fallback fires).
     """
     if tool_context is None:
         return {"status": "error", "error_message": "No tool context available."}
@@ -335,7 +354,8 @@ def confirm_optimization(
     problem_type = pending["problem_type"]
     parameters = dict(pending.get("parameters", {}))
     constraints = dict(pending.get("constraints", {}))
-    distance_metric = pending.get("distance_metric", "euclidean")
+    distance_metric = pending.get("distance_metric", "network")
+    strict_network = bool(pending.get("strict_network", False))
 
     registry = get_problem_registry()
     if not registry:
@@ -435,37 +455,76 @@ def confirm_optimization(
         }
 
     # Fetch road-network graph when distance_metric == "network"
+    # On any failure, auto-fall back to geodesic ("euclidean") and surface a
+    # warning in the response -- unless strict_network is set, in which case
+    # the fetch failure is a hard error.
     network_graph = None
-    if distance_metric == "network":
-        nm = get_network_manager()
-        if nm is None:
-            return {
-                "status": "error",
-                "error_message": "NetworkManager not in session. Refresh the page and retry.",
-            }
-        if not nm.is_osmnx_available():
-            return {
-                "status": "error",
-                "error_message": "OSMnx is not installed. Run: pip install osmnx>=1.9.1",
-            }
-        demand_gdf = data_dict.get("demand_points")
-        boundary_gdf = next((data_store[n] for n in boundary_keys), None)
-        boundary_polygon = None
-        if boundary_gdf is not None and len(boundary_gdf) > 0:
-            from shapely.ops import unary_union
-            boundary_polygon = unary_union(boundary_gdf.geometry)
+    network_warnings: list = []
+
+    def _network_fallback(reason: str, source: str = "OpenStreetMap") -> Optional[dict]:
+        """Emit activity-log event + warning, or return an error dict when strict."""
         try:
-            G_proj, crs_proj = nm.get_graph(demand_gdf, boundary_polygon)
-            network_graph = (G_proj, crs_proj)
-        except Exception as exc:
-            logger.error("confirm_optimization: road network fetch error: %s", exc, exc_info=True)
+            from utils.activity_log import log_event
+            log_event(
+                "network.fetch",
+                "fail",
+                detail=reason,
+                source=source,
+            )
+        except Exception:  # activity_log import guarded for test isolation
+            pass
+        if strict_network:
             return {
                 "status": "error",
                 "error_message": (
-                    f"Road network fetch failed: {exc}. "
-                    "Try switching to 'euclidean' distance."
+                    f"Road-network distance requested (strict_network=True) but "
+                    f"the road graph could not be obtained: {reason}. "
+                    "Disable strict_network or switch to 'euclidean' distance."
                 ),
             }
+        msg = (
+            f"Road-network distance unavailable ({reason}); "
+            "falling back to geodesic (straight-line) distance for this run."
+        )
+        network_warnings.append(msg)
+        logger.warning("confirm_optimization: %s", msg)
+        return None
+
+    if distance_metric == "network":
+        nm = get_network_manager()
+        if nm is None:
+            err = _network_fallback("NetworkManager not in session")
+            if err is not None:
+                return err
+            distance_metric = "euclidean"
+        elif not nm.is_osmnx_available():
+            err = _network_fallback("osmnx is not installed")
+            if err is not None:
+                return err
+            distance_metric = "euclidean"
+        else:
+            demand_gdf = data_dict.get("demand_points")
+            boundary_gdf = next((data_store[n] for n in boundary_keys), None)
+            boundary_polygon = None
+            if boundary_gdf is not None and len(boundary_gdf) > 0:
+                try:
+                    from shapely.ops import unary_union
+                    boundary_polygon = unary_union(boundary_gdf.geometry)
+                except Exception:
+                    boundary_polygon = None
+            try:
+                G_proj, crs_proj = nm.get_graph(demand_gdf, boundary_polygon)
+                network_graph = (G_proj, crs_proj)
+            except Exception as exc:
+                logger.error(
+                    "confirm_optimization: road network fetch error: %s",
+                    exc,
+                    exc_info=True,
+                )
+                err = _network_fallback(str(exc))
+                if err is not None:
+                    return err
+                distance_metric = "euclidean"
 
     if network_graph is not None:
         data_dict["_network_graph"] = network_graph
@@ -487,6 +546,8 @@ def confirm_optimization(
         return {
             "status": "error",
             "error_message": f"Solver error: {exc}",
+            "warnings": list(network_warnings),
+            "distance_metric_used": distance_metric,
         }
 
     elapsed = time.time() - start
@@ -527,10 +588,18 @@ def confirm_optimization(
             logger.warning("confirm_optimization: explain_solution failed: %s", exc)
             explanation = f"Optimization completed with status: {solution.get('status')}"
 
+    # Forward any network-fetch fallback warnings so the agent can surface them.
+    combined_warnings: list = list(network_warnings)
+    solver_warnings = solution.get("warnings") if isinstance(solution, dict) else None
+    if isinstance(solver_warnings, list):
+        combined_warnings.extend(solver_warnings)
+
     return {
         "status": solution.get("status", "error"),
         "objective_value": solution.get("objective_value"),
         "num_facilities_selected": len(solution.get("selected_facilities", [])),
         "solution_summary": explanation,
         "error_message": solution.get("error"),
+        "warnings": combined_warnings,
+        "distance_metric_used": distance_metric,
     }

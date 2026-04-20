@@ -180,6 +180,11 @@ def _reset_to_aoi_step() -> None:
     ):
         if k in st.session_state:
             st.session_state[k] = None if "input" not in k else ""
+    # Reset road-network prefetch status so the sidebar pill clears until the
+    # next AOI is confirmed.
+    for k in ("_network_status", "_network_status_error", "_network_status_stats"):
+        if k in st.session_state:
+            st.session_state[k] = None
     st.session_state["_aoi_map_key"] = st.session_state.get("_aoi_map_key", 0) + 1
 
 
@@ -194,6 +199,19 @@ if not st.session_state.problem_state.get("aoi_confirmed"):
         st.session_state.problem_state["aoi"] = confirmed
         st.session_state.problem_state["aoi_confirmed"] = True
         st.session_state.problem_state["data"]["boundary_aoi"] = aoi_gdf
+        # Kick off background road-network prefetch so the first optimisation
+        # (network distance is the default) sees a warm cache.
+        try:
+            from utils.network_manager import launch_prefetch_thread
+            launch_prefetch_thread(
+                st.session_state.network_manager,
+                aoi_gdf,
+                session_state=st.session_state,
+            )
+        except Exception:
+            # Prefetch is best-effort; solvers still auto-fall back if the
+            # graph is missing at solve time.
+            pass
         # Seed a scoped welcome message
         st.session_state.messages = [{
             "role": "assistant",
@@ -248,6 +266,35 @@ if st.session_state.get("_aoi_change_pending"):
                 st.session_state["_aoi_change_pending"] = False
                 st.rerun()
 
+# ---------------------------------------------------------------------------
+# Road-network banner — visible alongside the AOI header so the user knows
+# the road graph is being prefetched (or was fetched / failed) without having
+# to look at the sidebar. Network distance is the default metric.
+# ---------------------------------------------------------------------------
+_net_status_main = st.session_state.get("_network_status")
+if _net_status_main == "fetching":
+    st.info(
+        "Downloading road network from OpenStreetMap for this AOI… "
+        "you can keep talking to the agent; the first optimisation will wait "
+        "for this to finish.",
+        icon="⏳",
+    )
+elif _net_status_main == "failed":
+    _net_err_main = st.session_state.get("_network_status_error") or "unknown error"
+    st.warning(
+        f"Road network could not be downloaded ({_net_err_main}). "
+        "Optimisation will fall back to geodesic (straight-line) distance. "
+        "Use the sidebar's \"Refresh road network\" button to retry.",
+        icon="⚠️",
+    )
+elif _net_status_main == "ready":
+    _net_stats_main = st.session_state.get("_network_status_stats") or {}
+    _nodes_main = _net_stats_main.get("nodes", 0)
+    if _nodes_main:
+        st.caption(
+            f"Road network ready · {_nodes_main:,} nodes cached for this AOI."
+        )
+
 st.divider()
 
 # Sidebar
@@ -255,7 +302,53 @@ with st.sidebar:
     st.title("Spatial Optimization")
     
     st.divider()
-    
+
+    # ------------------------------------------------------------------
+    # Road-network status — network distance is the default metric, so we
+    # surface the prefetch status here. Only renders once the AOI is set.
+    # ------------------------------------------------------------------
+    if st.session_state.problem_state.get("aoi_confirmed"):
+        _net_status = st.session_state.get("_network_status")
+        _net_stats = st.session_state.get("_network_status_stats") or {}
+        _net_err = st.session_state.get("_network_status_error")
+
+        st.subheader("Road network")
+        if _net_status == "ready":
+            nodes = _net_stats.get("nodes", 0)
+            edges = _net_stats.get("edges", 0)
+            st.success(f"Ready — {nodes:,} nodes, {edges:,} edges")
+        elif _net_status == "fetching":
+            st.info("Downloading road network from OpenStreetMap…")
+        elif _net_status == "failed":
+            reason = f" ({_net_err})" if _net_err else ""
+            st.warning(
+                f"Road network unavailable{reason}. "
+                "Optimisation will fall back to geodesic distance."
+            )
+        else:
+            st.caption("Road network not yet fetched.")
+
+        if st.button("Refresh road network", key="_network_refresh_btn"):
+            try:
+                from utils.network_manager import launch_prefetch_thread
+                st.session_state.network_manager.clear_cache()
+                aoi_gdf_refresh = (
+                    st.session_state.problem_state.get("data", {}).get("boundary_aoi")
+                )
+                if aoi_gdf_refresh is not None:
+                    launch_prefetch_thread(
+                        st.session_state.network_manager,
+                        aoi_gdf_refresh,
+                        session_state=st.session_state,
+                    )
+                    st.rerun()
+                else:
+                    st.warning("No AOI boundary found — confirm an AOI first.")
+            except Exception as exc:
+                st.error(f"Could not refresh road network: {exc}")
+
+        st.divider()
+
     # File upload section
     st.subheader("Upload Data")
     st.markdown("Upload geospatial data files (GeoJSON, Shapefile, CSV)")
@@ -841,10 +934,14 @@ def render_map_fragment():
         # Map data to expected format for visualizer (skip boundary/polygon datasets)
         data_processor = st.session_state.data_processor
         mapped_data = {}
+        boundary_gdf_viz_out = None  # AOI polygon surfaced as its own map layer
 
         for file_name, gdf in st.session_state.problem_state["data"].items():
-            # Skip boundary polygons — they are not demand or candidates
+            # Boundary polygons get their own overlay layer so the user always
+            # sees the AOI outline; capture the first one for the map.
             if file_name in _viz_boundary_keys:
+                if boundary_gdf_viz_out is None:
+                    boundary_gdf_viz_out = gdf
                 continue
 
             if file_name in _viz_poi_keys:
@@ -873,6 +970,7 @@ def render_map_fragment():
             with ls_col1:
                 with st.popover("🗺️ Layers", help="Toggle map layers"):
                     st.caption("Layer Visibility")
+                    viz_config["show_boundary"] = st.checkbox("AOI Boundary", value=True, key="pd_show_boundary")
                     viz_config["show_demand"] = st.checkbox("Demand Points", value=True, key="pd_show_demand")
                     viz_config["show_candidates"] = st.checkbox("Candidate Sites", value=True, key="pd_show_candidates")
                     viz_config["show_facilities"] = st.checkbox("Selected Facilities", value=True, key="pd_show_facilities")
@@ -901,7 +999,8 @@ def render_map_fragment():
                 viz_config=viz_config,
                 parameters=parameters,
                 constraints=st.session_state.problem_state.get("constraints", {}),
-                basemap_style=basemap_style
+                basemap_style=basemap_style,
+                boundary=boundary_gdf_viz_out,
             )
             with st.container():
                 legend_html = st.session_state.pydeck_visualizer.generate_legend_html(
@@ -951,7 +1050,8 @@ def render_map_fragment():
                 viz_config=viz_config,
                 parameters=parameters,
                 constraints=st.session_state.problem_state.get("constraints", {}),
-                raster_data=st.session_state.get("raster_data", {})
+                raster_data=st.session_state.get("raster_data", {}),
+                boundary=boundary_gdf_viz_out,
             )
             st_folium(map_obj, width=700, height=500, key="map_frag")
     
