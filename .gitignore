@@ -73,3 +73,6 @@ datasets/**/__pycache__/
 datasets/**/*.py[cod]
 datasets/**/*.pyo
 
+frontend/node_modules
+frontend/.next
+frontend/out

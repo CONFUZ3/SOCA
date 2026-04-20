@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- Design tokens ---------- */
+/* Warm, paper-hued neutrals. Not slate, not zinc, not AI-default grey.  */
+@layer base {
+  :root {
+    --bg: 251 250 247;            /* #fbfaf7 paper */
+    --surface: 255 255 255;
+    --surface-2: 245 243 238;     /* nested surface, inputs */
+    --border: 230 226 218;        /* hairline */
+    --border-strong: 201 195 182;
+    --text: 26 25 23;             /* not #000 */
+    --text-muted: 107 103 96;
+    --text-faint: 155 150 141;
+    --accent: 181 72 46;          /* brick */
+    --accent-soft: 243 230 224;
+    --ok: 58 122 75;
+    --warn: 166 106 27;
+    --err: 163 52 31;
+    --mono-surface: 241 238 231;
+  }
+
+  /* Keep the warm cast in dark mode; invert lightness, not hue. */
+  .dark {
+    --bg: 22 21 19;
+    --surface: 27 26 23;
+    --surface-2: 33 31 28;
+    --border: 56 53 47;
+    --border-strong: 82 77 69;
+    --text: 232 228 220;
+    --text-muted: 165 159 148;
+    --text-faint: 122 117 107;
+    --accent: 215 112 82;
+    --accent-soft: 55 36 29;
+    --ok: 99 176 119;
+    --warn: 204 152 71;
+    --err: 211 98 75;
+    --mono-surface: 38 36 32;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+    font-feature-settings: "cv11", "ss01", "tnum", "calt";
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Slim, engineering-feel scrollbars */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--border) / 1);
+    border: 2px solid rgb(var(--bg) / 1);
+    border-radius: 8px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--border-strong) / 1);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent) / 1);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgb(var(--accent) / 0.18);
+    color: rgb(var(--text) / 1);
+  }
+
+  /* Disable animations for motion-sensitive users. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .hairline-b {
+    @apply border-b border-border;
+  }
+  .hairline-t {
+    @apply border-t border-border;
+  }
+  .hairline-r {
+    @apply border-r border-border;
+  }
+  .hairline-l {
+    @apply border-l border-border;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-1.5 py-0.5 text-2xs font-medium text-text-muted;
+  }
+
+  .mono {
+    @apply font-mono tabular-nums;
+  }
+
+  /* The two heading sizes used across the UI. No more. */
+  .heading-panel {
+    @apply text-xl font-semibold tracking-tight text-text;
+  }
+  .heading-section {
+    @apply text-md font-semibold tracking-tight text-text;
+  }
+
+  /* Subtle button / inline control base — used via the <Button> component */
+  .btn-base {
+    @apply inline-flex items-center justify-center gap-1.5 rounded text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+}

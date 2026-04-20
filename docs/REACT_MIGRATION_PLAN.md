@@ -164,7 +164,7 @@
 
 | Concern | Choice | Why |
 | --- | --- | --- |
-| Framework | **Next.js 15 (App Router)** | User preference. RSC where it helps, Node runtime for API proxying, first-class Docker support, Turbopack dev. |
+| Framework | **Next.js 16.2.4 (App Router) + React 19.2 + Turbopack** | Latest stable. Turbopack default for dev + build in v16. Node 20.9+ required. RSC where it helps, first-class Docker support via `output: "standalone"`. |
 | Language | **TypeScript (strict)** | Agent/solver contracts are best expressed as TS types. |
 | UI primitives | **Radix UI** (headless) + custom components | shadcn for snippets; we own the styling so it doesn't look boilerplate. |
 | Styling | **Tailwind CSS** + CSS variables | Fast iteration + dark-mode-ready. |
