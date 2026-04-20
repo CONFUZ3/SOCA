@@ -164,9 +164,9 @@
 
 | Concern | Choice | Why |
 | --- | --- | --- |
-| Bundler | **Vite** | Fast HMR, first-class TS, minimal config. |
+| Framework | **Next.js 15 (App Router)** | User preference. RSC where it helps, Node runtime for API proxying, first-class Docker support, Turbopack dev. |
 | Language | **TypeScript (strict)** | Agent/solver contracts are best expressed as TS types. |
-| UI primitives | **shadcn/ui** (Radix + Tailwind) | Accessible, copy-own, easy to theme. |
+| UI primitives | **Radix UI** (headless) + custom components | shadcn for snippets; we own the styling so it doesn't look boilerplate. |
 | Styling | **Tailwind CSS** + CSS variables | Fast iteration + dark-mode-ready. |
 | State — server | **TanStack Query** | Deduped fetches, caching, retries. |
 | State — client | **Zustand** | Small, no context boilerplate, great for a multi-panel app. |
@@ -181,35 +181,37 @@
 | PDF export | Backend-generated (existing ReportLab). Browser just downloads the blob. | No JS duplication. |
 | Testing | **Vitest** + **React Testing Library**; **Playwright** for e2e | Same philosophy as existing pytest. |
 
-### Folder layout (new)
+### Folder layout (Next.js 15 App Router)
 
 ```
 frontend/
-  ├─ src/
-  │  ├─ app/                # routes / top-level shells
-  │  ├─ components/
-  │  │  ├─ aoi/             # AoiSelector, AoiHeader
-  │  │  ├─ chat/            # ChatPanel, MessageBubble, ToolCallBubble, AgentStatusDrawer
-  │  │  ├─ map/             # MapCanvas, LayerSelector, LegendOverlay
-  │  │  ├─ metrics/         # MetricsPanel + per-problem renderers
-  │  │  ├─ data/            # UploadDropzone, DatasetList, RasterList, CandidateGenOptions
-  │  │  ├─ export/          # ExportMenu
-  │  │  └─ ui/              # shadcn primitives
-  │  ├─ hooks/              # useChatStream, useActivityStream, useNetworkStatus, …
-  │  ├─ lib/
-  │  │  ├─ api.ts           # fetch wrappers
-  │  │  ├─ sse.ts           # typed EventSource helper
-  │  │  ├─ problem-state.ts # zustand store + JSON-Patch reducer
-  │  │  └─ geo.ts           # area_km2 etc. (or delegate to backend)
-  │  ├─ types/              # ProblemType, Solution, Dataset, ChatEvent…
-  │  └─ styles/
-  ├─ tests/                 # vitest + playwright
-  ├─ public/
-  ├─ index.html
-  ├─ package.json
-  ├─ tsconfig.json
-  ├─ vite.config.ts
-  └─ tailwind.config.ts
+  ├─ app/
+  │  ├─ layout.tsx          # root layout, fonts, ThemeProvider, Providers
+  │  ├─ page.tsx            # workspace shell (AOI gate or main view)
+  │  ├─ globals.css         # design tokens (CSS variables), reset
+  │  └─ api/health/route.ts # trivial liveness
+  ├─ components/
+  │  ├─ aoi/                # AoiSelector, AoiHeader, GeocodeCombobox
+  │  ├─ chat/               # ChatPanel, Composer, Message, ToolCallCard, ActivityRow
+  │  ├─ map/                # MapCanvas, Legend, LayerMenu, BasemapSwitcher
+  │  ├─ metrics/            # MetricsPanel + per-problem renderers
+  │  ├─ data/               # UploadZone, DatasetList, RasterList, CandidateOptions
+  │  ├─ activity/           # ActivityDrawer, NetworkBadge
+  │  ├─ export/             # ExportMenu
+  │  └─ ui/                 # Button, Input, Popover, Dialog, Tabs, Tooltip, Kbd, …
+  ├─ hooks/                 # useChatStream, useActivityStream, useSession, …
+  ├─ lib/
+  │  ├─ api.ts              # fetch wrappers (typed)
+  │  ├─ sse.ts              # typed EventSource helper w/ auto-reconnect
+  │  ├─ store.ts            # zustand store
+  │  ├─ patch.ts            # JSON-Patch reducer (fast-json-patch)
+  │  └─ format.ts           # numbers, distances, durations
+  ├─ types/                 # DTOs matching backend Pydantic models
+  ├─ public/                # static assets (logo, favicons)
+  ├─ next.config.mjs        # rewrites: /api → FastAPI in dev
+  ├─ tailwind.config.ts
+  ├─ postcss.config.mjs
+  └─ package.json
 ```
 
 ---
@@ -446,40 +448,165 @@ Each phase ends in a deployable app. No "big bang" cutover.
 
 ---
 
-## 9. Open Questions for You
+## 9. Visual Design — How to Not Look Like AI Slop
 
-Please confirm or correct the defaults below before I start Phase 0:
+The usual React + Tailwind defaults produce a "landing page template" look that
+reads as AI-generated: centered gradient headers, oversized rounded cards,
+emoji everywhere, six levels of heading weight. We're not doing that.
 
-1. **Deployment target** — Is this staying self-hosted (Streamlit Cloud / a
-   VM / Docker)? I'm planning a single-container build: FastAPI serves the
-   built Vite assets. Any Kubernetes / cloud provider constraints?
+### Reference points (qualitative)
 
-2. **Multi-user** — v1 stays single-session (server-side in-memory store).
-   OK, or do we need per-user persistence now?
+- **Linear** — dense information layout, 12–13px base type, almost no shadows.
+- **Stripe Docs / Stripe Dashboard** — warm neutrals, hairline borders, a
+  single restrained accent.
+- **Figma's UI** — a lot of tool / utility chrome done quietly.
+- **Observable notebooks** — numbers in a monospace face, tight line-height.
 
-3. **Auth** — No auth in v1 (parity with current Streamlit). Add a simple
-   password / OAuth later if needed. Confirm?
+### Tokens (authored as CSS variables in `app/globals.css`)
 
-4. **API surface shape** — OK with SSE for both streams, or do you want me
-   to use WebSockets end-to-end? SSE is simpler and sufficient for
-   one-way server-push; WS only if you anticipate bi-directional needs
-   beyond chat.
+Neutrals on a warm axis, not pure greys.
 
-5. **Styling direction** — shadcn + Tailwind is the fastest route to a
-   "modern, clean" look. Any existing brand palette / logo? Dark mode a
-   hard requirement or nice-to-have?
+```
+--bg:           #fbfaf7     /* paper */
+--surface:      #ffffff
+--surface-2:    #f5f3ee     /* subtle nested surface */
+--border:       #e6e2da     /* hairline */
+--border-strong:#c9c3b6
+--text:         #1a1917     /* not #000 */
+--text-muted:   #6b6760
+--text-faint:   #9b968d
+--accent:       #b5482e     /* brick — restrained, used sparingly */
+--accent-soft:  #f3e6e0
+--ok:           #3a7a4b
+--warn:         #a66a1b
+--err:          #a3341f
+--mono-surface: #f1eee7     /* for code / metrics chips */
+```
 
-6. **Feature flag for the rollout** — Ship React at `/app` while
-   Streamlit still runs at `/legacy`? Or full replacement?
+Dark mode inverts lightness but keeps the warm cast (no pure `#000`, no pure
+`#fff`) — switched via `prefers-color-scheme` and a manual override.
 
-7. **Drawing tool** — MapLibre + MapboxDraw is my preferred map stack
-   (matches PyDeck's basemap vibe). If edit-existing-polygon parity with
-   `folium.plugins.Draw` becomes painful, I'd fall back to React-Leaflet.
-   OK?
+### Type
 
-8. **PDF export** — keep ReportLab on the server (my plan), or move to a
-   client-rendered PDF (e.g. `pdf-lib`)? Server-side keeps one source of
-   truth; client-side would allow "what you see is what you print".
+- **Inter** (via `next/font/google`, subset Latin) for UI — features
+  `cv11, ss01, tnum`; 13px base, 1.45 line-height, never below 12px.
+- **JetBrains Mono** (subset, `tnum`) for metrics, coordinates, durations,
+  numeric deltas. Gives the engineering feel.
+- Two heading sizes only: 20/600 (panel titles) and 15/600 (section titles).
+  Body text and labels are 13/500. No h1…h6 ladder.
+- No uppercase section labels except inside chips (`AOI`, `NETWORK`).
 
-Unless you tell me otherwise, I'll proceed with the defaults above and
-start Phase 0 immediately.
+### Shape & spacing
+
+- Radii: 2 / 4 / 6. No `rounded-2xl`. Cards are 6, buttons 4, chips 2.
+- Borders are 1px hairlines in `--border`. Almost no drop shadows.
+- 8px spacing grid. Dense rows (28–32px tall) for lists like the activity
+  log, not 48px padded cards.
+
+### Motion
+
+- Durations: 120ms for hover/enter, 180ms for panel transitions, 220ms for
+  map layer fades. Easings: `cubic-bezier(.2,.7,.2,1)` (soft enter),
+  `cubic-bezier(.4,0,.2,1)` (standard). No springs.
+- Streaming cursor: subtle vertical bar that blinks at 800ms.
+- No skeleton wobble — use a slow opacity pulse at 1.4s.
+- Reduced-motion respects `prefers-reduced-motion: reduce`.
+
+### Layout (desktop-first, single-screen workspace)
+
+```
+┌──────────────────────────────────────────────────────────┐
+│ Titlebar: logo · AOI chip · network chip · settings · …  │ 44px
+├──────────┬─────────────────────────────┬─────────────────┤
+│          │                             │                 │
+│  Sidebar │        Map canvas            │   Chat panel   │
+│  (data,  │                             │                 │
+│  options,│                             │  ┌────────────┐ │
+│  exports)│                             │  │ Activity   │ │
+│          │                             │  │ drawer     │ │
+│          │                             │  └────────────┘ │
+└──────────┴─────────────────────────────┴─────────────────┘
+ ~260px              flexible, fluid              ~420px
+```
+
+- Resizable split via a 1px drag handle (doesn't jump or animate while
+  dragging).
+- Sidebar collapses to a 44px rail of icons (like VS Code), not a hamburger.
+- Activity drawer is inside the chat panel (tab: `Messages` | `Activity`),
+  not a separate floating overlay — keeps the layout calm.
+
+### Micro-copy
+
+- Avoid "Let's", "✨", exclamation marks, "awesome", "hey".
+- Prefer nouns and short imperatives: "Confirm area", "Refresh network",
+  "Open dataset". "Solving…" not "🔮 Crunching numbers…".
+- Error messages state fact + suggestion + action, in that order. No
+  apologising.
+
+### Chat & tool-call bubbles
+
+- User messages: right-aligned, no bubble, just type on `--surface-2`,
+  indented 32px. Linear / ChatGPT-web style.
+- Assistant messages: left-aligned, no bubble, 13px prose, with a tiny
+  `SOCA` label above the first paragraph of each turn.
+- Tool-call cards: a bordered strip with an icon, a tool name in mono, args
+  truncated with an expandable chevron. Duration ticks up in a mono chip on
+  the right while in-flight.
+- Activity rows nested under a tool-call use a 2px left guide, monospace
+  `stage`, soft `source` tag, duration right-aligned. Mirrors
+  `utils/activity_log` format closely on purpose.
+
+### Map chrome
+
+- Basemap switcher: a 3-button segmented control in the map corner, not a
+  `<select>`. Uses CartoDB Positron / Dark Matter / Voyager (parity with
+  current PyDeck).
+- Layer menu: popover with cmd-palette-ish styling, checkbox rows with
+  keyboard affordances. Keybindings shown with `<Kbd>` chips.
+- Legend: bottom-left, translucent warm-paper panel, hairline border.
+- Deck.gl tooltip: replaces default with our own component (mono labels,
+  subtle border, anchored top-left of cursor).
+
+### Accessibility & craft
+
+- Focus rings: 2px `--accent` with 2px offset, never removed.
+- All interactive elements ≥ 32px in hit area even when visually smaller.
+- Every icon button has a `<Tooltip>` + `aria-label`.
+- Keyboard shortcuts: `/` focus chat, `L` layers, `F` fit, `?` shortcut
+  sheet. `Escape` always dismisses the top-most overlay.
+
+### "Do / Don't" quick list
+
+| Don't | Do |
+| --- | --- |
+| Emoji icons for actions | Lucide icons at 14–16px, `stroke-width=1.5` |
+| `rounded-2xl` buttons | `rounded` (4px) buttons |
+| Gradient hero on empty state | Single sentence of 13px muted text |
+| Six heading sizes | Two heading sizes |
+| `shadow-xl` floating cards | 1px hairline + surface tone shift |
+| "✨ Awesome! Let's…" | Facts first, verbs second |
+| Skeleton wobble | Slow opacity pulse |
+| Generic Tailwind slate/zinc | Warm paper palette (above) |
+
+---
+
+## 10. Open Questions for You
+
+Confirmed so far:
+
+- **Framework**: Next.js 15 (App Router) — user preference.
+- **Deployment**: single Docker container — FastAPI on `:8000`, Next.js on `:3000`, supervised by `supervisord`. Reverse-proxy inside the container.
+- **Auth**: none in v1, planned for later.
+- **Design**: hand-crafted, not AI-slop. See §9.
+
+Still want your call on:
+
+1. **Drawing tool** — MapLibre + `@mapbox/mapbox-gl-draw` first, fall back
+   to React-Leaflet + `leaflet-draw` if polygon-edit parity with
+   `folium.plugins.Draw` becomes painful. OK?
+2. **PDF export** — keep server-rendered ReportLab (single source of truth)
+   or move to client-rendered (e.g. `pdf-lib`)? Server-side is my default.
+3. **Brand mark** — should I keep the neutral "SOCA" wordmark at 15/600
+   weight, or is there an existing logo/brand asset to use?
+
+I'll proceed with the defaults above on anything you don't answer.
