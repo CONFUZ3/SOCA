@@ -1,6 +1,12 @@
 # Core
-streamlit>=1.32.0              # flexible version for compatibility
+streamlit>=1.32.0              # legacy UI (kept during React migration)
 python-dotenv>=1.0.0           # environment variables
+
+# React backend (FastAPI)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+python-multipart>=0.0.9        # file uploads
+httpx>=0.27.0                  # backend tests (httpx.AsyncClient)
 
 # Google Gemini + ADK
 google-genai>=1.0.0            # new unified Gemini API SDK (replaces deprecated google-generativeai)

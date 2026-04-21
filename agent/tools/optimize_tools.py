@@ -535,12 +535,31 @@ def confirm_optimization(
     )
     start = time.time()
     try:
-        solution = problem_solver.solve(
-            data=data_dict,
-            parameters=parameters,
-            constraints=constraints,
-            distance_metric=distance_metric,
+        from utils.activity_log import timed as _solver_timed  # local import keeps tests isolated
+        _solver_ctx = _solver_timed(
+            "solver.run",
+            source=problem_type,
+            detail=f"variant={parameters.get('variant', 'base')}, metric={distance_metric}",
         )
+    except Exception:
+        _solver_ctx = None
+
+    try:
+        if _solver_ctx is not None:
+            with _solver_ctx:
+                solution = problem_solver.solve(
+                    data=data_dict,
+                    parameters=parameters,
+                    constraints=constraints,
+                    distance_metric=distance_metric,
+                )
+        else:
+            solution = problem_solver.solve(
+                data=data_dict,
+                parameters=parameters,
+                constraints=constraints,
+                distance_metric=distance_metric,
+            )
     except Exception as exc:
         logger.error("confirm_optimization: solver error: %s", exc, exc_info=True)
         return {
