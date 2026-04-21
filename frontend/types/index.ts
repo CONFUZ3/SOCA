@@ -92,6 +92,40 @@ export interface ToolCallResult {
   summary: Record<string, unknown>;
 }
 
+export type MapLayerRole =
+  | "boundary"
+  | "demand"
+  | "candidate"
+  | "selected"
+  | "assignment"
+  | "other";
+
+export interface MapViewState {
+  longitude: number;
+  latitude: number;
+  zoom: number;
+}
+
+export interface MapLayer {
+  id: string;
+  role: MapLayerRole;
+  geojson: GeoJSON.FeatureCollection;
+}
+
+export interface MapSolution {
+  status: string;
+  objective_value: number | null;
+  metrics: Record<string, unknown>;
+  n_selected: number;
+  problem_type: string | null;
+}
+
+export interface MapState {
+  view_state: MapViewState;
+  layers: MapLayer[];
+  solution: MapSolution | null;
+}
+
 export interface ProblemInfo {
   short_name: ProblemType;
   name: string;

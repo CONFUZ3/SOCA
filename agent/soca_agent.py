@@ -113,7 +113,7 @@ class SOCAAgent:
         """
         try:
             runner = self._get_runner()
-            session = self._get_or_create_session(problem_state)
+            session = await self._get_or_create_session_async(problem_state)
             self._sync_state_to_session(session, problem_state)
 
             set_current_context(
@@ -287,26 +287,30 @@ class SOCAAgent:
             app_name=_APP_NAME,
         )
 
-    def _get_or_create_session(self, problem_state: Dict[str, Any]):
-        """Return the ADK session for this Streamlit session, creating it once."""
+    async def _get_or_create_session_async(self, problem_state: Dict[str, Any]):
+        """Async version — for use inside a running event loop (FastAPI path)."""
         session_id = problem_state.get("_adk_session_id")
 
         if session_id:
-            session = asyncio.run(self._session_service.get_session(
+            session = await self._session_service.get_session(
                 app_name=_APP_NAME,
                 user_id=_USER_ID,
                 session_id=session_id,
-            ))
+            )
             if session:
                 return session
 
-        session = asyncio.run(self._session_service.create_session(
+        session = await self._session_service.create_session(
             app_name=_APP_NAME,
             user_id=_USER_ID,
-        ))
+        )
         problem_state["_adk_session_id"] = session.id
         logger.debug("SOCAAgent: created new ADK session %s", session.id)
         return session
+
+    def _get_or_create_session(self, problem_state: Dict[str, Any]):
+        """Sync wrapper — for use outside an event loop (Streamlit path)."""
+        return asyncio.run(self._get_or_create_session_async(problem_state))
 
     def _sync_state_to_session(
         self, session, problem_state: Dict[str, Any]
