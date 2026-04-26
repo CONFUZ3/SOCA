@@ -10,9 +10,12 @@ confirm_optimization – Reads staged parameters and runs the solver.  Writes
 import logging
 import time
 import inspect
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from typing import Optional
 
 from google.adk.tools.tool_context import ToolContext
+
+from config.settings import settings
 
 from .state_bridge import (
     get_data,
@@ -24,6 +27,18 @@ from .state_bridge import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _polygon_area_km2(polygon) -> float:
+    """Return the polygon area in km² using a WGS84 geodesic computation."""
+    try:
+        from pyproj import Geod
+        geod = Geod(ellps="WGS84")
+        area_m2, _ = geod.geometry_area_perimeter(polygon)
+        return abs(area_m2) / 1_000_000.0
+    except Exception:
+        return 0.0
+
 
 # Unit conversion factors to metres
 _UNIT_TO_METRES = {
@@ -85,10 +100,10 @@ def _categorise_data(data_store: dict) -> tuple:
                 continue
 
         # POI / facility datasets → candidates
+        from utils.scale_classifier import VALID_POI_CATEGORIES
+
         if "_facilities_" in key_lower or any(
-            key_lower.startswith(cat + "_")
-            for cat in ["health", "education", "food", "finance",
-                        "fire_station", "police", "library"]
+            key_lower.startswith(cat + "_") for cat in VALID_POI_CATEGORIES
         ):
             candidate_keys.add(name)
             continue
@@ -315,6 +330,357 @@ def stage_optimization(
     }
 
 
+def _prepare_solver_inputs(
+    data_store: dict,
+    boundary_keys: set,
+    demand_keys: set,
+    candidate_keys: set,
+    problem_type: str,
+    problem_solver,
+    parameters: dict,
+) -> tuple:
+    """Build data_dict and finalise parameters for the solver.
+
+    Returns (data_dict, updated_parameters, error_dict_or_None).
+    """
+    from utils.data_processor import DataProcessor
+    processor = DataProcessor()
+
+    data_dict: dict = {}
+    for name in demand_keys:
+        data_dict["demand_points"] = data_store[name]
+    for name in candidate_keys:
+        data_dict["candidate_sites"] = data_store[name]
+
+    if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
+        non_boundary = [
+            (n, gdf) for n, gdf in data_store.items() if n not in boundary_keys
+        ]
+        if len(non_boundary) >= 2:
+            data_dict["demand_points"] = non_boundary[0][1]
+            data_dict["candidate_sites"] = non_boundary[1][1]
+        elif len(non_boundary) == 1:
+            data_dict["demand_points"] = non_boundary[0][1]
+
+    if "demand_points" in data_dict and "candidate_sites" not in data_dict:
+        boundary_gdf = next((data_store[n] for n in boundary_keys), None)
+        sampling_gdf = (
+            boundary_gdf if boundary_gdf is not None else data_dict["demand_points"]
+        )
+        num_sites = get_generated_sites_count()
+        seed = get_generated_sites_seed()
+        try:
+            generated = processor.generate_candidate_sites(
+                sampling_gdf, num_sites=num_sites, random_seed=seed
+            )
+            data_dict["candidate_sites"] = generated
+            data_store["generated_candidates"] = generated
+            logger.info(
+                "confirm_optimization: generated %d candidate sites (seed=%s)",
+                num_sites, seed,
+            )
+        except Exception as exc:
+            return None, parameters, {
+                "status": "error",
+                "error_message": f"Failed to generate candidate sites: {exc}",
+            }
+
+    variant = parameters.get("variant", "base")
+    if variant == "capacitated" and "capacities" not in parameters:
+        if "candidate_sites" in data_dict:
+            cap = processor.extract_capacity_data(data_dict["candidate_sites"])
+            if cap:
+                parameters["capacities"] = cap
+            elif "demand_points" in data_dict:
+                demand = processor.extract_demand_data(data_dict["demand_points"])
+                if demand:
+                    n_fac = parameters.get(
+                        "n_facilities", len(data_dict["candidate_sites"])
+                    )
+                    avg_cap = sum(demand) / max(n_fac, 1)
+                    parameters["capacities"] = [avg_cap] * len(
+                        data_dict["candidate_sites"]
+                    )
+
+    if variant == "budget" and "facility_costs" not in parameters:
+        if "candidate_sites" in data_dict:
+            costs = processor.extract_cost_data(data_dict["candidate_sites"])
+            if costs:
+                parameters["facility_costs"] = costs
+            else:
+                parameters["variant"] = (
+                    "base" if problem_type == "p-median" else "classical"
+                )
+
+    if "demand_points" in data_dict:
+        data_dict["demand_points"] = processor.add_default_weights(
+            data_dict["demand_points"], weight_column="default_weight"
+        )
+
+    required_data = problem_solver.get_required_data()
+    missing = [
+        k for k, v in required_data.items()
+        if v.get("required") and k not in data_dict
+    ]
+    if missing:
+        return None, parameters, {
+            "status": "error",
+            "error_message": f"Missing required data: {', '.join(missing)}",
+        }
+
+    return data_dict, parameters, None
+
+
+def _fetch_network_graph(
+    distance_metric: str,
+    strict_network: bool,
+    data_dict: dict,
+    boundary_keys: set,
+    data_store: dict,
+) -> tuple:
+    """Fetch OSM road-network graph for network-distance solves.
+
+    Returns (network_graph_or_None, resolved_metric, warnings, error_or_None).
+    error_or_None is non-None only when strict_network=True and fetch fails.
+    """
+    if distance_metric != "network":
+        return None, distance_metric, [], None
+
+    network_warnings: list = []
+    nm = get_network_manager()
+
+    def _fallback(reason: str, source: str = "OpenStreetMap"):
+        try:
+            from utils.activity_log import log_event
+            log_event("network.fetch", "fail", detail=reason, source=source)
+        except Exception:
+            pass
+        if strict_network:
+            return {
+                "status": "error",
+                "error_message": (
+                    f"Road-network distance requested (strict_network=True) but "
+                    f"the road graph could not be obtained: {reason}. "
+                    "Disable strict_network or switch to 'euclidean' distance."
+                ),
+            }
+        msg = (
+            f"Road-network distance unavailable ({reason}); "
+            "falling back to geodesic (straight-line) distance for this run."
+        )
+        network_warnings.append(msg)
+        logger.warning("confirm_optimization: %s", msg)
+        return None
+
+    if nm is None:
+        err = _fallback("NetworkManager not in session")
+        return None, "euclidean", network_warnings, err
+    if not nm.is_osmnx_available():
+        err = _fallback("osmnx is not installed")
+        return None, "euclidean", network_warnings, err
+
+    demand_gdf = data_dict.get("demand_points")
+    boundary_gdf = next((data_store[n] for n in boundary_keys), None)
+    boundary_polygon = None
+    if boundary_gdf is not None and len(boundary_gdf) > 0:
+        try:
+            from shapely.ops import unary_union
+            boundary_polygon = unary_union(boundary_gdf.geometry)
+        except Exception:
+            boundary_polygon = None
+
+    max_area_km2 = float(getattr(settings, "NETWORK_FETCH_MAX_AREA_KM2", 10_000.0))
+    if not strict_network and boundary_polygon is not None and max_area_km2 > 0:
+        aoi_area = _polygon_area_km2(boundary_polygon)
+        if aoi_area > max_area_km2:
+            reason = (
+                f"AOI area {aoi_area:,.0f} km² exceeds "
+                f"NETWORK_FETCH_MAX_AREA_KM2={max_area_km2:,.0f} km²"
+            )
+            _fallback(reason)
+            return None, "euclidean", network_warnings, None
+
+    fetch_timeout = float(getattr(settings, "NETWORK_FETCH_TIMEOUT", 45.0))
+    try:
+        with ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="netfetch"
+        ) as pool:
+            future = pool.submit(nm.get_graph, demand_gdf, boundary_polygon)
+            try:
+                G_proj, crs_proj = future.result(timeout=fetch_timeout)
+                return (G_proj, crs_proj), distance_metric, network_warnings, None
+            except FutureTimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"road-network fetch exceeded {fetch_timeout:.0f}s wall-clock"
+                )
+    except Exception as exc:
+        logger.error(
+            "confirm_optimization: road network fetch error: %s", exc, exc_info=True
+        )
+        err = _fallback(str(exc))
+        return None, "euclidean", network_warnings, err
+
+
+def _run_solver_with_timeout(
+    problem_solver,
+    data_dict: dict,
+    parameters: dict,
+    constraints: dict,
+    distance_metric: str,
+    wall_clock: float,
+    problem_type: str,
+    network_warnings: list,
+) -> tuple:
+    """Dispatch solver in a thread pool with a hard wall-clock limit.
+
+    Returns (solution, elapsed_s, error_result_or_None).
+    """
+    try:
+        from utils.activity_log import timed as _solver_timed, log_event
+        solver_ctx = _solver_timed(
+            "solver.run",
+            source=problem_type,
+            detail=f"variant={parameters.get('variant', 'base')}, metric={distance_metric}",
+        )
+    except Exception:
+        solver_ctx = None
+        log_event = None  # type: ignore[assignment]
+
+    logger.info(
+        "confirm_optimization: solving %s with params %s", problem_type, parameters
+    )
+    start = time.time()
+
+    def _run():
+        return problem_solver.solve(
+            data=data_dict,
+            parameters=parameters,
+            constraints=constraints,
+            distance_metric=distance_metric,
+        )
+
+    def _submit():
+        with ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="solver"
+        ) as pool:
+            future = pool.submit(_run)
+            try:
+                return future.result(timeout=wall_clock)
+            except FutureTimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"solver exceeded wall-clock budget of {wall_clock:.0f}s"
+                )
+
+    try:
+        if solver_ctx is not None:
+            with solver_ctx:
+                solution = _submit()
+        else:
+            solution = _submit()
+    except TimeoutError as exc:
+        logger.error("confirm_optimization: %s", exc)
+        if log_event:
+            try:
+                log_event("solver.run", "fail", str(exc), source=problem_type)
+            except Exception:
+                pass
+        warn = (
+            f"Solver stopped after {wall_clock:.0f}s wall-clock limit. "
+            "Try a smaller AOI, switch to 'euclidean' distance, or reduce "
+            "demand density."
+        )
+        return None, time.time() - start, {
+            "status": "timeout",
+            "objective_value": None,
+            "num_facilities_selected": 0,
+            "solution_summary": warn,
+            "error_message": str(exc),
+            "warnings": list(network_warnings) + [warn],
+            "distance_metric_used": distance_metric,
+        }
+    except Exception as exc:
+        logger.error("confirm_optimization: solver error: %s", exc, exc_info=True)
+        return None, time.time() - start, {
+            "status": "error",
+            "error_message": f"Solver error: {exc}",
+            "warnings": list(network_warnings),
+            "distance_metric_used": distance_metric,
+        }
+
+    elapsed = time.time() - start
+    logger.info(
+        "confirm_optimization: solved in %.2fs, status=%s",
+        elapsed, solution.get("status"),
+    )
+    return solution, elapsed, None
+
+
+def _enrich_and_explain(
+    solution: dict,
+    problem_solver,
+    parameters: dict,
+    data_dict: dict,
+    problem_type: str,
+    distance_metric: str,
+    network_warnings: list,
+    elapsed: float,
+) -> tuple:
+    """Augment raw solver output with run context and generate explanation.
+
+    Returns (enriched_solution, explanation_text).
+    """
+    try:
+        existing = solution.get("warnings") if isinstance(solution, dict) else None
+        merged = list(network_warnings)
+        if isinstance(existing, list):
+            merged.extend(existing)
+        solver_name = (
+            (solution.get("solver_details") or {}).get("solver")
+            if isinstance(solution, dict)
+            else None
+        )
+        solution["distance_metric_used"] = distance_metric
+        solution["warnings"] = merged
+        solution["problem_type"] = problem_type
+        solution["variant"] = parameters.get("variant", "base")
+        solution["solver_time_seconds"] = float(
+            solution.get("solution_time", elapsed) or elapsed
+        )
+        solution["solver"] = solver_name or solution.get("solver") or "unknown"
+        sr = parameters.get("service_radius")
+        if sr is not None:
+            try:
+                solution["service_radius_m"] = float(sr)
+            except (TypeError, ValueError):
+                pass
+    except Exception as exc:
+        logger.warning("confirm_optimization: solution enrichment failed: %s", exc)
+
+    explanation = ""
+    if solution.get("status") != "error":
+        try:
+            sig = inspect.signature(problem_solver.explain_solution)
+            kwargs: dict = {
+                "solution": solution,
+                "data": data_dict,
+                "detail_level": "standard",
+            }
+            if "objective_type" in sig.parameters:
+                kwargs["objective_type"] = parameters.get("objective", "total")
+            explanation = problem_solver.explain_solution(**kwargs)
+        except Exception as exc:
+            logger.warning(
+                "confirm_optimization: explain_solution failed: %s", exc
+            )
+            explanation = (
+                f"Optimization completed with status: {solution.get('status')}"
+            )
+
+    return solution, explanation
+
+
 def confirm_optimization(
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
@@ -331,12 +697,8 @@ def confirm_optimization(
           num_facilities_selected (int | None)
           solution_summary (str): human-readable result
           error_message (str | None)
-          warnings (list[str]): non-fatal warnings (e.g. a road-network fetch
-                                failure that triggered the geodesic fallback).
-                                The agent should relay these to the user.
-          distance_metric_used (str): the metric actually used for this run
-                                      (may differ from the requested metric
-                                      when the network fallback fires).
+          warnings (list[str]): non-fatal warnings (e.g. road-network fallback).
+          distance_metric_used (str): the metric actually used for this run.
     """
     if tool_context is None:
         return {"status": "error", "error_message": "No tool context available."}
@@ -360,7 +722,6 @@ def confirm_optimization(
     registry = get_problem_registry()
     if not registry:
         return {"status": "error", "error_message": "Problem registry not available."}
-
     problem_solver = registry.get_problem(problem_type)
     if not problem_solver:
         return {
@@ -368,246 +729,76 @@ def confirm_optimization(
             "error_message": f"Problem type '{problem_type}' not found in registry.",
         }
 
-    from utils.data_processor import DataProcessor
-    processor = DataProcessor()
     data_store = get_data()
     ps = get_problem_state()
-
     boundary_keys, demand_keys, candidate_keys = _categorise_data(data_store)
 
-    # Build data_dict for solver
-    data_dict: dict = {}
-    for name in demand_keys:
-        data_dict["demand_points"] = data_store[name]
-    for name in candidate_keys:
-        data_dict["candidate_sites"] = data_store[name]
+    data_dict, parameters, err = _prepare_solver_inputs(
+        data_store, boundary_keys, demand_keys, candidate_keys,
+        problem_type, problem_solver, parameters,
+    )
+    if err is not None:
+        return err
 
-    # Last-resort: distribute non-boundary data
-    if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
-        non_boundary = [
-            (n, gdf) for n, gdf in data_store.items() if n not in boundary_keys
-        ]
-        if len(non_boundary) >= 2:
-            data_dict["demand_points"] = non_boundary[0][1]
-            data_dict["candidate_sites"] = non_boundary[1][1]
-        elif len(non_boundary) == 1:
-            data_dict["demand_points"] = non_boundary[0][1]
-
-    # Generate candidate sites if missing
-    if "demand_points" in data_dict and "candidate_sites" not in data_dict:
-        boundary_gdf = next(
-            (data_store[n] for n in boundary_keys), None
-        )
-        sampling_gdf = boundary_gdf if boundary_gdf is not None else data_dict["demand_points"]
-        num_sites = get_generated_sites_count()
-        seed = get_generated_sites_seed()
-        try:
-            generated = processor.generate_candidate_sites(
-                sampling_gdf, num_sites=num_sites, random_seed=seed
-            )
-            data_dict["candidate_sites"] = generated
-            data_store["generated_candidates"] = generated
-            logger.info(
-                "confirm_optimization: generated %d candidate sites (seed=%s)",
-                num_sites, seed,
-            )
-        except Exception as exc:
-            return {
-                "status": "error",
-                "error_message": f"Failed to generate candidate sites: {exc}",
-            }
-
-    # Auto-detect variant-specific data
-    variant = parameters.get("variant", "base")
-    if variant == "capacitated" and "capacities" not in parameters:
-        if "candidate_sites" in data_dict:
-            cap = processor.extract_capacity_data(data_dict["candidate_sites"])
-            if cap:
-                parameters["capacities"] = cap
-            elif "demand_points" in data_dict:
-                demand = processor.extract_demand_data(data_dict["demand_points"])
-                if demand:
-                    n_fac = parameters.get("n_facilities", len(data_dict["candidate_sites"]))
-                    avg_cap = sum(demand) / max(n_fac, 1)
-                    parameters["capacities"] = [avg_cap] * len(data_dict["candidate_sites"])
-
-    if variant == "budget" and "facility_costs" not in parameters:
-        if "candidate_sites" in data_dict:
-            costs = processor.extract_cost_data(data_dict["candidate_sites"])
-            if costs:
-                parameters["facility_costs"] = costs
-            else:
-                parameters["variant"] = "base" if problem_type == "p-median" else "classical"
-
-    # Add default weights
-    if "demand_points" in data_dict:
-        data_dict["demand_points"] = processor.add_default_weights(
-            data_dict["demand_points"], weight_column="default_weight"
-        )
-
-    # Validate required data
-    required_data = problem_solver.get_required_data()
-    missing = [k for k, v in required_data.items() if v.get("required") and k not in data_dict]
-    if missing:
-        return {
-            "status": "error",
-            "error_message": f"Missing required data: {', '.join(missing)}",
-        }
-
-    # Fetch road-network graph when distance_metric == "network"
-    # On any failure, auto-fall back to geodesic ("euclidean") and surface a
-    # warning in the response -- unless strict_network is set, in which case
-    # the fetch failure is a hard error.
-    network_graph = None
-    network_warnings: list = []
-
-    def _network_fallback(reason: str, source: str = "OpenStreetMap") -> Optional[dict]:
-        """Emit activity-log event + warning, or return an error dict when strict."""
-        try:
-            from utils.activity_log import log_event
-            log_event(
-                "network.fetch",
-                "fail",
-                detail=reason,
-                source=source,
-            )
-        except Exception:  # activity_log import guarded for test isolation
-            pass
-        if strict_network:
-            return {
-                "status": "error",
-                "error_message": (
-                    f"Road-network distance requested (strict_network=True) but "
-                    f"the road graph could not be obtained: {reason}. "
-                    "Disable strict_network or switch to 'euclidean' distance."
-                ),
-            }
-        msg = (
-            f"Road-network distance unavailable ({reason}); "
-            "falling back to geodesic (straight-line) distance for this run."
-        )
-        network_warnings.append(msg)
-        logger.warning("confirm_optimization: %s", msg)
-        return None
-
-    if distance_metric == "network":
-        nm = get_network_manager()
-        if nm is None:
-            err = _network_fallback("NetworkManager not in session")
-            if err is not None:
-                return err
-            distance_metric = "euclidean"
-        elif not nm.is_osmnx_available():
-            err = _network_fallback("osmnx is not installed")
-            if err is not None:
-                return err
-            distance_metric = "euclidean"
-        else:
-            demand_gdf = data_dict.get("demand_points")
-            boundary_gdf = next((data_store[n] for n in boundary_keys), None)
-            boundary_polygon = None
-            if boundary_gdf is not None and len(boundary_gdf) > 0:
-                try:
-                    from shapely.ops import unary_union
-                    boundary_polygon = unary_union(boundary_gdf.geometry)
-                except Exception:
-                    boundary_polygon = None
-            try:
-                G_proj, crs_proj = nm.get_graph(demand_gdf, boundary_polygon)
-                network_graph = (G_proj, crs_proj)
-            except Exception as exc:
-                logger.error(
-                    "confirm_optimization: road network fetch error: %s",
-                    exc,
-                    exc_info=True,
-                )
-                err = _network_fallback(str(exc))
-                if err is not None:
-                    return err
-                distance_metric = "euclidean"
-
+    network_graph, distance_metric, network_warnings, err = _fetch_network_graph(
+        distance_metric, strict_network, data_dict, boundary_keys, data_store,
+    )
+    if err is not None:
+        return err
     if network_graph is not None:
         data_dict["_network_graph"] = network_graph
 
-    # Run solver
-    logger.info(
-        "confirm_optimization: solving %s with params %s", problem_type, parameters
-    )
-    start = time.time()
+    # Model-size guard: shorten MIP budget for large instances so the GA
+    # fallback kicks in before Python model-building dominates.
     try:
-        from utils.activity_log import timed as _solver_timed  # local import keeps tests isolated
-        _solver_ctx = _solver_timed(
-            "solver.run",
-            source=problem_type,
-            detail=f"variant={parameters.get('variant', 'base')}, metric={distance_metric}",
-        )
+        n_demand = len(data_dict.get("demand_points", []))
+        n_cand = len(data_dict.get("candidate_sites", []))
     except Exception:
-        _solver_ctx = None
+        n_demand = n_cand = 0
+    model_size = n_demand * n_cand
+    size_limit = int(getattr(settings, "MIP_MODEL_SIZE_LIMIT", 300_000))
+    if size_limit > 0 and model_size > size_limit:
+        msg = (
+            f"Large model detected ({n_demand:,} demand × {n_cand:,} candidates "
+            f"= {model_size:,} pairs, limit {size_limit:,}). "
+            "Shortening MIP budget and relying on the genetic-algorithm fallback."
+        )
+        logger.warning("confirm_optimization: %s", msg)
+        network_warnings.append(msg)
+        parameters.setdefault("fallback_time_limit_seconds", 10.0)
 
-    try:
-        if _solver_ctx is not None:
-            with _solver_ctx:
-                solution = problem_solver.solve(
-                    data=data_dict,
-                    parameters=parameters,
-                    constraints=constraints,
-                    distance_metric=distance_metric,
-                )
-        else:
-            solution = problem_solver.solve(
-                data=data_dict,
-                parameters=parameters,
-                constraints=constraints,
-                distance_metric=distance_metric,
-            )
-    except Exception as exc:
-        logger.error("confirm_optimization: solver error: %s", exc, exc_info=True)
-        return {
-            "status": "error",
-            "error_message": f"Solver error: {exc}",
-            "warnings": list(network_warnings),
-            "distance_metric_used": distance_metric,
-        }
-
-    elapsed = time.time() - start
-    logger.info(
-        "confirm_optimization: solved in %.2fs, status=%s", elapsed, solution.get("status")
+    parameters.setdefault(
+        "fallback_time_limit_seconds", float(settings.SOLVER_MIP_TIME_LIMIT)
+    )
+    parameters.setdefault(
+        "ga_time_budget_seconds", float(settings.SOLVER_GA_TIME_LIMIT)
     )
 
-    # Write solution to Streamlit problem_state
+    wall_clock = float(settings.SOLVER_WALL_CLOCK_TIMEOUT)
+    solution, elapsed, err = _run_solver_with_timeout(
+        problem_solver, data_dict, parameters, constraints,
+        distance_metric, wall_clock, problem_type, network_warnings,
+    )
+    if err is not None:
+        return err
+
+    solution, explanation = _enrich_and_explain(
+        solution, problem_solver, parameters, data_dict,
+        problem_type, distance_metric, network_warnings, elapsed,
+    )
+
     ps["solution"] = solution
     ps["solution_history"] = ps.get("solution_history", [])
     ps["solution_history"].append(solution)
 
-    # Update ADK session state with summary
-    summary_dict = {
-        "status": solution.get("status"),
-        "objective_value": solution.get("objective_value"),
-        "num_facilities": len(solution.get("selected_facilities", [])),
-    }
     if tool_context is not None:
-        tool_context.state["solution_summary"] = summary_dict
-        # Clear pending after successful run
+        tool_context.state["solution_summary"] = {
+            "status": solution.get("status"),
+            "objective_value": solution.get("objective_value"),
+            "num_facilities": len(solution.get("selected_facilities", [])),
+        }
         tool_context.state["pending_optimization"] = None
 
-    # Generate explanation
-    explanation = ""
-    if solution.get("status") != "error":
-        try:
-            sig = inspect.signature(problem_solver.explain_solution)
-            kwargs = {
-                "solution": solution,
-                "data": data_dict,
-                "detail_level": "standard",
-            }
-            if "objective_type" in sig.parameters:
-                kwargs["objective_type"] = parameters.get("objective", "total")
-            explanation = problem_solver.explain_solution(**kwargs)
-        except Exception as exc:
-            logger.warning("confirm_optimization: explain_solution failed: %s", exc)
-            explanation = f"Optimization completed with status: {solution.get('status')}"
-
-    # Forward any network-fetch fallback warnings so the agent can surface them.
     combined_warnings: list = list(network_warnings)
     solver_warnings = solution.get("warnings") if isinstance(solution, dict) else None
     if isinstance(solver_warnings, list):

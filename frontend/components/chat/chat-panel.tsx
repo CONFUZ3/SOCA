@@ -3,71 +3,52 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "@/lib/store";
 import { useChat } from "@/hooks/use-chat";
+import { useSession } from "@/hooks/use-session";
 import { Composer } from "./composer";
 import { Message } from "./message";
-import { ActivityList } from "@/components/activity/activity-list";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+import { ActivityGroupCard } from "./activity-group-card";
+import { NetworkStatusStrip } from "./network-status-strip";
 
 export function ChatPanel() {
-  const turns = useStore((s) => s.turns);
+  const items = useStore((s) => s.items);
   const scrollerRef = useRef<HTMLDivElement>(null);
-  const { send, cancel, busy } = useChat(() => {
-    // nothing after turn — the store handles it.
-  });
+  const { refresh } = useSession();
+  const { send, cancel, busy } = useChat(refresh);
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [turns]);
+  }, [items]);
 
   return (
     <section className="flex h-full w-full flex-col">
-      <Tabs defaultValue="chat" className="flex h-full min-h-0 flex-col">
-        <div className="flex items-center justify-between px-3 pt-2.5 pb-2">
-          <TabsList>
-            <TabsTrigger value="chat">Messages</TabsTrigger>
-            <TabsTrigger value="activity">Activity</TabsTrigger>
-          </TabsList>
-        </div>
+      <NetworkStatusStrip />
 
-        <TabsContent
-          value="chat"
-          className="flex min-h-0 flex-1 flex-col focus:outline-none"
-        >
-          <div
-            ref={scrollerRef}
-            className="flex-1 overflow-y-auto px-3 pb-2"
-          >
-            {turns.length === 0 ? (
-              <EmptyChat />
-            ) : (
-              <div className="mx-auto max-w-3xl">
-                {turns.map((t) => (
-                  <Message key={t.id} turn={t} />
-                ))}
-              </div>
+      <div
+        ref={scrollerRef}
+        className="flex-1 min-h-0 overflow-y-auto px-3 pb-2 pt-2"
+      >
+        {items.length === 0 ? (
+          <EmptyChat />
+        ) : (
+          <div className="mx-auto max-w-3xl">
+            {items.map((item) =>
+              item.kind === "turn" ? (
+                <Message key={item.id} turn={item} />
+              ) : (
+                <ActivityGroupCard key={item.id} group={item} />
+              ),
             )}
           </div>
-          <div className="border-t border-border bg-surface/80 px-3 py-2 backdrop-blur">
-            <div className="mx-auto max-w-3xl">
-              <Composer onSend={send} onCancel={cancel} busy={busy} />
-            </div>
-          </div>
-        </TabsContent>
+        )}
+      </div>
 
-        <TabsContent
-          value="activity"
-          className="min-h-0 flex-1 overflow-y-auto px-3 pb-3 focus:outline-none"
-        >
-          <ActivityList />
-        </TabsContent>
-      </Tabs>
+      <div className="border-t border-border bg-surface/80 px-3 py-2 backdrop-blur">
+        <div className="mx-auto max-w-3xl">
+          <Composer onSend={send} onCancel={cancel} busy={busy} />
+        </div>
+      </div>
     </section>
   );
 }
@@ -78,8 +59,8 @@ function EmptyChat() {
       <div className="heading-section">Start a conversation</div>
       <p className="mt-1.5 text-sm text-text-muted">
         Describe the problem in plain English. SOCA picks the right
-        optimisation model, fetches data, and shows every step — the map
-        updates as tools run.
+        optimisation model, fetches data, and shows every step inline —
+        sources, timing, and progress all appear here as it works.
       </p>
       <ul className="mt-4 space-y-1.5 text-sm text-text">
         <li className="rounded border border-border bg-surface px-2.5 py-1.5">

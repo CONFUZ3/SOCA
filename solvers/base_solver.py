@@ -1,6 +1,53 @@
 from abc import ABC, abstractmethod
+import logging
 from typing import Dict, List, Any, Optional
 import geopandas as gpd
+
+from config.settings import settings
+
+logger = logging.getLogger(__name__)
+
+
+def configure_gurobi_model(model, time_limit_seconds: Optional[float] = None) -> None:
+    """Apply SOCA's standard Gurobi tuning to an existing ``gurobipy.Model``.
+
+    Centralising this avoids every solver copy-pasting (or silently *omitting*)
+    parameters.  Controls are sourced from :mod:`config.settings` so ops can
+    tune a deployment from environment variables without code changes.
+
+    Parameters
+    ----------
+    model:
+        A ``gurobipy.Model`` instance to configure.
+    time_limit_seconds:
+        Explicit per-call override; if ``None`` we fall back to
+        ``settings.SOLVER_MIP_TIME_LIMIT``.
+    """
+    try:
+        model.setParam("OutputFlag", 0)
+        tl = float(time_limit_seconds) if time_limit_seconds is not None else float(
+            settings.SOLVER_MIP_TIME_LIMIT
+        )
+        model.setParam("TimeLimit", tl)
+        model.setParam("MIPGap", float(settings.MIP_GAP))
+        model.setParam("Presolve", int(settings.GUROBI_PRESOLVE))
+        model.setParam("Cuts", int(settings.GUROBI_CUTS))
+        model.setParam("Heuristics", float(settings.GUROBI_HEURISTICS))
+        model.setParam("MIPFocus", int(settings.GUROBI_MIP_FOCUS))
+        if int(settings.GUROBI_THREADS) > 0:
+            model.setParam("Threads", int(settings.GUROBI_THREADS))
+        logger.debug(
+            "Gurobi configured: TimeLimit=%.1fs MIPGap=%.3f Presolve=%d Cuts=%d "
+            "Heuristics=%.2f MIPFocus=%d",
+            tl,
+            float(settings.MIP_GAP),
+            int(settings.GUROBI_PRESOLVE),
+            int(settings.GUROBI_CUTS),
+            float(settings.GUROBI_HEURISTICS),
+            int(settings.GUROBI_MIP_FOCUS),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Failed to apply Gurobi tuning params: %s", exc)
 
 class SpatialOptimizationProblem(ABC):
     """

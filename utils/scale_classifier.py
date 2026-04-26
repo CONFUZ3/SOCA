@@ -29,6 +29,21 @@ SCALE_ADMIN_LEVELS: dict[str, int] = {
     "neighborhood": 9,
 }
 
+# Supported POI/facility categories.  Mirrors DataFetcher.OVERTURE_CATEGORIES
+# and is shared by the ADK fetch tool and the optimisation categoriser.
+VALID_POI_CATEGORIES: tuple[str, ...] = (
+    "health",
+    "education",
+    "food",
+    "finance",
+    "fire_station",
+    "police",
+    "library",
+    "transport",
+    "water",
+    "emergency",
+)
+
 # Bbox expansion buffer in degrees per scale tier.
 # Overture queries require a bbox seed from a geocoder; the buffer must be
 # large enough to contain the actual polygon at that scale.

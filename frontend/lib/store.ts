@@ -14,6 +14,7 @@ import type {
 } from "@/types";
 
 export interface ChatTurn {
+  kind: "turn";
   /** Stable id for React keying. */
   id: string;
   role: "user" | "assistant";
@@ -32,11 +33,21 @@ export interface ChatTurnToolCall {
   activity: ActivityEvent[];
 }
 
+export interface ActivityGroup {
+  kind: "activity-group";
+  id: string;
+  events: ActivityEvent[];
+}
+
+export type ChatItem = ChatTurn | ActivityGroup;
+
+/** Activity events within this many ms get coalesced into the same group. */
+const ACTIVITY_GROUP_WINDOW_MS = 4_000;
+
 interface State {
   snapshot: SessionSnapshot | null;
   ready: boolean;
-  turns: ChatTurn[];
-  activity: ActivityEvent[];
+  items: ChatItem[];
   network: NetworkState;
   datasets: DatasetSummary[];
 
@@ -56,31 +67,49 @@ interface State {
 const uid = () =>
   `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
-export const useStore = create<State>((set, get) => ({
+function findTurn(items: ChatItem[], turnId: string): ChatTurn | undefined {
+  return items.find(
+    (it): it is ChatTurn => it.kind === "turn" && it.id === turnId,
+  );
+}
+
+function mapTurn(
+  items: ChatItem[],
+  turnId: string,
+  fn: (t: ChatTurn) => ChatTurn,
+): ChatItem[] {
+  return items.map((it) =>
+    it.kind === "turn" && it.id === turnId ? fn(it) : it,
+  );
+}
+
+export const useStore = create<State>((set) => ({
   snapshot: null,
   ready: false,
-  turns: [],
-  activity: [],
+  items: [],
   network: { status: null, error: null, stats: null },
   datasets: [],
 
   setSnapshot: (s) =>
     set(() => {
-      const turns: ChatTurn[] = (s.messages || []).map((m: ChatMessage) => ({
-        id: uid(),
-        role: m.role === "assistant" ? "assistant" : "user",
-        content: m.content,
-        toolCalls: (m.tool_calls || []).map((name) => ({
-          name,
-          args: {},
-          startedAt: 0,
-          activity: [],
-        })),
-      }));
+      const items: ChatItem[] = (s.messages || []).map(
+        (m: ChatMessage): ChatTurn => ({
+          kind: "turn",
+          id: uid(),
+          role: m.role === "assistant" ? "assistant" : "user",
+          content: m.content,
+          toolCalls: (m.tool_calls || []).map((name) => ({
+            name,
+            args: {},
+            startedAt: 0,
+            activity: [],
+          })),
+        }),
+      );
       return {
         snapshot: s,
         ready: true,
-        turns,
+        items,
         network: s.network || { status: null },
         datasets: s.datasets || [],
       };
@@ -89,9 +118,15 @@ export const useStore = create<State>((set, get) => ({
   appendUserTurn: (text) => {
     const id = uid();
     set((st) => ({
-      turns: [
-        ...st.turns,
-        { id, role: "user", content: text, toolCalls: [] },
+      items: [
+        ...st.items,
+        {
+          kind: "turn",
+          id,
+          role: "user",
+          content: text,
+          toolCalls: [],
+        },
       ],
     }));
     return id;
@@ -100,9 +135,10 @@ export const useStore = create<State>((set, get) => ({
   appendAssistantTurn: () => {
     const id = uid();
     set((st) => ({
-      turns: [
-        ...st.turns,
+      items: [
+        ...st.items,
         {
+          kind: "turn",
           id,
           role: "assistant",
           content: "",
@@ -116,42 +152,36 @@ export const useStore = create<State>((set, get) => ({
 
   appendAssistantToken: (turnId, text) =>
     set((st) => ({
-      turns: st.turns.map((t) =>
-        t.id === turnId
-          ? { ...t, content: (t.content || "") + text }
-          : t,
-      ),
+      items: mapTurn(st.items, turnId, (t) => ({
+        ...t,
+        content: (t.content || "") + text,
+      })),
     })),
 
   appendToolCallStart: (turnId, tc) =>
     set((st) => ({
-      turns: st.turns.map((t) =>
-        t.id === turnId
-          ? {
-              ...t,
-              toolCalls: [
-                ...t.toolCalls,
-                {
-                  name: tc.name,
-                  args: tc.args || {},
-                  startedAt: Date.now(),
-                  activity: [],
-                },
-              ],
-            }
-          : t,
-      ),
+      items: mapTurn(st.items, turnId, (t) => ({
+        ...t,
+        toolCalls: [
+          ...t.toolCalls,
+          {
+            name: tc.name,
+            args: tc.args || {},
+            startedAt: Date.now(),
+            activity: [],
+          },
+        ],
+      })),
     })),
 
   appendToolCallResult: (turnId, tc) =>
     set((st) => ({
-      turns: st.turns.map((t) => {
-        if (t.id !== turnId) return t;
-        const idx = [...t.toolCalls].reverse().findIndex(
-          (x) => x.name === tc.name && !x.finishedAt,
-        );
-        if (idx < 0) return t;
-        const realIdx = t.toolCalls.length - 1 - idx;
+      items: mapTurn(st.items, turnId, (t) => {
+        const revIdx = [...t.toolCalls]
+          .reverse()
+          .findIndex((x) => x.name === tc.name && !x.finishedAt);
+        if (revIdx < 0) return t;
+        const realIdx = t.toolCalls.length - 1 - revIdx;
         const next = [...t.toolCalls];
         next[realIdx] = {
           ...next[realIdx],
@@ -164,31 +194,29 @@ export const useStore = create<State>((set, get) => ({
 
   finalizeTurn: (turnId, text) =>
     set((st) => ({
-      turns: st.turns.map((t) =>
-        t.id === turnId
-          ? { ...t, content: text || t.content, pending: false }
-          : t,
-      ),
+      items: mapTurn(st.items, turnId, (t) => ({
+        ...t,
+        content: text || t.content,
+        pending: false,
+      })),
     })),
 
   errorTurn: (turnId, message) =>
     set((st) => ({
-      turns: st.turns.map((t) =>
-        t.id === turnId
-          ? { ...t, content: message, pending: false }
-          : t,
-      ),
+      items: mapTurn(st.items, turnId, (t) => ({
+        ...t,
+        content: message,
+        pending: false,
+      })),
     })),
 
   appendActivity: (evt) => {
     set((st) => {
-      const next = [...st.activity, evt];
-      if (next.length > 100) next.splice(0, next.length - 100);
-      // Attach to the currently-pending tool call, if any, so the inline
-      // activity list stays synchronised with its parent.
-      const turns = [...st.turns];
-      const last = turns[turns.length - 1];
-      if (last && last.role === "assistant" && last.pending) {
+      const items = [...st.items];
+      const last = items[items.length - 1];
+
+      // 1. Prefer attaching to an open tool call on a pending assistant turn.
+      if (last && last.kind === "turn" && last.role === "assistant" && last.pending) {
         const tcs = [...last.toolCalls];
         const openIdx = tcs.length - 1;
         if (openIdx >= 0 && !tcs[openIdx].finishedAt) {
@@ -196,10 +224,34 @@ export const useStore = create<State>((set, get) => ({
             ...tcs[openIdx],
             activity: [...tcs[openIdx].activity, evt],
           };
-          turns[turns.length - 1] = { ...last, toolCalls: tcs };
+          items[items.length - 1] = { ...last, toolCalls: tcs };
+          return { items };
         }
       }
-      return { activity: next, turns };
+
+      // 2. Coalesce into a recent activity-group if close in time.
+      if (last && last.kind === "activity-group") {
+        const lastEvt = last.events[last.events.length - 1];
+        const evtMs = evt.timestamp ? evt.timestamp * 1000 : Date.now();
+        const lastMs = lastEvt?.timestamp
+          ? lastEvt.timestamp * 1000
+          : Date.now();
+        if (Math.abs(evtMs - lastMs) < ACTIVITY_GROUP_WINDOW_MS) {
+          items[items.length - 1] = {
+            ...last,
+            events: [...last.events, evt],
+          };
+          return { items };
+        }
+      }
+
+      // 3. Otherwise push a fresh group.
+      items.push({
+        kind: "activity-group",
+        id: uid(),
+        events: [evt],
+      });
+      return { items };
     });
   },
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -120,21 +122,64 @@ async def chat_stream(
 
     data_summary = _build_data_summary(record)
 
+    HEARTBEAT_SECS = 5.0
+
     async def generator() -> AsyncIterator[bytes]:
         bus.bind_session(session_id)
         final_text = ""
         tool_calls: List[str] = []
+
+        # Bridge the agent's async generator through a queue so we can race
+        # it against periodic heartbeats and client-disconnect checks.  A
+        # tool invocation (e.g. the solver) can run for tens of seconds —
+        # without this the browser closes the SSE connection for "stalled".
+        queue: asyncio.Queue = asyncio.Queue()
+        _SENTINEL = object()
+
+        async def pump() -> None:
+            try:
+                async for ev in agent.chat_stream(
+                    user_message=body.message,
+                    conversation_history=history,
+                    problem_state=ps,
+                    uploaded_data_summary=data_summary,
+                ):
+                    await queue.put(ev)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.error("chat_stream pump error: %s", exc, exc_info=True)
+                await queue.put({"type": "error", "message": str(exc)})
+            finally:
+                await queue.put(_SENTINEL)
+
+        pump_task = asyncio.create_task(pump(), name=f"chat-pump-{session_id}")
+
         try:
             yield _sse("start", {"ok": True})
-            async for ev in agent.chat_stream(
-                user_message=body.message,
-                conversation_history=history,
-                problem_state=ps,
-                uploaded_data_summary=data_summary,
-            ):
-                if await request.is_disconnected():
+            last_activity = time.monotonic()
+
+            while True:
+                try:
+                    ev = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_SECS)
+                except asyncio.TimeoutError:
+                    # No event for HEARTBEAT_SECS — check disconnect then emit
+                    # a heartbeat so the browser keeps the connection open.
+                    if await request.is_disconnected():
+                        logger.info(
+                            "chat_stream: client disconnected, cancelling pump"
+                        )
+                        pump_task.cancel()
+                        break
+                    elapsed = time.monotonic() - last_activity
+                    yield _sse(
+                        "heartbeat",
+                        {"elapsed_s": round(elapsed, 1)},
+                    )
+                    continue
+
+                if ev is _SENTINEL:
                     break
 
+                last_activity = time.monotonic()
                 kind = ev.get("type")
                 if kind == "tool_call_start":
                     yield _sse(
@@ -167,6 +212,12 @@ async def chat_stream(
                     }
                 )
         finally:
+            if not pump_task.done():
+                pump_task.cancel()
+                try:
+                    await pump_task
+                except (asyncio.CancelledError, Exception):
+                    pass
             bus.bind_session(None)
 
     return StreamingResponse(

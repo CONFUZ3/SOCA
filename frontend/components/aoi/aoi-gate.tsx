@@ -1,5 +1,6 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -7,10 +8,16 @@ import { Input } from "@/components/ui/input";
 import { Chip } from "@/components/ui/chip";
 import { useStore } from "@/lib/store";
 import { useSession } from "@/hooks/use-session";
-import { ArrowRight, Loader2, MapPin, Search } from "lucide-react";
+import { ArrowRight, Loader2, MapPin, Pencil, Search } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { formatArea } from "@/lib/format";
 import type { GeocodeCandidate } from "@/types";
+
+// AoiDrawMap uses browser canvas APIs — skip SSR
+const AoiDrawMap = dynamic(
+  () => import("./aoi-draw-map").then((m) => m.AoiDrawMap),
+  { ssr: false, loading: () => <div className="h-full w-full bg-mono-surface" /> },
+);
 
 interface ResolvedAoi {
   name: string;
@@ -20,13 +27,25 @@ interface ResolvedAoi {
   geojson: unknown;
 }
 
+type Mode = "search" | "draw";
+
 export function AoiGate() {
+  const [mode, setMode] = useState<Mode>("search");
+
+  // ── Search state ──────────────────────────────────────────────────────────
   const [q, setQ] = useState("");
   const [suggestions, setSuggestions] = useState<GeocodeCandidate[]>([]);
   const [loadingSuggest, setLoadingSuggest] = useState(false);
   const [selected, setSelected] = useState<GeocodeCandidate | null>(null);
   const [resolved, setResolved] = useState<ResolvedAoi | null>(null);
   const [resolving, setResolving] = useState(false);
+
+  // ── Draw state ────────────────────────────────────────────────────────────
+  const [drawnGeojson, setDrawnGeojson] = useState<GeoJSON.FeatureCollection | null>(null);
+  const [drawnAreaKm2, setDrawnAreaKm2] = useState<number | null>(null);
+  const [drawError, setDrawError] = useState<string | null>(null);
+
+  // ── Shared ────────────────────────────────────────────────────────────────
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { refresh } = useSession();
@@ -74,7 +93,7 @@ export function AoiGate() {
     }
   };
 
-  const onConfirm = async () => {
+  const onConfirmSearch = async () => {
     if (!resolved) return;
     setConfirming(true);
     setError(null);
@@ -94,18 +113,133 @@ export function AoiGate() {
     }
   };
 
+  const onConfirmDraw = async () => {
+    if (!drawnGeojson || drawError) return;
+    setConfirming(true);
+    setError(null);
+    try {
+      await apiPost("/api/aoi/confirm", {
+        name: "Custom drawn area",
+        source: "drawn",
+        geojson: drawnGeojson,
+      });
+      refresh();
+    } catch (e: unknown) {
+      setError(
+        e instanceof Error ? e.message : "Failed to confirm area of interest.",
+      );
+    } finally {
+      setConfirming(false);
+    }
+  };
+
+  const handleDrawn = (fc: GeoJSON.FeatureCollection, km2: number) => {
+    setDrawnGeojson(fc);
+    setDrawnAreaKm2(km2);
+  };
+
+  const handleAreaChange = (km2: number | null, err: string | null) => {
+    setDrawnAreaKm2(km2);
+    setDrawError(err);
+    if (err || km2 === null) setDrawnGeojson(null);
+  };
+
+  const tabToggle = (
+    <div className="flex items-center gap-1 rounded-md border border-border bg-surface p-0.5">
+      <button
+        type="button"
+        onClick={() => setMode("search")}
+        className={cn(
+          "flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors",
+          mode === "search"
+            ? "bg-surface-2 text-text shadow-sm"
+            : "text-text-muted hover:text-text",
+        )}
+      >
+        <Search className="h-3 w-3" strokeWidth={1.75} />
+        Search
+      </button>
+      <button
+        type="button"
+        onClick={() => setMode("draw")}
+        className={cn(
+          "flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors",
+          mode === "draw"
+            ? "bg-surface-2 text-text shadow-sm"
+            : "text-text-muted hover:text-text",
+        )}
+      >
+        <Pencil className="h-3 w-3" strokeWidth={1.75} />
+        Draw
+      </button>
+    </div>
+  );
+
+  // ── Draw mode layout ───────────────────────────────────────────────────────
+  if (mode === "draw") {
+    return (
+      <div className="relative h-full w-full">
+        <AoiDrawMap onDrawn={handleDrawn} onAreaChange={handleAreaChange} />
+
+        {/* Top-center overlay: tab toggle + instructions */}
+        <div className="pointer-events-none absolute left-1/2 top-4 z-10 flex -translate-x-1/2 flex-col items-center gap-2">
+          <div className="pointer-events-auto">{tabToggle}</div>
+          <div className="rounded border border-border bg-surface/90 px-3 py-1.5 text-xs text-text-muted backdrop-blur">
+            Click to place vertices · double-click to close the polygon
+          </div>
+        </div>
+
+        {/* Bottom bar: area + confirm */}
+        <div className="absolute bottom-8 left-1/2 z-10 flex -translate-x-1/2 items-center gap-2.5 rounded-lg border border-border bg-surface/95 px-4 py-2.5 shadow-popover backdrop-blur">
+          {drawnAreaKm2 !== null && !drawError && (
+            <Chip tone="accent">{formatArea(drawnAreaKm2)}</Chip>
+          )}
+          {drawError ? (
+            <span className="text-xs text-err">{drawError}</span>
+          ) : drawnGeojson === null ? (
+            <span className="text-xs text-text-muted">Draw a polygon on the map to continue</span>
+          ) : null}
+          <Button
+            variant="primary"
+            size="md"
+            onClick={onConfirmDraw}
+            disabled={!drawnGeojson || !!drawError || confirming}
+          >
+            {confirming ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" strokeWidth={1.75} />
+            ) : (
+              <>
+                Confirm area
+                <ArrowRight className="h-3.5 w-3.5" strokeWidth={2} />
+              </>
+            )}
+          </Button>
+        </div>
+
+        {error && (
+          <div className="absolute bottom-24 left-1/2 z-10 -translate-x-1/2 rounded border border-err/30 bg-surface/95 px-2.5 py-1.5 text-xs text-err backdrop-blur">
+            {error}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Search mode layout (default) ──────────────────────────────────────────
   return (
     <div className="flex h-full w-full items-center justify-center bg-bg px-6 py-10">
       <div className="mx-auto w-full max-w-xl">
-        <div className="mb-6">
-          <div className="text-2xs font-medium uppercase tracking-wider text-text-faint">
-            Step 1 of 2
+        <div className="mb-5 flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-2xs font-medium uppercase tracking-wider text-text-faint">
+              Step 1 of 2
+            </div>
+            <h1 className="heading-panel mt-1">Pick an area of interest</h1>
+            <p className="mt-1.5 text-sm text-text-muted">
+              Search for a place or switch to Draw to sketch your own boundary.
+            </p>
           </div>
-          <h1 className="heading-panel mt-1">Pick an area of interest</h1>
-          <p className="mt-1.5 text-sm text-text-muted">
-            Type a city, district, or country. SOCA fetches the real boundary
-            from OpenStreetMap, not a bounding box.
-          </p>
+          <div className="shrink-0 pt-0.5">{tabToggle}</div>
         </div>
 
         <div className="relative">
@@ -212,7 +346,7 @@ export function AoiGate() {
               <Button
                 variant="primary"
                 size="md"
-                onClick={onConfirm}
+                onClick={onConfirmSearch}
                 disabled={confirming}
               >
                 Confirm area

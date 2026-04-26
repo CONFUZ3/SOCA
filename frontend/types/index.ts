@@ -98,6 +98,7 @@ export type MapLayerRole =
   | "candidate"
   | "selected"
   | "assignment"
+  | "coverage"
   | "other";
 
 export interface MapViewState {
@@ -112,12 +113,28 @@ export interface MapLayer {
   geojson: GeoJSON.FeatureCollection;
 }
 
+/**
+ * Mirrors the curated solution payload emitted by
+ * ``backend/api/map.py::_build_solution_summary``.
+ *
+ * ``solver`` / ``solver_time_seconds`` / ``distance_metric_used`` /
+ * ``service_radius_m`` / ``warnings`` come from the run-context injected
+ * by ``confirm_optimization`` before the solution is persisted in
+ * ``problem_state["solution"]``.
+ */
 export interface MapSolution {
   status: string;
+  problem_type: string | null;
+  variant?: string | null;
   objective_value: number | null;
   metrics: Record<string, unknown>;
   n_selected: number;
-  problem_type: string | null;
+  solver?: string | null;
+  solver_time_seconds?: number | null;
+  gap?: number | null;
+  distance_metric_used?: "network" | "euclidean" | string | null;
+  service_radius_m?: number | null;
+  warnings?: string[];
 }
 
 export interface MapState {

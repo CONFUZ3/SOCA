@@ -54,8 +54,9 @@ pytest-cov>=4.1.0                # allow newer
 # Performance monitoring
 psutil>=5.9.0                    # system metrics monitoring
 
-overturemaps>=0.7.0              # Overture Maps cloud-native data (boundaries, POIs)
+overturemaps>=0.7.0              # Overture Maps cloud-native fallback client
 pyarrow>=14.0.0                  # Required by overturemaps (Parquet/Arrow I/O)
+duckdb>=1.1.0                    # Primary Overture path: SQL predicate pushdown on S3 parquet
 
 # Future enhancements (optional - may require additional system dependencies)
 osmnx>=1.9.1                    # OpenStreetMap road-network analysis (network distance metric)

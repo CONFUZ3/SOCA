@@ -267,35 +267,39 @@ Where:
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = distance_matrix.shape
-        
+
         model = gp.Model("p-center")
-        model.setParam('OutputFlag', 0)
-        if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-        else:
-            model.setParam('TimeLimit', 300)
-        
-        # Decision variables
+        configure_gurobi_model(model, time_limit_seconds)
+
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")
         y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")
         W = model.addVar(vtype=GRB.CONTINUOUS, name="W")  # Maximum distance
-        
-        # Objective: minimize maximum distance
+
         model.setObjective(W, GRB.MINIMIZE)
-        
-        # Constraints
+
         model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) == p)
-        
-        for i in range(n_demand):
-            model.addConstr(gp.quicksum(y[i, j] for j in range(n_candidates)) == 1)
-        
-        for i in range(n_demand):
-            for j in range(n_candidates):
-                model.addConstr(y[i, j] <= x[j])
-                # W must be at least as large as any assigned distance
-                model.addConstr(W >= distance_matrix[i, j] * y[i, j])
+
+        model.addConstrs(
+            (gp.quicksum(y[i, j] for j in range(n_candidates)) == 1
+             for i in range(n_demand)),
+            name="assign_demand",
+        )
+
+        # Batched linking + Chebyshev constraints (Gurobi batches much faster
+        # than a Python double loop with individual addConstr calls).
+        model.addConstrs(
+            (y[i, j] <= x[j] for i in range(n_demand) for j in range(n_candidates)),
+            name="y_le_x",
+        )
+        model.addConstrs(
+            (W >= float(distance_matrix[i, j]) * y[i, j]
+             for i in range(n_demand) for j in range(n_candidates)),
+            name="radius_cover",
+        )
         
         # Custom constraints
         must_include = constraints.get('must_include', [])

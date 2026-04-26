@@ -275,15 +275,13 @@ Where:
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = coverage_matrix.shape
-        
+
         model = gp.Model("lscp")
-        model.setParam('OutputFlag', 0)
-        if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-        else:
-            model.setParam('TimeLimit', 300)
+        configure_gurobi_model(model, time_limit_seconds)
         
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")

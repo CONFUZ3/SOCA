@@ -258,11 +258,22 @@ Where:
                             initial_solution=incumbent_mask,
                             time_budget_seconds=ga_time_budget
                         )
-                        logger.info(f"MCLP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                    except Exception as ga_err:
+                        logger.error(
+                            f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}",
+                            exc_info=True,
+                        )
+                    else:
+                        logger.info(
+                            "MCLP: GA fallback succeeded for variant '%s' (status=%s, objective=%s)",
+                            variant,
+                            ga_result.get("status", "unknown"),
+                            ga_result.get("objective_value", "N/A"),
+                        )
                         ga_details = {
                             **ga_result.get("solver_details", {}),
-                            "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
-                            "fallback_reason": "time_limit"
+                            "fallback_from": solution.get("solver_details", {}).get("solver", "mip"),
+                            "fallback_reason": "time_limit",
                         }
                         solution = {
                             "status": ga_result.get("status", "feasible"),
@@ -270,17 +281,20 @@ Where:
                             "selected_facilities": ga_result["selected_facilities"],
                             "assignments": ga_result.get("assignments", {}),
                             "z_values": ga_result.get("z_values"),
-                            "solver_details": ga_details
+                            "solver_details": ga_details,
                         }
-                    except Exception as ga_err:
-                        logger.error(f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}", exc_info=True)
-                    else:
-                        logger.warning(
-                            "GA fallback not available for MCLP variant '%s'; returning MIP result",
-                            variant
-                        )
                 else:
-                    logger.info(f"MCLP: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                    logger.warning(
+                        "MCLP: GA fallback not available for variant '%s'; returning MIP result",
+                        variant,
+                    )
+            else:
+                logger.info(
+                    "MCLP: MIP solver completed within time limit, no fallback needed "
+                    "(status=%s, objective=%s)",
+                    solution.get("status", "unknown"),
+                    solution.get("objective_value", "N/A"),
+                )
             
             # Calculate metrics
             metrics = self._calculate_metrics(
@@ -824,19 +838,17 @@ Where:
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = coverage_matrix.shape
-        
+
         model = gp.Model("mclp")
-        model.setParam('OutputFlag', 0)
+        configure_gurobi_model(model, time_limit_seconds)
         if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-            logger.info(f"MCLP Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
-        else:
-            model.setParam('TimeLimit', 300)
-        model.setParam('MIPGap', 0.01)  # 1% optimality gap
-        model.setParam('Presolve', 2)   # Aggressive presolve
-        model.setParam('Cuts', 2)       # Aggressive cut generation
+            logger.info(
+                "MCLP Gurobi: TimeLimit set to %.2f seconds", float(time_limit_seconds)
+            )
         
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")  # facility location

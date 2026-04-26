@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from backend.api import aoi, chat, data, events, map, network, problems, session
+from backend.api import aoi, chat, data, events, export, map, network, problems, session
 from backend.services.event_bus import get_default_bus
 from backend.services.session_store import get_default_store
 
@@ -84,3 +84,4 @@ app.include_router(events.router)
 app.include_router(chat.router)
 app.include_router(data.router)
 app.include_router(map.router)
+app.include_router(export.router)

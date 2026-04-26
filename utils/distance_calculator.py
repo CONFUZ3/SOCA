@@ -6,6 +6,9 @@ from pyproj import Geod
 from typing import Optional, Any, Dict
 import logging
 import hashlib
+import time
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -341,9 +344,15 @@ class DistanceCalculator:
     ) -> np.ndarray:
         """Road-network shortest-path distances via OSMnx + NetworkX Dijkstra.
 
-        network_graph must be a (G_proj, crs_proj) tuple as returned by
-        NetworkManager.get_graph(). Returns float64 matrix in metres.
-        Disconnected pairs fall back to geodesic distance with a warning.
+        The Dijkstra sweep is wall-clock bounded by
+        ``settings.NETWORK_DIJKSTRA_BUDGET_SECONDS``.  Destinations whose
+        shortest-path could not be computed in time fall back to geodesic
+        distance so the solver still gets a usable (if slightly less accurate)
+        matrix instead of hanging for minutes on a large graph.
+
+        ``network_graph`` must be the ``(G_proj, crs_proj)`` tuple returned
+        by :meth:`utils.network_manager.NetworkManager.get_graph`.  The
+        returned matrix is a float64 array of metres.
         """
         import osmnx as ox
         import networkx as nx
@@ -365,34 +374,75 @@ class DistanceCalculator:
         n_dests = len(dest_nodes)
         dist_matrix = np.full((n_origins, n_dests), np.inf, dtype=np.float64)
 
-        # Group destination columns by node to run one Dijkstra per unique dest node
-        unique_dest_nodes = list(dict.fromkeys(dest_nodes))  # preserve order, deduplicate
+        # Group destination columns by node to run one Dijkstra per unique dest node.
+        unique_dest_nodes = list(dict.fromkeys(dest_nodes))
         dest_node_to_cols: dict = {}
         for col_idx, node in enumerate(dest_nodes):
             dest_node_to_cols.setdefault(node, []).append(col_idx)
 
+        budget = float(getattr(settings, "NETWORK_DIJKSTRA_BUDGET_SECONDS", 60.0))
+        deadline = time.monotonic() + budget if budget > 0 else None
+
+        origin_nodes_arr = np.asarray(origin_nodes)
+        budget_exceeded = False
+        processed = 0
+        total_unique = len(unique_dest_nodes)
+
         for dest_node in unique_dest_nodes:
+            if deadline is not None and time.monotonic() >= deadline:
+                remaining = total_unique - processed
+                logger.warning(
+                    "NetworkDistance: Dijkstra budget (%.1fs) exceeded after %d/%d "
+                    "destinations; falling back to geodesic for remaining %d.",
+                    budget, processed, total_unique, remaining,
+                )
+                budget_exceeded = True
+                break
             try:
                 lengths = nx.single_source_dijkstra_path_length(
                     G_proj, dest_node, weight="length"
                 )
             except nx.NodeNotFound:
+                processed += 1
                 continue
             cols = dest_node_to_cols[dest_node]
-            for row_idx, orig_node in enumerate(origin_nodes):
+            for row_idx, orig_node in enumerate(origin_nodes_arr):
                 if orig_node in lengths:
+                    val = lengths[orig_node]
                     for col_idx in cols:
-                        dist_matrix[row_idx, col_idx] = lengths[orig_node]
+                        dist_matrix[row_idx, col_idx] = val
+            processed += 1
 
-        # Geodesic fallback for disconnected pairs
         inf_mask = np.isinf(dist_matrix)
         if inf_mask.any():
             n_inf = int(inf_mask.sum())
-            logger.warning(
-                "NetworkDistance: %d disconnected pairs replaced with geodesic fallback", n_inf
-            )
+            if budget_exceeded:
+                logger.warning(
+                    "NetworkDistance: budget exceeded — %d/%d pairs filled with geodesic fallback.",
+                    n_inf, n_origins * n_dests,
+                )
+            else:
+                logger.info(
+                    "NetworkDistance: %d disconnected pairs replaced with geodesic fallback.",
+                    n_inf,
+                )
             geodesic = self._geodesic_distance_matrix(origins, destinations)
             dist_matrix[inf_mask] = geodesic[inf_mask]
+
+            if budget_exceeded:
+                try:
+                    from utils.activity_log import log_event
+
+                    log_event(
+                        "distance.network",
+                        "fail",
+                        (
+                            f"Dijkstra budget exceeded — used geodesic fallback for "
+                            f"{n_inf:,} of {n_origins * n_dests:,} pairs"
+                        ),
+                    )
+                except Exception:
+                    pass
 
         return dist_matrix
     

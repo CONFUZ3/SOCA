@@ -18,7 +18,23 @@ try:
 except Exception:  # pragma: no cover - activity_log is optional at import time
     _timed = None
 
+try:
+    from config.settings import settings as _soca_settings
+except Exception:  # pragma: no cover
+    _soca_settings = None
+
 logger = logging.getLogger(__name__)
+
+
+# Process-wide fetch locks + result cache, shared across NetworkManager
+# instances. The prefetch thread and the solve-time fetch used to end up with
+# separate NetworkManager objects (e.g. lazy creation in backend/api/aoi.py
+# vs. chat.py), defeating per-instance locking and causing two 100+ second
+# Overpass downloads for the same AOI. Keying coalesce state on the process
+# — not the instance — closes that race.
+_SHARED_FETCH_LOCKS: dict = {}
+_SHARED_FETCH_RESULTS: dict = {}
+_SHARED_REGISTRY_LOCK = threading.Lock()
 
 
 class NetworkManager:
@@ -26,13 +42,16 @@ class NetworkManager:
     MAX_CACHED_GRAPHS = 3
     DEFAULT_NETWORK_TYPE = "drive"
     BUFFER_DEGREES = 0.02    # ~2 km padding for bbox fallback
+    # Simplify boundary polygons before hashing so that small float-drift
+    # (e.g. unary_union on slightly-different inputs) doesn't produce
+    # different cache keys for the same AOI.
+    POLYGON_SIMPLIFY_TOL = 0.001  # ~100 m at the equator
 
     def __init__(self):
         self._cache: dict = {}
         self._cache_order: list = []
-        # Per-cache-key locks so that a background prefetch and a later
-        # solve-time fetch for the same AOI coalesce into a single Overpass
-        # download instead of racing each other.
+        # Retained for back-compat. Real coalescing now happens on the
+        # module-level shared locks above.
         self._key_locks: dict = {}
         self._registry_lock = threading.Lock()
 
@@ -56,35 +75,51 @@ class NetworkManager:
 
         cache_key = self._make_cache_key(demand_gdf, boundary_polygon)
 
-        # Fast path — cache hit without holding any lock
+        # Fast path — cache hit without holding any lock. Check both the
+        # instance cache and the process-level shared cache.
         cached = self._cache_lookup(cache_key)
         if cached is not None:
-            logger.info("NetworkManager: cache hit for key %s", cache_key[:8])
+            logger.info(
+                "NetworkManager[%s]: cache hit for key %s",
+                id(self), cache_key[:8],
+            )
             return cached
 
-        # Serialise fetches per-key. The first caller fetches; any concurrent
-        # callers block here and then take the cache-hit fast path.
-        lock = self._get_or_create_key_lock(cache_key)
+        shared = _shared_result_lookup(cache_key)
+        if shared is not None:
+            # Promote into this instance's LRU so subsequent in-process hits
+            # are fast.
+            self._promote_to_instance_cache(cache_key, shared)
+            logger.info(
+                "NetworkManager[%s]: shared cache hit for key %s",
+                id(self), cache_key[:8],
+            )
+            return shared
+
+        # Serialise fetches per-key across the whole process. The first
+        # caller fetches; any concurrent callers block here and then take
+        # the cache-hit fast path.
+        lock = _get_or_create_shared_lock(cache_key)
         with lock:
-            cached = self._cache_lookup(cache_key)
+            cached = self._cache_lookup(cache_key) or _shared_result_lookup(cache_key)
             if cached is not None:
+                self._promote_to_instance_cache(cache_key, cached)
                 logger.info(
-                    "NetworkManager: cache hit for key %s after lock (coalesced)",
-                    cache_key[:8],
+                    "NetworkManager[%s]: cache hit for key %s after lock (coalesced)",
+                    id(self), cache_key[:8],
                 )
                 return cached
 
             logger.info(
-                "NetworkManager: fetching road network from OSM (key=%s…)",
-                cache_key[:8],
+                "NetworkManager[%s]: fetching road network from OSM (key=%s…)",
+                id(self), cache_key[:8],
             )
             G = self._fetch_graph(ox, demand_gdf, boundary_polygon)
             G_proj, crs_proj = self._project_graph(ox, G)
 
-            self._evict_if_needed()
-            self._cache[cache_key] = {"G_proj": G_proj, "crs_proj": crs_proj}
-            self._cache_order.append(cache_key)
-            logger.info("NetworkManager: graph cached (%d nodes)", len(G_proj))
+            self._promote_to_instance_cache(cache_key, (G_proj, crs_proj))
+            _shared_result_store(cache_key, (G_proj, crs_proj))
+            logger.info("NetworkManager[%s]: graph cached (%d nodes)", id(self), len(G_proj))
             return G_proj, crs_proj
 
     # ------------------------------------------------------------------
@@ -105,13 +140,21 @@ class NetworkManager:
             return entry["G_proj"], entry["crs_proj"]
 
     def _get_or_create_key_lock(self, cache_key: str) -> threading.Lock:
-        """Return (and create on demand) the per-key fetch lock."""
+        """Back-compat: return the module-level shared lock for *cache_key*."""
+        return _get_or_create_shared_lock(cache_key)
+
+    def _promote_to_instance_cache(self, cache_key: str, result):
+        """Store a (G_proj, crs_proj) result in this instance's LRU cache."""
+        G_proj, crs_proj = result
         with self._registry_lock:
-            lock = self._key_locks.get(cache_key)
-            if lock is None:
-                lock = threading.Lock()
-                self._key_locks[cache_key] = lock
-            return lock
+            if cache_key in self._cache:
+                try:
+                    self._cache_order.remove(cache_key)
+                except ValueError:
+                    pass
+            self._cache[cache_key] = {"G_proj": G_proj, "crs_proj": crs_proj}
+            self._cache_order.append(cache_key)
+            self._evict_if_needed_locked()
 
     def is_osmnx_available(self) -> bool:
         try:
@@ -125,6 +168,12 @@ class NetworkManager:
             self._cache.clear()
             self._cache_order.clear()
             self._key_locks.clear()
+        # Also clear the process-wide shared caches, otherwise the next
+        # get_graph() for a previously-seen key would hit the shared result
+        # cache and skip the fetch — defeating the point of clear_cache().
+        with _SHARED_REGISTRY_LOCK:
+            _SHARED_FETCH_RESULTS.clear()
+            _SHARED_FETCH_LOCKS.clear()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -132,7 +181,17 @@ class NetworkManager:
 
     def _make_cache_key(self, demand_gdf: gpd.GeoDataFrame, boundary_polygon) -> str:
         if boundary_polygon is not None:
-            raw = boundary_polygon.wkt
+            # Simplify to absorb float drift between slightly-different
+            # polygon representations (e.g. unary_union on inputs with
+            # different geometry ordering). Falls back to raw WKT if
+            # simplify raises on a degenerate geometry.
+            try:
+                simplified = boundary_polygon.simplify(
+                    self.POLYGON_SIMPLIFY_TOL, preserve_topology=True
+                )
+                raw = simplified.wkt if not simplified.is_empty else boundary_polygon.wkt
+            except Exception:
+                raw = boundary_polygon.wkt
         else:
             # Round bbox to CACHE_PRECISION to create a coarse grid key
             bounds = demand_gdf.total_bounds  # (minx, miny, maxx, maxy)
@@ -144,7 +203,9 @@ class NetworkManager:
         # Shared osmnx settings: enable disk cache + identify the app so we
         # comply with Nominatim/Overpass ToS (generic library UA is rejected).
         ox.settings.use_cache = True
-        ox.settings.requests_timeout = 180
+        ox.settings.requests_timeout = int(
+            getattr(_soca_settings, "OSMNX_REQUESTS_TIMEOUT", 60)
+        ) if _soca_settings is not None else 60
         ox.settings.overpass_rate_limit = True
         ox.settings.log_console = False
         # Nominatim's ToS blocks placeholder-domain UA strings. Identify via
@@ -218,10 +279,46 @@ class NetworkManager:
         return G_proj, crs_proj
 
     def _evict_if_needed(self):
-        while len(self._cache) >= self.MAX_CACHED_GRAPHS and self._cache_order:
+        with self._registry_lock:
+            self._evict_if_needed_locked()
+
+    def _evict_if_needed_locked(self):
+        while len(self._cache) > self.MAX_CACHED_GRAPHS and self._cache_order:
             oldest = self._cache_order.pop(0)
             self._cache.pop(oldest, None)
             logger.debug("NetworkManager: evicted cache entry %s…", oldest[:8])
+
+
+# ----------------------------------------------------------------------
+# Module-level shared fetch coalescing
+# ----------------------------------------------------------------------
+
+
+def _get_or_create_shared_lock(cache_key: str) -> threading.Lock:
+    with _SHARED_REGISTRY_LOCK:
+        lock = _SHARED_FETCH_LOCKS.get(cache_key)
+        if lock is None:
+            lock = threading.Lock()
+            _SHARED_FETCH_LOCKS[cache_key] = lock
+        return lock
+
+
+def _shared_result_lookup(cache_key: str):
+    with _SHARED_REGISTRY_LOCK:
+        return _SHARED_FETCH_RESULTS.get(cache_key)
+
+
+def _shared_result_store(cache_key: str, result) -> None:
+    with _SHARED_REGISTRY_LOCK:
+        _SHARED_FETCH_RESULTS[cache_key] = result
+        # Cap the shared cache at 8 entries (process-wide). Much larger than
+        # the per-session MAX_CACHED_GRAPHS to absorb a few concurrent AOIs.
+        if len(_SHARED_FETCH_RESULTS) > 8:
+            # Drop an arbitrary oldest-ish entry; we don't need strict LRU
+            # here — this exists to deduplicate fetches, not serve as a
+            # long-lived cache.
+            oldest = next(iter(_SHARED_FETCH_RESULTS))
+            _SHARED_FETCH_RESULTS.pop(oldest, None)
 
 
 # ----------------------------------------------------------------------

@@ -23,6 +23,20 @@ logger = logging.getLogger(__name__)
 SESSION_TTL_SECONDS = 60 * 60 * 12  # 12 h of inactivity → collected
 
 
+def _make_network_manager():
+    """Return a NetworkManager, or None if its module fails to import.
+
+    Isolated so `_fresh_record()` can't blow up test collection if osmnx /
+    shapely are unavailable in the import graph.
+    """
+    try:
+        from utils.network_manager import NetworkManager
+        return NetworkManager()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("SessionStore: NetworkManager unavailable (%s)", exc)
+        return None
+
+
 def _fresh_record() -> Dict[str, Any]:
     """Return a freshly initialised session record.
 
@@ -56,8 +70,12 @@ def _fresh_record() -> Dict[str, Any]:
         # User settings.
         "generated_sites_count": 100,
         "generated_sites_seed": None,
-        # Lazily-initialised singletons scoped to this session.
-        "_network_manager": None,
+        # Eagerly-initialised singletons scoped to this session. NetworkManager
+        # must be the same instance across the prefetch thread (launched from
+        # aoi.py) and the solve-time fetch (chat.py → optimize_tools). Lazy
+        # creation at first use produced two instances and a double-fetch
+        # race against Overpass. Instantiation is cheap.
+        "_network_manager": _make_network_manager(),
         "_data_fetcher": None,
         "_data_processor": None,
         "_map_visualizer": None,

@@ -145,6 +145,9 @@ def _launch_prefetch_for_session(
     """Launch road-graph prefetch bound to this session's event stream."""
     nm = record.get("_network_manager")
     if nm is None:
+        # Session record should have been initialised with a NetworkManager
+        # in session_store._fresh_record(); only hit this path on very old
+        # records or in tests that build records by hand.
         nm = NetworkManager()
         record["_network_manager"] = nm
 
