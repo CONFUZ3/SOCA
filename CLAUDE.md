@@ -4,53 +4,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-SOCA (Spatial Optimization Conversational Agent) is a Streamlit web app that lets users describe facility location problems in natural language and solve them with mixed-integer programming. Gemini (via Google ADK) serves as the conversational AI; PuLP (or Gurobi) runs the optimization.
+SOCA (Spatial Optimization Conversational Agent) lets users describe facility location problems in natural language and solve them with mixed-integer programming. Gemini (via Google ADK) is the conversational AI; PuLP (or Gurobi) runs the optimization.
+
+The product is now a **FastAPI backend + Next.js frontend** (`backend/` + `frontend/`). The original Streamlit `app.py` still exists for legacy/local use, but the primary path is the API + React UI.
 
 ## Commands
 
 ```bash
-# Run the app
+# Backend (FastAPI) — primary
+uvicorn backend.main:app --reload --port 8000
+
+# Frontend (Next.js 16) — primary UI at http://localhost:3000
+cd frontend && npm install && npm run dev
+
+# Legacy Streamlit app
 streamlit run app.py
 
-# Install dependencies
+# Install Python deps
 pip install -r requirements.txt
 
-# Run all tests
+# Tests
 pytest tests/ -v
-
-# Run with coverage
 pytest tests/ -v --cov=solvers --cov=utils --cov=agent
-
-# Run a single test file
-pytest tests/test_solvers.py -v
-
-# Run a single test
 pytest tests/test_solvers.py::TestPMedianSolver::test_basic -v
 ```
 
-**API key setup** — create `.env` with `GEMINI_API_KEY=...` or set `GEMINI_API_KEY` in `.streamlit/secrets.toml`.
+**API key setup** — create `.env` with `GEMINI_API_KEY=...` (loaded by `backend/main.py` via `python-dotenv`; Streamlit also reads `.streamlit/secrets.toml`).
 
 **Solver**: Gurobi is preferred (`gurobipy` optional) and falls back to PuLP automatically. Time limit and MIP gap are in `config/settings.py` (`SOLVER_TIME_LIMIT`, `MIP_GAP`).
 
+**CORS**: `SOCA_CORS_ORIGINS` env var (comma-separated) configures FastAPI allowed origins; defaults to `http://localhost:3000`.
+
 ## Architecture
 
-### Request / Response Flow
+### Request / Response Flow (FastAPI + Next.js)
 
 ```
-User chat input (app.py)
-  → SOCAAgent.chat()                     # agent/soca_agent.py
+Next.js UI (frontend/app/page.tsx)
+  → REST/SSE calls to FastAPI (backend/api/*)
+      • POST /api/session              → SessionStore allocates a session
+      • POST /api/chat/stream          → SSE: agent tokens + tool events
+      • GET  /api/events/stream        → SSE: activity-log events
+      • POST /api/aoi, /api/data, …    → state mutations
+      • GET  /api/map                  → MapLibre layer payloads
+  → backend.api.chat.chat_stream() drives SOCAAgent.chat()  # agent/soca_agent.py
       → Google ADK Runner invokes Gemini with structured tools
       → Gemini calls ADK tools (function calling, not regex parsing):
-          • fetch_city_data    → DataFetcher (utils/data_fetcher.py)
-          • stage_optimization → queues optimize action, returns confirmation prompt
-          • confirm_optimization → solver via ProblemRegistry
-          • get_data_status    → inspects current problem_state
-      → state_bridge syncs ADK session ↔ st.session_state.problem_state
-  → app.py handles returned actions, updates st.session_state.problem_state
-  → render_map_fragment() re-renders PyDeck or Folium map (fragment = no full rerun)
+          • fetch_city_data           → DataFetcher  (utils/fetchers/)
+          • stage_optimization        → queues optimize action
+          • confirm_optimization      → solver via ProblemRegistry
+          • get_data_status           → inspects problem_state
+          • run_sensitivity_analysis  → drop-one re-solve on last solution
+      → state_bridge syncs ADK session ↔ SessionStore (per-session problem_state)
+  → backend.services.event_bus broadcasts activity-log + tool events over SSE
+  → Frontend updates chat, sidebar, and MapLibre layers from streamed events
 ```
 
-The old `ConversationManager` (regex-based JSON parsing) has been replaced by the ADK agent. `agent/conversation_manager.py` may still exist but is no longer the primary path.
+`backend/services/session_store.py` replaces `st.session_state` for the API path: each session owns its own `problem_state` dict. `backend/services/event_bus.py` is the SSE pub/sub for activity-log events.
+
+The legacy Streamlit `app.py` still works against the same agent/solvers/utils, using `st.session_state` directly. The old `ConversationManager` (regex-based JSON parsing) is fully superseded by the ADK agent; `agent/conversation_manager.py` is dead code.
 
 ### ADK Agent & Tools
 
@@ -63,18 +75,22 @@ The old `ConversationManager` (regex-based JSON parsing) has been replaced by th
 
 **`agent/tools/`** — ADK tool implementations:
 - `fetch_tools.py` — `fetch_city_data`: boundaries (Overture → Nominatim fallback), population (HDX), POIs (Overture/Overpass).
-- `optimize_tools.py` — `stage_optimization` / `confirm_optimization`.
+- `optimize_tools.py` — `stage_optimization` / `confirm_optimization`. Confirmation also writes a reproducibility record via `utils/repro_logger.py` and attaches `equity_metrics` to the result.
 - `status_tools.py` — `get_data_status`.
-- `state_bridge.py` — thread-local bridge so ADK tools can read/write `st.session_state` (Streamlit is not thread-safe; the bridge is set before each `Runner.run()` call).
+- `sensitivity_tools.py` — `run_sensitivity_analysis`: drop-one re-optimization over each selected facility, reporting per-facility objective degradation and the `most_critical` facility. Reuses cached road graph + `data_dict`; never re-fetches.
+- `state_bridge.py` — thread-local bridge so ADK tools can read/write the active session's `problem_state` (works for both Streamlit `st.session_state` and the FastAPI `SessionStore`); set before each `Runner.run()`.
 
 ### Data Fetching Pipeline
 
-**`utils/data_fetcher.py`** — `DataFetcher` (rewritten)
-- Primary: Overture Maps API for boundaries and POIs.
-- Fallback: Nominatim/Photon for boundaries; Overpass for POIs.
-- Population: HDX API for population grids; falls back to synthetic grid.
-- Per-step error isolation — partial fetches are usable; callers iterate steps independently.
-- Exponential backoff retry (1 s → 2 s → 4 s); Nominatim enforces 1-second rate-limit (ToS).
+**`utils/fetchers/`** — modular fetcher package (replaces the monolithic `data_fetcher.py`, which is now a thin re-export shim for backward compat).
+- `facade.py` — `DataFetcher` class; preserves the legacy public API (`fetch_boundaries` / `fetch_pois` / `fetch_population`).
+- `boundaries.py` — Overture Maps (primary) → Nominatim/Photon (fallback).
+- `pois.py` — Overture (primary) → Overpass (fallback).
+- `population.py` — HDX population grids; falls back to synthetic grid.
+- `overture_duckdb.py` / `overture_release.py` — DuckDB-based Overture queries against the public S3 release.
+- `http.py` — shared `requests.Session` + token-bucket rate limiter; exponential backoff (1 s → 2 s → 4 s); Nominatim 1-req/s ToS enforcement.
+- `validation.py`, `errors.py`, `constants.py` — shared helpers and exception types (`DataFetchError`, `GeocodingError`, `PopulationDataError`).
+- Per-step error isolation: partial fetches are usable; callers iterate steps independently.
 
 **`utils/geocoder.py`** — `GeocodeCandidate`
 - Photon (primary) → Nominatim (fallback) for place-name disambiguation.
@@ -100,10 +116,16 @@ The old `ConversationManager` (regex-based JSON parsing) has been replaced by th
 **`utils/activity_log.py`**
 - Structured event bus for user-visible API transparency: stage, status (✓ / … / • / ✗), source attribution, duration.
 - Ring buffer (max 50 events); auto-expands in the UI on error.
-- Events written by `DataFetcher` and ADK tools; rendered in the sidebar.
+- Events written by `DataFetcher` and ADK tools; rendered in the Streamlit sidebar and bridged to the FastAPI SSE stream via `backend/services/event_bus.py`.
+
+**`utils/equity_metrics.py`**
+- Post-solve equity metrics (weighted Gini, top-decile share, etc.) computed from the assignment + demand weights and attached to every solver result so the agent's summary always pairs efficiency (objective) with distributional impact.
+
+**`utils/repro_logger.py`**
+- Writes a JSON record per `confirm_optimization` to `RUNS_DIR`: inputs, seed, solver+parameters, result. Replay is a documented stub (upstream data — HDX/Overture/OSM — isn't frozen). Seed is `SOCA_RANDOM_SEED` env or `config.settings.RANDOM_SEED` (default 42).
 
 **`utils/aoi_selector.py`**
-- Leaflet/Folium interactive AOI selector embedded in Streamlit: place-name autocomplete, polygon drawing/editing, basemap toggle (CartoDB / Esri Satellite).
+- Leaflet/Folium interactive AOI selector embedded in Streamlit: place-name autocomplete, polygon drawing/editing, basemap toggle (CartoDB / Esri Satellite). The Next.js UI uses MapLibre GL via `frontend/components/map/` instead.
 
 ### Solvers
 
@@ -127,11 +149,28 @@ The old `ConversationManager` (regex-based JSON parsing) has been replaced by th
 
 **`utils/pydeck_visualizer.py`** / **`utils/visualizer.py`** — PyDeck (WebGL, default) and Folium renderers. Map is rendered inside `@st.fragment render_map_fragment()` to avoid full page reruns.
 
-**`config/settings.py`** — global constants including `ADK_APP_NAME`, `ADK_MAX_TOOL_CALLS_PER_TURN`, solver timeouts, CRS defaults, file limits, and `DATA_DIR` / `TEMP_DIR` / `TEST_DATA_DIR` paths.
+**`config/settings.py`** — global constants including `ADK_APP_NAME`, `ADK_MAX_TOOL_CALLS_PER_TURN`, solver timeouts, CRS defaults, file limits, `RANDOM_SEED`, and `DATA_DIR` / `TEMP_DIR` / `TEST_DATA_DIR` / `RUNS_DIR` / `CACHE_DIR` paths.
+
+### Backend (FastAPI)
+
+**`backend/main.py`** — `app = FastAPI(...)`; CORS via `SOCA_CORS_ORIGINS`; warms `SessionStore` + `EventBus` singletons in lifespan; mounts routers under `/api/*`.
+
+**`backend/api/`** — one router per resource: `session`, `problems`, `aoi`, `network`, `events` (SSE activity log), `chat` (SSE token stream), `data`, `map` (MapLibre payloads), `export`.
+
+**`backend/services/`**:
+- `session_store.py` — in-memory per-session `problem_state` keyed by session ID (header `X-Session-Id`); replaces `st.session_state` for the API path.
+- `event_bus.py` — async pub/sub fanning activity-log + tool events out to SSE subscribers.
+
+### Frontend (Next.js 16)
+
+**`frontend/`** — Next.js 16.2.4 + Tailwind, hand-crafted design system. Single-container deploy via the root `Dockerfile`.
+- `app/` — App Router root (`page.tsx`, `layout.tsx`, `globals.css`).
+- `components/{chat,map,sidebar,aoi,layout,ui}` — feature components; `map/` is MapLibre GL.
+- `hooks/`, `lib/`, `types/` — shared client utilities and types.
 
 ### Problem State
 
-`st.session_state.problem_state` is the central shared state threaded through every agent call:
+`problem_state` is the central shared state threaded through every agent call. It lives in `st.session_state["problem_state"]` for Streamlit and in `SessionStore` (keyed by session id) for the FastAPI path:
 
 ```python
 {
@@ -146,9 +185,9 @@ The old `ConversationManager` (regex-based JSON parsing) has been replaced by th
 }
 ```
 
-Dataset keys follow conventions `app.py` uses to classify role: `boundary_*`, `demand_*`, `*_facilities_*`, `generated_candidates`.
+Dataset keys follow conventions used to classify role: `boundary_*`, `demand_*`, `*_facilities_*`, `generated_candidates`.
 
-The ADK `state_bridge` mirrors relevant fields into the ADK session context so Gemini has awareness of loaded data and current parameters without re-reading Streamlit state directly.
+The ADK `state_bridge` mirrors relevant fields into the ADK session context so Gemini has awareness of loaded data and current parameters without reading session state directly.
 
 ### Adding a New Solver
 
@@ -159,5 +198,12 @@ The ADK `state_bridge` mirrors relevant fields into the ADK session context so G
 ### Adding a New ADK Tool
 
 1. Define the function in `agent/tools/` with a typed signature (ADK derives the JSON schema from type hints and docstring).
-2. Access `problem_state` via `state_bridge.get_state()` — never import `st` directly inside a tool.
+2. Access `problem_state` via `state_bridge.get_state()` — never import `st` directly inside a tool (the same tool runs under both Streamlit and the FastAPI session store).
 3. Register the function in `SOCAAgent.__init__()` as part of the `tools=` list passed to `LlmAgent`.
+
+### Adding a New Backend Endpoint
+
+1. Add a router module in `backend/api/` and export `router = APIRouter(prefix="/api/...")`.
+2. Resolve the active session via `backend.deps.get_session` (header `X-Session-Id`); mutate `session.problem_state` instead of `st.session_state`.
+3. Include the router in `backend/main.py` via `app.include_router(...)`.
+4. For activity-log surfacing, publish via `backend.services.event_bus` so the existing `/api/events/stream` SSE pushes it to the UI.

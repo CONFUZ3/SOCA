@@ -203,5 +203,7 @@ def fetch_pois(
         )
 
     pois_gdf = _clip_to_boundary(pois_gdf, boundary_gdf)
+    pois_gdf["data_source"] = "overture_pois"
+    pois_gdf["candidates_are_synthetic"] = False
     logger.info(f"POI fetch: {len(pois_gdf)} '{category}' via Overture Maps.")
     return pois_gdf

@@ -87,6 +87,35 @@ class Settings:
     NETWORK_FETCH_MAX_AREA_KM2: float = _env_float(
         "SOCA_NETWORK_FETCH_MAX_AREA_KM2", 10_000.0
     )
+    # Auto-downgrade distance metric to "euclidean" when boundary area exceeds
+    # this threshold (km^2). Keeps network distance the default for urban
+    # AOIs while avoiding multi-minute Overpass downloads on regional ones.
+    NETWORK_AUTO_EUCLIDEAN_AREA_KM2: float = _env_float(
+        "SOCA_NETWORK_AUTO_EUCLIDEAN_AREA_KM2", 2_000.0
+    )
+    # Default driving speed (km/h) used by sensitivity / repro logging when
+    # converting network length (m) to travel time. Configurable so callers
+    # can model walk vs. drive scenarios without editing code.
+    DEFAULT_DRIVE_SPEED_KMH: float = _env_float("SOCA_DEFAULT_DRIVE_SPEED_KMH", 30.0)
+
+    # --- Candidate generation ---------------------------------------------
+    # Hard cap on candidate sites returned by generate_candidate_sites. When
+    # the road network has more nodes than this we KDTree-thin them down.
+    MAX_CANDIDATE_SITES: int = _env_int("SOCA_MAX_CANDIDATE_SITES", 500)
+    # Initial minimum inter-point distance (metres) used by KDTree thinning;
+    # the threshold doubles each iteration until the count is under
+    # MAX_CANDIDATE_SITES.
+    CANDIDATE_THINNING_MIN_DIST_M: float = _env_float(
+        "SOCA_CANDIDATE_THINNING_MIN_DIST_M", 200.0
+    )
+
+    # --- Reproducibility --------------------------------------------------
+    # Global random seed used by candidate generation, synthetic-population
+    # fallback, and any other stochastic step that needs to be replayable.
+    RANDOM_SEED: int = _env_int("SOCA_RANDOM_SEED", 42)
+    # Directory for run logs (one JSON per optimization).
+    RUNS_DIR: Path = Path(os.environ.get("SOCA_RUNS_DIR", "runs")).resolve() \
+        if os.environ.get("SOCA_RUNS_DIR") else Path(__file__).parent.parent / "runs"
 
     # --- CRS ---------------------------------------------------------------
     CRS_STANDARD: str = "EPSG:4326"  # WGS84 for lat/lon

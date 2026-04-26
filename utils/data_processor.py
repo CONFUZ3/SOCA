@@ -432,32 +432,52 @@ class DataProcessor:
         self,
         demand_gdf: gpd.GeoDataFrame,
         num_sites: int = 100,
-        random_seed: Optional[int] = None
+        random_seed: Optional[int] = None,
+        boundary_polygon=None,
+        network_manager=None,
     ) -> gpd.GeoDataFrame:
         """
-        Generate random candidate sites within the actual extent of demand data.
+        Generate candidate facility sites for a study area.
 
-        Uses rejection sampling against the convex hull of the demand points so
-        that candidates are confined to the region where demand data actually
-        exists, not just the rectangular bounding box.  For geographic
-        coordinates (lat/lon) the candidate longitude is sampled uniformly and
-        latitude is sampled with an inverse-sine transform so that the spatial
-        density is equal-area on the sphere.
+        Source preference (best-available, falls back on failure):
+          1. Road-network nodes from osmnx (``data_source="osmnx_road_nodes"``)
+             — preferred when a boundary polygon is available. If a
+             ``network_manager`` is passed, its cache is reused so the same
+             AOI is never fetched twice.
+          2. Random rejection sampling inside the convex hull of demand
+             (``data_source="synthetic_random_fallback"``) — used when osmnx
+             is unavailable, the fetch fails, or no boundary polygon is
+             provided. Sets ``candidates_are_synthetic=True``.
 
-        A thread-safe, instance-local ``numpy.random.Generator`` is used
-        instead of ``np.random.seed()`` so that the global NumPy RNG state is
-        never mutated.
+        When the road graph yields more than ``MAX_CANDIDATE_SITES`` nodes,
+        a KDTree-based farthest-point thinning enforces a minimum inter-point
+        distance (starting at ``CANDIDATE_THINNING_MIN_DIST_M`` and doubling
+        each iteration) until the count fits.
 
         Args:
-            demand_gdf: Demand points GeoDataFrame used to determine the
-                sampling region (its convex hull).
-            num_sites: Number of candidate sites to generate (default: 100).
-            random_seed: Optional integer seed for reproducibility.
+            demand_gdf: Demand points GeoDataFrame; defines the study extent.
+            num_sites: Target number of sites for the synthetic fallback path.
+                Ignored when sampling from the road network (the network
+                returns whatever nodes it has, capped by ``MAX_CANDIDATE_SITES``).
+            random_seed: Integer seed for any stochastic step (synthetic
+                sampling, thinning tie-breaks). Defaults to ``config.RANDOM_SEED``.
+            boundary_polygon: Optional shapely polygon delimiting the AOI.
+                When supplied, osmnx is queried directly; otherwise the
+                convex hull of demand is used as the AOI for both the network
+                fetch and the synthetic fallback.
+            network_manager: Optional ``utils.network_manager.NetworkManager``
+                instance whose cache should be reused for the fetch.
 
         Returns:
-            GeoDataFrame with generated candidate sites and columns
-            ``site_id``, ``x``, ``y``, ``generated``.  CRS matches
-            *demand_gdf*.
+            GeoDataFrame with columns ``site_id``, ``x``, ``y``, ``generated``,
+            ``data_source``, ``candidates_are_synthetic`` and matching CRS.
+
+        Failure modes:
+            - Empty *demand_gdf*: raises ``ValueError``.
+            - osmnx fetch fails / empty graph / timeout: logs at WARNING and
+              falls back to synthetic sampling (does not raise).
+            - Synthetic sampling exhausts attempts: logs WARNING with the
+              partial count.
         """
         from shapely.geometry import Point
         from shapely.ops import unary_union
@@ -465,11 +485,49 @@ class DataProcessor:
         if len(demand_gdf) == 0:
             raise ValueError("Demand dataset is empty, cannot generate candidate sites")
 
+        # Resolve seed up front so both paths are reproducible from the same
+        # source. Caller-supplied seed wins; otherwise fall back to the
+        # global config seed.
+        if random_seed is None:
+            try:
+                from config.settings import settings as _s
+                random_seed = int(_s.RANDOM_SEED)
+            except Exception:
+                random_seed = 42
+
         # Use a local Generator — never mutate the global NumPy RNG state.
         rng = np.random.default_rng(random_seed)
-        if random_seed is not None:
-            logger.info(f"Using random seed {random_seed} for candidate site generation")
+        logger.info(f"Using random seed {random_seed} for candidate site generation")
 
+        # --- Source 1: road-network nodes ---------------------------------
+        # If we have (or can derive) a boundary polygon, try osmnx first.
+        # On any failure we fall through to the synthetic path below.
+        aoi_polygon = boundary_polygon
+        if aoi_polygon is None:
+            try:
+                hull = unary_union(demand_gdf.geometry.values).convex_hull
+                if hull.geom_type in ("Polygon", "MultiPolygon") and not hull.is_empty:
+                    aoi_polygon = hull
+            except Exception:
+                aoi_polygon = None
+
+        if aoi_polygon is not None:
+            try:
+                osm_gdf = self._sample_candidates_from_network(
+                    demand_gdf,
+                    aoi_polygon,
+                    network_manager=network_manager,
+                    rng=rng,
+                )
+                if osm_gdf is not None and len(osm_gdf) > 0:
+                    return osm_gdf
+            except Exception as exc:
+                logger.warning(
+                    "generate_candidate_sites: road-network sampling failed (%s); "
+                    "falling back to synthetic random sampling.", exc
+                )
+
+        # --- Source 2: synthetic rejection sampling -----------------------
         # Build a containment polygon: convex hull of all demand geometries.
         # This confines candidates to the actual study area rather than the
         # rectangular bounding box (which may contain large void regions).
@@ -553,16 +611,188 @@ class DataProcessor:
                 "x": xs,
                 "y": ys,
                 "generated": True,
+                "data_source": "synthetic_random_fallback",
+                "candidates_are_synthetic": True,
             },
             geometry=accepted,
             crs=demand_gdf.crs,
         )
 
-        logger.info(
-            f"Generated {n_actual} candidate sites within demand convex hull "
-            f"(bounding box: {bounds})"
+        logger.warning(
+            f"generate_candidate_sites: generated {n_actual} SYNTHETIC candidate sites "
+            f"within demand convex hull (bounding box: {bounds}). "
+            f"data_source=synthetic_random_fallback"
         )
         return candidate_gdf
+
+    # ------------------------------------------------------------------
+    # Road-network candidate sampling
+    # ------------------------------------------------------------------
+
+    def _sample_candidates_from_network(
+        self,
+        demand_gdf: gpd.GeoDataFrame,
+        boundary_polygon,
+        network_manager=None,
+        rng=None,
+    ) -> Optional[gpd.GeoDataFrame]:
+        """Return candidate sites drawn from the OSM road network.
+
+        Attempts a graph fetch via *network_manager* (cache-aware) first, then
+        falls back to a direct ``osmnx.graph_from_polygon`` call. When the
+        graph has more than ``MAX_CANDIDATE_SITES`` nodes, KDTree farthest-
+        point thinning is applied with a doubling minimum-distance schedule.
+
+        Returns:
+            GeoDataFrame in ``demand_gdf.crs`` with columns ``site_id``, ``x``,
+            ``y``, ``generated``, ``data_source="osmnx_road_nodes"``,
+            ``candidates_are_synthetic=False``. Returns ``None`` (caller
+            handles fallback) if the graph is empty.
+
+        Failure modes:
+            Any exception from osmnx or NetworkManager is propagated to the
+            caller, which logs and switches to synthetic sampling.
+        """
+        try:
+            from config.settings import settings as _s
+            max_sites = int(_s.MAX_CANDIDATE_SITES)
+            min_dist_m = float(_s.CANDIDATE_THINNING_MIN_DIST_M)
+            net_timeout = float(_s.NETWORK_FETCH_TIMEOUT)
+        except Exception:
+            max_sites, min_dist_m, net_timeout = 500, 200.0, 90.0
+
+        G_proj = None
+        crs_proj = None
+
+        # Path A: reuse NetworkManager's cache if possible.
+        if network_manager is not None:
+            try:
+                G_proj, crs_proj = network_manager.get_graph(
+                    demand_gdf, boundary_polygon=boundary_polygon
+                )
+                logger.info(
+                    "generate_candidate_sites: reused NetworkManager graph "
+                    "(%d nodes)", len(G_proj.nodes)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "generate_candidate_sites: NetworkManager.get_graph failed "
+                    "(%s); attempting direct osmnx fetch.", exc
+                )
+
+        # Path B: direct osmnx fetch (no caching, but still works).
+        if G_proj is None:
+            import osmnx as ox
+            ox.settings.use_cache = True
+            ox.settings.requests_timeout = int(net_timeout)
+            ox.settings.log_console = False
+            ox.settings.http_user_agent = (
+                "SOCA-spopt/1.0 (Spatial Optimization Conversational Agent; "
+                "academic research; +https://github.com/soca-spopt/soca)"
+            )
+            G = ox.graph_from_polygon(boundary_polygon, network_type="drive")
+            G_proj = ox.project_graph(G)
+            crs_proj = str(G_proj.graph.get("crs", "EPSG:3857"))
+
+        if G_proj is None or len(G_proj.nodes) == 0:
+            logger.warning("generate_candidate_sites: road graph is empty")
+            return None
+
+        # Extract node coordinates from the projected graph (metres).
+        node_ids = list(G_proj.nodes)
+        xs_proj = np.fromiter(
+            (G_proj.nodes[n]["x"] for n in node_ids), dtype=float, count=len(node_ids)
+        )
+        ys_proj = np.fromiter(
+            (G_proj.nodes[n]["y"] for n in node_ids), dtype=float, count=len(node_ids)
+        )
+
+        # Thin if oversized.
+        if len(node_ids) > max_sites:
+            xs_proj, ys_proj = self._thin_points_kdtree(
+                xs_proj, ys_proj, max_sites, min_dist_m, rng
+            )
+            logger.info(
+                "generate_candidate_sites: thinned road nodes %d -> %d",
+                len(node_ids), len(xs_proj)
+            )
+
+        # Reproject node coords back to the demand CRS for output geometry.
+        target_crs = demand_gdf.crs or "EPSG:4326"
+        node_gdf = gpd.GeoDataFrame(
+            {"x_proj": xs_proj, "y_proj": ys_proj},
+            geometry=gpd.points_from_xy(xs_proj, ys_proj),
+            crs=crs_proj,
+        ).to_crs(target_crs)
+
+        n = len(node_gdf)
+        out = gpd.GeoDataFrame(
+            {
+                "site_id": range(n),
+                "x": node_gdf.geometry.x.values,
+                "y": node_gdf.geometry.y.values,
+                "generated": True,
+                "data_source": "osmnx_road_nodes",
+                "candidates_are_synthetic": False,
+            },
+            geometry=node_gdf.geometry.values,
+            crs=target_crs,
+        )
+        logger.info(
+            "generate_candidate_sites: produced %d candidates from road network "
+            "(data_source=osmnx_road_nodes)", n
+        )
+        return out
+
+    @staticmethod
+    def _thin_points_kdtree(
+        xs: np.ndarray,
+        ys: np.ndarray,
+        max_points: int,
+        min_dist_m: float,
+        rng: Optional[np.random.Generator] = None,
+        max_iters: int = 8,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Greedy farthest-point thinning with a doubling minimum distance.
+
+        Inputs are projected (metric) coordinates. Builds a cKDTree, picks a
+        random seed point, and iteratively accepts the next point only if it
+        lies further than the current threshold from every accepted point.
+        If still over the cap, the threshold doubles and the process repeats
+        (up to *max_iters* iterations) before falling back to a uniform
+        random subsample of *max_points*.
+        """
+        from scipy.spatial import cKDTree
+
+        if rng is None:
+            rng = np.random.default_rng()
+
+        coords = np.column_stack([xs, ys])
+        n = len(coords)
+        if n <= max_points:
+            return xs, ys
+
+        threshold = float(min_dist_m)
+        for _ in range(max_iters):
+            tree = cKDTree(coords)
+            order = rng.permutation(n)
+            accepted_mask = np.zeros(n, dtype=bool)
+            for idx in order:
+                if accepted_mask[idx]:
+                    continue
+                neighbors = tree.query_ball_point(coords[idx], r=threshold)
+                # Reject only if a previously-accepted neighbor is within
+                # the threshold; otherwise accept this point.
+                if not any(accepted_mask[j] for j in neighbors if j != idx):
+                    accepted_mask[idx] = True
+            kept = np.flatnonzero(accepted_mask)
+            if len(kept) <= max_points:
+                return coords[kept, 0], coords[kept, 1]
+            threshold *= 2.0
+
+        # Final fallback: uniform random subsample.
+        pick = rng.choice(n, size=max_points, replace=False)
+        return coords[pick, 0], coords[pick, 1]
     
     def load_raster_file(self, file: BinaryIO) -> Dict[str, Any]:
         """

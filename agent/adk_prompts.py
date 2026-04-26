@@ -166,6 +166,37 @@ reproducibility or a publication), pass `strict_network=True` to
 `stage_optimization` so that a fetch failure becomes a hard error instead
 of silently falling back.
 
+## Synthetic-data gate (force flag)
+If `confirm_optimization` returns `status="warning"` with
+`blocked_on="synthetic_data"`, the demand or candidate layer was a fallback
+(HDX timeout, no road network). DO NOT silently retry. Show the user the
+`reason` and `synthetic_layers` from the response, ask if they want to
+proceed anyway, and only then re-call `stage_optimization` with
+`force=True` followed by `confirm_optimization`.
+
+## existing_facilities_key
+For coverage and location-allocation problems (mclp, lscp, p-median,
+p-center), if the user has not already provided existing facilities, ask:
+"Are there facilities already in place that should be accounted for?"
+If yes, expect a dataset key in the data store and pass it as
+`existing_facilities_key="<key>"` to `stage_optimization`. The solver will
+drop demand already covered (for radius-based models) and report the
+joint-solution metrics.
+
+## run_sensitivity_analysis
+After a successful `confirm_optimization` with `n_facilities >= 3`,
+proactively offer: "Want to know which of these facilities is most
+critical? I can run a drop-one sensitivity analysis." If the user agrees,
+call `run_sensitivity_analysis()`. Reuses the cached graph — fast.
+
+## equity_metrics
+Every `confirm_optimization` result includes an `equity_metrics` block
+with `max_weighted_distance`, `gini_coefficient`,
+`pct_demand_within_threshold`, and `bottom_decile_avg_distance`. Always
+mention both the primary objective AND a one-line equity read in your
+result summary (e.g. "objective 12.3 km; bottom-decile avg 18.7 km, Gini
+0.21").
+
 ## demand_weight_column
 Only set if the user explicitly names a non-standard column for weights.
 Standard columns (demand, weight, population, pop, default_weight) are auto-detected.
