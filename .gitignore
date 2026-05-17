@@ -44,6 +44,11 @@ temp/
 data/
 outputs/
 exports/
+cache/
+runs/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.cursor/
 
 # ------------------------------
 # IDE / editor
