@@ -15,10 +15,23 @@ export interface AoiInfo {
 export interface DatasetSummary {
   name: string;
   num_features: number;
+  active_num_features?: number;
   geometry_type: string;
   columns: string[];
   bounds: number[];
   source?: string | null;
+  role?: "boundary" | "demand" | "candidate" | "other";
+  source_details?: string[];
+  numeric_preview?: Record<string, number>;
+  numeric_summary?: Array<{
+    key: string;
+    label: string;
+    value: number;
+    stat: "total" | "mean" | string;
+  }>;
+  available_subcategories?: string[];
+  active_subcategories?: string[];
+  subcategory_counts?: Record<string, number>;
 }
 
 export interface NetworkState {
@@ -42,6 +55,7 @@ export interface SessionSnapshot {
   datasets: DatasetSummary[];
   has_solution: boolean;
   solution_status?: string | null;
+  solution_version?: number;
   messages: ChatMessage[];
   network: NetworkState;
   settings: {

@@ -1,0 +1,489 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 1470" width="1200" height="1470"
+     font-family="'Helvetica Neue',Helvetica,Arial,sans-serif">
+<defs>
+  <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+    <polygon points="0 0,8 3,0 6" fill="#64748b"/>
+  </marker>
+  <marker id="arr-r" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+    <polygon points="0 0,8 3,0 6" fill="#7c3aed"/>
+  </marker>
+  <filter id="sh">
+    <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#00000014"/>
+  </filter>
+</defs>
+
+<!-- ─── background ─────────────────────────────────────────── -->
+<rect width="1200" height="1470" fill="#f1f5f9"/>
+
+<!-- ─── title bar ──────────────────────────────────────────── -->
+<rect x="0" y="0" width="1200" height="62" fill="#0f172a"/>
+<text x="600" y="28" text-anchor="middle" font-size="17" font-weight="700"
+      fill="#f8fafc" letter-spacing="0.4">
+  SOCA — Spatial Optimization Conversational Agent
+</text>
+<text x="600" y="50" text-anchor="middle" font-size="11" fill="#94a3b8" letter-spacing="0.3">
+  Server Architecture Diagram  ·  FastAPI 0.x  ·  Next.js 16.2  ·  Google ADK  ·  PuLP / Gurobi  ·  2026-05-12
+</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 1 — PRESENTATION  y=72  h=125
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="72" width="1144" height="125" rx="6"
+      fill="#dbeafe" stroke="#60a5fa" stroke-width="1.5" filter="url(#sh)"/>
+<!-- header stripe -->
+<rect x="28" y="72" width="1144" height="22" rx="6" fill="#2563eb"/>
+<rect x="28" y="87"  width="1144" height="7"  fill="#2563eb"/>
+<text x="600" y="87" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  PRESENTATION LAYER — Next.js 16.2.4  ·  port :3000
+</text>
+
+<!-- Chat Panel -->
+<rect x="46" y="103" width="248" height="82" rx="4"
+      fill="#ffffff" stroke="#93c5fd" stroke-width="1" filter="url(#sh)"/>
+<text x="170" y="120" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1d4ed8">Chat Panel</text>
+<text x="170" y="135" text-anchor="middle" font-size="9"    fill="#475569">Streaming token display</text>
+<text x="170" y="149" text-anchor="middle" font-size="9"    fill="#64748b">POST /api/chat/stream  (SSE)</text>
+<text x="170" y="163" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">hooks/use-chat.ts</text>
+<text x="170" y="178" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">components/chat/</text>
+
+<!-- MapLibre GL -->
+<rect x="306" y="103" width="248" height="82" rx="4"
+      fill="#ffffff" stroke="#93c5fd" stroke-width="1" filter="url(#sh)"/>
+<text x="430" y="120" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1d4ed8">MapLibre GL</text>
+<text x="430" y="135" text-anchor="middle" font-size="9"    fill="#475569">Vector tile / layer rendering</text>
+<text x="430" y="149" text-anchor="middle" font-size="9"    fill="#64748b">GET /api/map</text>
+<text x="430" y="163" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">hooks/use-map-state.ts</text>
+<text x="430" y="178" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">components/map/map-view.tsx</text>
+
+<!-- Activity Sidebar -->
+<rect x="566" y="103" width="248" height="82" rx="4"
+      fill="#ffffff" stroke="#93c5fd" stroke-width="1" filter="url(#sh)"/>
+<text x="690" y="120" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1d4ed8">Activity Sidebar</text>
+<text x="690" y="135" text-anchor="middle" font-size="9"    fill="#475569">Real-time activity log</text>
+<text x="690" y="149" text-anchor="middle" font-size="9"    fill="#64748b">GET /api/events/stream  (SSE)</text>
+<text x="690" y="163" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">hooks/use-session.ts</text>
+<text x="690" y="178" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">components/layout/sidebar.tsx</text>
+
+<!-- AOI Draw Map -->
+<rect x="826" y="103" width="318" height="82" rx="4"
+      fill="#ffffff" stroke="#93c5fd" stroke-width="1" filter="url(#sh)"/>
+<text x="985" y="120" text-anchor="middle" font-size="10.5" font-weight="700" fill="#1d4ed8">AOI Draw Map</text>
+<text x="985" y="135" text-anchor="middle" font-size="9"    fill="#475569">Polygon draw · place-name autocomplete</text>
+<text x="985" y="149" text-anchor="middle" font-size="9"    fill="#64748b">POST /api/aoi</text>
+<text x="985" y="163" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">lib/store.ts · lib/sources.ts</text>
+<text x="985" y="178" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">components/aoi/aoi-draw-map.tsx</text>
+
+<!-- arrow 1→2 -->
+<line x1="600" y1="197" x2="600" y2="224" stroke="#64748b" stroke-width="1.5"
+      stroke-dasharray="4,3" marker-end="url(#arr)"/>
+<text x="607" y="215" font-size="9" fill="#64748b">HTTP · SSE</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 2 — APPLICATION GATEWAY  y=228  h=148
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="228" width="1144" height="148" rx="6"
+      fill="#dcfce7" stroke="#4ade80" stroke-width="1.5" filter="url(#sh)"/>
+<rect x="28" y="228" width="1144" height="22" rx="6" fill="#15803d"/>
+<rect x="28" y="243"  width="1144" height="7"  fill="#15803d"/>
+<text x="600" y="243" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  APPLICATION GATEWAY — FastAPI 0.x  ·  CORS Middleware  ·  port :8000
+</text>
+
+<!-- Router Registry box -->
+<rect x="46" y="258" width="1108" height="106" rx="4"
+      fill="#ffffff" stroke="#4ade80" stroke-width="1" filter="url(#sh)"/>
+<text x="600" y="275" text-anchor="middle" font-size="10" font-weight="700" fill="#15803d">
+  Router Registry  (backend/api/)  ·  Session resolved via  X-Session-Id  header  →  backend/deps.py
+</text>
+
+<!-- Route pills row 1  y=282 -->
+<rect x="60"  y="282" width="148" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="134" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">POST /api/session</text>
+
+<rect x="218" y="282" width="168" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="302" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">POST /api/chat/stream  ⟶ SSE</text>
+
+<rect x="396" y="282" width="178" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="485" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/events/stream  ⟶ SSE</text>
+
+<rect x="584" y="282" width="108" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="638" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">POST /api/aoi</text>
+
+<rect x="702" y="282" width="108" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="756" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">POST /api/data</text>
+
+<rect x="820" y="282" width="100" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="870" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/map</text>
+
+<rect x="930" y="282" width="115" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="987" y="295" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/network</text>
+
+<!-- Route pills row 2  y=308 -->
+<rect x="60"  y="308" width="120" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="120" y="321" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/problems</text>
+
+<rect x="190" y="308" width="112" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="246" y="321" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/export</text>
+
+<rect x="312" y="308" width="108" height="18" rx="9" fill="#f0fdf4" stroke="#4ade80" stroke-width="1"/>
+<text x="366" y="321" text-anchor="middle" font-size="8.5" fill="#15803d">GET /api/health</text>
+
+<text x="560" y="321" font-size="8.5" fill="#64748b" font-style="italic">
+  ← all routes share the same CORS origin policy (SOCA_CORS_ORIGINS env var)
+</text>
+
+<!-- Row 3 — shared note -->
+<text x="600" y="348" text-anchor="middle" font-size="8.5" fill="#6b7280">
+  Session middleware injects  problem_state  from  SessionStore  into every handler via  Depends(get_session)
+</text>
+
+<!-- arrows gateway → services + agent -->
+<line x1="320" y1="376" x2="320" y2="400" stroke="#64748b" stroke-width="1.3"
+      stroke-dasharray="4,3" marker-end="url(#arr)"/>
+<text x="238" y="393" font-size="8.5" fill="#64748b">state r/w</text>
+
+<line x1="880" y1="376" x2="880" y2="400" stroke="#64748b" stroke-width="1.3"
+      stroke-dasharray="4,3" marker-end="url(#arr)"/>
+<text x="888" y="393" font-size="8.5" fill="#64748b">event broadcast</text>
+
+<line x1="600" y1="376" x2="600" y2="400" stroke="#64748b" stroke-width="1.5"
+      marker-end="url(#arr)"/>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 3 — SERVICES  y=404  h=118
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="404" width="1144" height="118" rx="6"
+      fill="#fef9c3" stroke="#fbbf24" stroke-width="1.5" filter="url(#sh)"/>
+<rect x="28" y="404" width="1144" height="22" rx="6" fill="#d97706"/>
+<rect x="28" y="419"  width="1144" height="7"  fill="#d97706"/>
+<text x="600" y="419" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  SERVICE LAYER — backend/services/
+</text>
+
+<!-- SessionStore -->
+<rect x="46" y="433" width="546" height="77" rx="4"
+      fill="#ffffff" stroke="#fbbf24" stroke-width="1" filter="url(#sh)"/>
+<text x="319" y="451" text-anchor="middle" font-size="10.5" font-weight="700" fill="#b45309">SessionStore</text>
+<text x="319" y="466" text-anchor="middle" font-size="9"    fill="#475569">In-memory per-session  problem_state  dict  ·  keyed by  X-Session-Id</text>
+<text x="319" y="480" text-anchor="middle" font-size="9"    fill="#475569">Replaces  st.session_state  for the FastAPI path</text>
+<text x="319" y="494" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">session_store.py  ·  get_default_store()</text>
+
+<!-- EventBus -->
+<rect x="606" y="433" width="546" height="77" rx="4"
+      fill="#ffffff" stroke="#fbbf24" stroke-width="1" filter="url(#sh)"/>
+<text x="879" y="451" text-anchor="middle" font-size="10.5" font-weight="700" fill="#b45309">EventBus</text>
+<text x="879" y="466" text-anchor="middle" font-size="9"    fill="#475569">Async pub/sub  ·  fans activity-log + tool events to SSE subscribers</text>
+<text x="879" y="480" text-anchor="middle" font-size="9"    fill="#475569">Published by ADK tools  ·  consumed by  /api/events/stream</text>
+<text x="879" y="494" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">event_bus.py  ·  get_default_bus()</text>
+
+<!-- arrow services → agent -->
+<line x1="600" y1="522" x2="600" y2="547" stroke="#64748b" stroke-width="1.5"
+      marker-end="url(#arr)"/>
+<text x="608" y="540" font-size="9" fill="#64748b">context bind</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 4 — AGENT  y=551  h=284
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="551" width="1144" height="284" rx="6"
+      fill="#ede9fe" stroke="#a78bfa" stroke-width="1.5" filter="url(#sh)"/>
+<rect x="28" y="551" width="1144" height="22" rx="6" fill="#7c3aed"/>
+<rect x="28" y="566"  width="1144" height="7"  fill="#7c3aed"/>
+<text x="600" y="566" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  AGENT / INTELLIGENCE LAYER — agent/
+</text>
+
+<!-- SOCAAgent outer -->
+<rect x="46" y="578" width="330" height="245" rx="4"
+      fill="#ffffff" stroke="#a78bfa" stroke-width="1.5" filter="url(#sh)"/>
+<text x="211" y="596" text-anchor="middle" font-size="10.5" font-weight="700" fill="#6d28d9">SOCAAgent</text>
+<text x="211" y="609" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">agent/soca_agent.py</text>
+
+<!-- ADK LlmAgent (inside) -->
+<rect x="62" y="615" width="298" height="56" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="211" y="632" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">ADK LlmAgent + Runner</text>
+<text x="211" y="646" text-anchor="middle" font-size="8.5" fill="#475569">Google ADK  ·  Gemini 1.5 Pro</text>
+<text x="211" y="660" text-anchor="middle" font-size="8.5" fill="#475569">InMemorySessionService  ·  full history per turn</text>
+
+<!-- StateBridge (inside) -->
+<rect x="62" y="679" width="298" height="56" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="211" y="696" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">StateBridge</text>
+<text x="211" y="710" text-anchor="middle" font-size="8.5" fill="#475569">Thread-local context binding</text>
+<text x="211" y="724" text-anchor="middle" font-size="8.5" fill="#475569">ADK session  ↔  SessionStore sync</text>
+
+<!-- ADK Prompts (inside) -->
+<rect x="62" y="743" width="298" height="68" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="211" y="760" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">ADK Prompts</text>
+<text x="211" y="774" text-anchor="middle" font-size="8.5" fill="#475569">System instruction builder</text>
+<text x="211" y="788" text-anchor="middle" font-size="8.5" fill="#475569">Problem descriptions · tool decision rules</text>
+<text x="211" y="802" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">agent/adk_prompts.py</text>
+
+<!-- fn-call arrow SOCAAgent → Tool Registry -->
+<line x1="376" y1="700" x2="398" y2="700" stroke="#7c3aed" stroke-width="1.5"
+      marker-end="url(#arr-r)"/>
+<text x="340" y="695" font-size="8.5" fill="#7c3aed">fn calls</text>
+
+<!-- Tool Registry outer -->
+<rect x="400" y="578" width="744" height="245" rx="4"
+      fill="#ffffff" stroke="#a78bfa" stroke-width="1.5" filter="url(#sh)"/>
+<text x="772" y="596" text-anchor="middle" font-size="10.5" font-weight="700" fill="#6d28d9">
+  Tool Registry — ADK Structured Function Calling
+</text>
+<text x="772" y="609" text-anchor="middle" font-size="8" fill="#94a3b8" font-style="italic">agent/tools/</text>
+
+<!-- fetch_city_data -->
+<rect x="416" y="616" width="226" height="78" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="529" y="633" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">fetch_city_data</text>
+<text x="529" y="647" text-anchor="middle" font-size="8.5" fill="#475569">Boundaries · population · POIs</text>
+<text x="529" y="660" text-anchor="middle" font-size="8.5" fill="#475569">Overture → Nominatim / Overpass</text>
+<text x="529" y="673" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">fetch_tools.py</text>
+<text x="529" y="686" text-anchor="middle" font-size="8"    fill="#94a3b8">→ DataFetcher pipeline</text>
+
+<!-- stage_optimization -->
+<rect x="652" y="616" width="226" height="78" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="765" y="633" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">stage_optimization</text>
+<text x="765" y="647" text-anchor="middle" font-size="8.5" fill="#475569">Queues pending_action</text>
+<text x="765" y="660" text-anchor="middle" font-size="8.5" fill="#475569">Awaits explicit user approval</text>
+<text x="765" y="673" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">optimize_tools.py</text>
+<text x="765" y="686" text-anchor="middle" font-size="8"    fill="#94a3b8">→ problem_state.pending_action</text>
+
+<!-- confirm_optimization -->
+<rect x="888" y="616" width="248" height="78" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="1012" y="633" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">confirm_optimization</text>
+<text x="1012" y="647" text-anchor="middle" font-size="8.5" fill="#475569">Invokes solver · attaches equity metrics</text>
+<text x="1012" y="660" text-anchor="middle" font-size="8.5" fill="#475569">Writes reproducibility JSON log</text>
+<text x="1012" y="673" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">optimize_tools.py</text>
+<text x="1012" y="686" text-anchor="middle" font-size="8"    fill="#94a3b8">→ SolverRegistry · repro_logger</text>
+
+<!-- get_data_status -->
+<rect x="416" y="704" width="334" height="56" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="583" y="721" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">get_data_status</text>
+<text x="583" y="735" text-anchor="middle" font-size="8.5" fill="#475569">Inspects problem_state["data"]  ·  reports loaded dataset summary</text>
+<text x="583" y="749" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">status_tools.py</text>
+
+<!-- run_sensitivity_analysis -->
+<rect x="760" y="704" width="376" height="56" rx="3" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1"/>
+<text x="948" y="721" text-anchor="middle" font-size="9.5" font-weight="700" fill="#5b21b6">run_sensitivity_analysis</text>
+<text x="948" y="735" text-anchor="middle" font-size="8.5" fill="#475569">Drop-one re-solve  ·  per-facility objective degradation report</text>
+<text x="948" y="749" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">sensitivity_tools.py  ·  reuses cached road graph + data_dict</text>
+
+<!-- arrow agent → computation -->
+<line x1="600" y1="835" x2="600" y2="860" stroke="#64748b" stroke-width="1.5"
+      marker-end="url(#arr)"/>
+<text x="608" y="852" font-size="9" fill="#64748b">tool exec</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 5 — COMPUTATION  y=864  h=394
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="864" width="1144" height="394" rx="6"
+      fill="#d1fae5" stroke="#34d399" stroke-width="1.5" filter="url(#sh)"/>
+<rect x="28" y="864" width="1144" height="22" rx="6" fill="#047857"/>
+<rect x="28" y="879"  width="1144" height="7"  fill="#047857"/>
+<text x="600" y="879" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  COMPUTATION LAYER — solvers/  ·  utils/fetchers/  ·  utils/
+</text>
+
+<!-- ── Solver Registry ──────────────────────────────────── -->
+<rect x="46" y="889" width="546" height="178" rx="4"
+      fill="#ffffff" stroke="#34d399" stroke-width="1" filter="url(#sh)"/>
+<text x="319" y="907" text-anchor="middle" font-size="10" font-weight="700" fill="#065f46">Solver Registry</text>
+<text x="319" y="919" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">solvers/registry.py  ·  solvers/</text>
+
+<!-- P-Median -->
+<rect x="62"  y="925" width="244" height="54" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="184" y="941" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">P-Median</text>
+<text x="184" y="955" text-anchor="middle" font-size="8.5" fill="#475569">Minimise weighted average distance</text>
+<text x="184" y="968" text-anchor="middle" font-size="8.5" fill="#475569">MIP  ·  network distance (default)</text>
+
+<!-- P-Center -->
+<rect x="316" y="925" width="260" height="54" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="446" y="941" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">P-Center</text>
+<text x="446" y="955" text-anchor="middle" font-size="8.5" fill="#475569">Minimise maximum distance (equity)</text>
+<text x="446" y="968" text-anchor="middle" font-size="8.5" fill="#475569">MIP  ·  strict_network option</text>
+
+<!-- MCLP -->
+<rect x="62"  y="989" width="244" height="54" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="184" y="1005" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">MCLP</text>
+<text x="184" y="1019" text-anchor="middle" font-size="8.5" fill="#475569">Maximise coverage within radius</text>
+<text x="184" y="1032" text-anchor="middle" font-size="8.5" fill="#475569">Weighted population coverage</text>
+
+<!-- LSCP -->
+<rect x="316" y="989" width="260" height="54" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="446" y="1005" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">LSCP</text>
+<text x="446" y="1019" text-anchor="middle" font-size="8.5" fill="#475569">Minimise sites for full coverage</text>
+<text x="446" y="1032" text-anchor="middle" font-size="8.5" fill="#475569">Location Set Covering Problem</text>
+
+<!-- Solver backend strip -->
+<rect x="62" y="1053" width="514" height="8" rx="3" fill="#bbf7d0" stroke="#6ee7b7" stroke-width="1"/>
+<text x="319" y="1060" text-anchor="middle" font-size="7.5" fill="#065f46">
+  Gurobi (preferred)  →  PuLP / CBC (fallback)  ·  geodesic auto-fallback when road graph unavailable
+</text>
+
+<!-- ── Data Fetching Pipeline ───────────────────────────── -->
+<rect x="606" y="889" width="546" height="178" rx="4"
+      fill="#ffffff" stroke="#34d399" stroke-width="1" filter="url(#sh)"/>
+<text x="879" y="907" text-anchor="middle" font-size="10" font-weight="700" fill="#065f46">Data Fetching Pipeline</text>
+<text x="879" y="919" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">utils/fetchers/  ·  DataFetcher  (facade.py)</text>
+
+<!-- boundaries.py -->
+<rect x="622" y="925" width="162" height="72" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="703" y="941" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">boundaries.py</text>
+<text x="703" y="955" text-anchor="middle" font-size="8.5" fill="#475569">Overture Maps (primary)</text>
+<text x="703" y="969" text-anchor="middle" font-size="8.5" fill="#475569">→ Nominatim / Photon</text>
+<text x="703" y="983" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">(fallback)</text>
+<text x="703" y="993" text-anchor="middle" font-size="8"    fill="#94a3b8">OSM boundary IDs</text>
+
+<!-- pois.py -->
+<rect x="794" y="925" width="162" height="72" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="875" y="941" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">pois.py</text>
+<text x="875" y="955" text-anchor="middle" font-size="8.5" fill="#475569">Overture Maps (primary)</text>
+<text x="875" y="969" text-anchor="middle" font-size="8.5" fill="#475569">→ Overpass API</text>
+<text x="875" y="983" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">(fallback)</text>
+<text x="875" y="993" text-anchor="middle" font-size="8"    fill="#94a3b8">candidate + demand sites</text>
+
+<!-- population.py -->
+<rect x="966" y="925" width="170" height="72" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="1051" y="941" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">population.py</text>
+<text x="1051" y="955" text-anchor="middle" font-size="8.5" fill="#475569">HDX population grids</text>
+<text x="1051" y="969" text-anchor="middle" font-size="8.5" fill="#475569">→ synthetic grid</text>
+<text x="1051" y="983" text-anchor="middle" font-size="8"    fill="#94a3b8" font-style="italic">(fallback)</text>
+<text x="1051" y="993" text-anchor="middle" font-size="8"    fill="#94a3b8">OCHA humanitarian data</text>
+
+<!-- http.py strip -->
+<rect x="622" y="1007" width="514" height="28" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="879" y="1020" text-anchor="middle" font-size="9"   font-weight="700" fill="#065f46">http.py — shared requests.Session</text>
+<text x="879" y="1031" text-anchor="middle" font-size="8.5" fill="#475569">Token-bucket rate limiter  ·  Exponential backoff 1 s → 2 s → 4 s  ·  Nominatim 1 req/s ToS</text>
+
+<!-- overture_duckdb strip -->
+<rect x="622" y="1045" width="514" height="16" rx="3" fill="#bbf7d0" stroke="#6ee7b7" stroke-width="1"/>
+<text x="879" y="1057" text-anchor="middle" font-size="8" fill="#065f46">
+  overture_duckdb.py  ·  overture_release.py — DuckDB queries against Overture Maps public S3 release
+</text>
+
+<!-- ── Network Manager ─────────────────────────────────── -->
+<rect x="46" y="1079" width="546" height="166" rx="4"
+      fill="#ffffff" stroke="#34d399" stroke-width="1" filter="url(#sh)"/>
+<text x="319" y="1097" text-anchor="middle" font-size="10" font-weight="700" fill="#065f46">Network Manager</text>
+<text x="319" y="1109" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">utils/network_manager.py</text>
+
+<rect x="62" y="1115" width="514" height="40" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="319" y="1131" text-anchor="middle" font-size="9"   fill="#047857">OSMnx road-network graph  ·  LRU cache (cap = 3 sessions)</text>
+<text x="319" y="1145" text-anchor="middle" font-size="8.5" fill="#475569">Lazy fetch  ·  daemon prefetch thread spawned on AOI confirm</text>
+
+<rect x="62" y="1165" width="514" height="68" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="319" y="1181" text-anchor="middle" font-size="9"   font-weight="700" fill="#047857">Network Status FSM</text>
+<text x="319" y="1195" text-anchor="middle" font-size="8.5" fill="#475569">"fetching"  →  "ready"  →  "failed"</text>
+<text x="319" y="1209" text-anchor="middle" font-size="8.5" fill="#475569">Road-network shortest path is the default distance_metric for all four solvers</text>
+<text x="319" y="1222" text-anchor="middle" font-size="8"   fill="#94a3b8">Geodesic auto-fallback if graph unavailable at solve time  (warn attached to result)</text>
+
+<!-- ── Post-Solve Analytics ───────────────────────────── -->
+<rect x="606" y="1079" width="546" height="166" rx="4"
+      fill="#ffffff" stroke="#34d399" stroke-width="1" filter="url(#sh)"/>
+<text x="879" y="1097" text-anchor="middle" font-size="10" font-weight="700" fill="#065f46">Post-Solve Analytics</text>
+<text x="879" y="1109" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">utils/equity_metrics.py  ·  utils/repro_logger.py</text>
+
+<!-- Equity Metrics box -->
+<rect x="622" y="1115" width="246" height="118" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="745" y="1132" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">Equity Metrics</text>
+<text x="745" y="1147" text-anchor="middle" font-size="8.5" fill="#475569">Weighted Gini coefficient</text>
+<text x="745" y="1161" text-anchor="middle" font-size="8.5" fill="#475569">Top-decile demand share</text>
+<text x="745" y="1175" text-anchor="middle" font-size="8.5" fill="#475569">Computed from assignment + weights</text>
+<text x="745" y="1189" text-anchor="middle" font-size="8.5" fill="#475569">Attached to every solver result</text>
+<text x="745" y="1203" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">equity_metrics.py</text>
+<text x="745" y="1214" text-anchor="middle" font-size="8"   fill="#94a3b8">→ confirm_optimization</text>
+
+<!-- Repro Logger box -->
+<rect x="878" y="1115" width="258" height="118" rx="3" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1"/>
+<text x="1007" y="1132" text-anchor="middle" font-size="9.5" font-weight="700" fill="#047857">Reproducibility Logger</text>
+<text x="1007" y="1147" text-anchor="middle" font-size="8.5" fill="#475569">JSON record per solve run</text>
+<text x="1007" y="1161" text-anchor="middle" font-size="8.5" fill="#475569">inputs · seed · solver params · result</text>
+<text x="1007" y="1175" text-anchor="middle" font-size="8.5" fill="#475569">Written to RUNS_DIR</text>
+<text x="1007" y="1189" text-anchor="middle" font-size="8.5" fill="#475569">SOCA_RANDOM_SEED env / default 42</text>
+<text x="1007" y="1203" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">repro_logger.py</text>
+<text x="1007" y="1214" text-anchor="middle" font-size="8"   fill="#94a3b8">→ confirm_optimization</text>
+
+<!-- arrow computation → external -->
+<line x1="600" y1="1258" x2="600" y2="1283" stroke="#64748b" stroke-width="1.5"
+      marker-end="url(#arr)"/>
+<text x="608" y="1275" font-size="9" fill="#64748b">API calls</text>
+
+<!-- ═══════════════════════════════════════════════════════════
+     LAYER 6 — EXTERNAL DATA  y=1287  h=128
+     ═══════════════════════════════════════════════════════════ -->
+<rect x="28" y="1287" width="1144" height="128" rx="6"
+      fill="#fee2e2" stroke="#fca5a5" stroke-width="1.5" filter="url(#sh)"/>
+<rect x="28" y="1287" width="1144" height="22" rx="6" fill="#b91c1c"/>
+<rect x="28" y="1302"  width="1144" height="7"  fill="#b91c1c"/>
+<text x="600" y="1302" text-anchor="middle" font-size="10" font-weight="700"
+      fill="#ffffff" letter-spacing="1.2">
+  EXTERNAL DATA LAYER
+</text>
+
+<!-- 6 boxes: width=176, gap=12, total=6*176+5*12=1116, pad=14 each side -->
+
+<!-- Google Gemini -->
+<rect x="42"  y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="130" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">Google Gemini</text>
+<text x="130" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">LLM inference (ADK)</text>
+<text x="130" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">Structured function calling</text>
+<text x="130" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">gemini-1.5-pro</text>
+<text x="130" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">GEMINI_API_KEY</text>
+
+<!-- Overture Maps -->
+<rect x="230" y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="318" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">Overture Maps</text>
+<text x="318" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">Boundaries · POIs</text>
+<text x="318" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">DuckDB / S3 queries</text>
+<text x="318" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">overture_duckdb.py</text>
+<text x="318" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">public S3 release</text>
+
+<!-- HDX -->
+<rect x="418" y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="506" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">HDX</text>
+<text x="506" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">Population grids</text>
+<text x="506" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">OCHA Humanitarian Data</text>
+<text x="506" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">population.py</text>
+<text x="506" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">→ synthetic fallback</text>
+
+<!-- OpenStreetMap -->
+<rect x="606" y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="694" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">OpenStreetMap</text>
+<text x="694" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">Road-network graphs</text>
+<text x="694" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">via OSMnx library</text>
+<text x="694" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">network_manager.py</text>
+<text x="694" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">shortest-path distances</text>
+
+<!-- Nominatim -->
+<rect x="794" y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="882" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">Nominatim</text>
+<text x="882" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">Geocoding fallback</text>
+<text x="882" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">OSM boundary IDs</text>
+<text x="882" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">boundaries.py</text>
+<text x="882" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">1 req/s ToS enforced</text>
+
+<!-- Overpass API -->
+<rect x="982" y="1316" width="176" height="90" rx="4"
+      fill="#ffffff" stroke="#fca5a5" stroke-width="1" filter="url(#sh)"/>
+<text x="1070" y="1334" text-anchor="middle" font-size="10" font-weight="700" fill="#991b1b">Overpass API</text>
+<text x="1070" y="1349" text-anchor="middle" font-size="8.5" fill="#475569">OSM POI fallback</text>
+<text x="1070" y="1363" text-anchor="middle" font-size="8.5" fill="#475569">Overture → Overpass</text>
+<text x="1070" y="1377" text-anchor="middle" font-size="8"   fill="#94a3b8">pois.py</text>
+<text x="1070" y="1390" text-anchor="middle" font-size="8"   fill="#94a3b8" font-style="italic">rate-limited via http.py</text>
+
+<!-- ─── footer ──────────────────────────────────────────── -->
+<line x1="28" y1="1432" x2="1172" y2="1432" stroke="#cbd5e1" stroke-width="1"/>
+<text x="600" y="1451" text-anchor="middle" font-size="8.5" fill="#94a3b8">
+  SOCA Server Architecture  ·  commit 640375d  ·  branch cursor/fix-data-fetching-reliability-5489  ·  2026-05-12
+</text>
+
+</svg>

@@ -6,6 +6,27 @@ instructions. The ADK agent uses function calling — no JSON parsing needed.
 Domain knowledge and tool-selection rules are all that remain.
 """
 
+from utils.fetchers.constants import OVERTURE_CATEGORIES
+
+
+def _build_poi_category_table() -> str:
+    """Render the supported POI categories with their exact Overture subtypes."""
+    total_subtypes = sum(len(subs) for subs in OVERTURE_CATEGORIES.values())
+    lines = [
+        f"There are **{len(OVERTURE_CATEGORIES)} POI categories** covering "
+        f"**{total_subtypes} Overture place subtypes** in total. Each category "
+        "maps to the following exact subtypes (this is the complete set the "
+        "data fetcher will query — anything outside this list is unsupported):",
+        "",
+        "| category | # subtypes | subtypes |",
+        "|---|---|---|",
+    ]
+    for category, subtypes in OVERTURE_CATEGORIES.items():
+        lines.append(
+            f"| {category} | {len(subtypes)} | {', '.join(subtypes)} |"
+        )
+    return "\n".join(lines)
+
 
 def build_adk_instruction(problems_metadata: list) -> str:
     """Build the agent instruction string for the ADK LlmAgent."""
@@ -65,8 +86,17 @@ What it does: runs the solver and writes the solution to the session.
 After calling it: explain the solution — what was achieved, key metrics, trade-offs, suggestions.
 
 ## get_data_status
-Use when: the user asks what data is loaded, or you need to verify what datasets are available before staging an optimization.
-What it does: returns a summary of all loaded datasets and current problem parameters.
+Use when: the user asks what data is loaded, what POI subtypes were fetched,
+or the exact breakdown of an amenity column (e.g. "how many primary_school
+vs school vs preschool?"), or you need to verify what datasets are available
+before staging an optimization.
+What it does: returns a summary of all loaded datasets and current problem
+parameters. For any dataset with an `amenity` column (i.e. fetched POI
+layers), the summary includes `amenity_subtype_counts` — a dict mapping each
+Overture place subtype to its exact count in the loaded data, plus
+`amenity_subtype_total` and `amenity_subtype_unique`. Use this to answer
+breakdown questions directly; do NOT tell the user you lack a tool to count
+subtypes — call get_data_status() and read `amenity_subtype_counts`.
 
 # Tool-Selection Decision Rules
 
@@ -116,10 +146,13 @@ Default to "city" when uncertain.
 
 # Supported POI Categories
 
-health, education, food, finance, fire_station, police, library, transport, water, emergency
+{_build_poi_category_table()}
 
 Fetch POIs when the problem involves an existing facility type (hospitals, schools, etc.).
 Omit the POI step for generic problems (e.g. warehouses, generic service points).
+When the user mentions a facility kind, match it to the closest category above —
+if it does not map to any of the listed subtypes, tell the user it is not
+supported rather than guessing a category.
 
 # Parameter Rules
 

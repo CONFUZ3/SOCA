@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiGet, apiPost } from "@/lib/api";
 import type { SessionSnapshot } from "@/types";
@@ -17,6 +17,7 @@ async function ensureSession(): Promise<SessionSnapshot> {
 export function useSession() {
   const qc = useQueryClient();
   const setSnapshot = useStore((s) => s.setSnapshot);
+  const resetStore = useStore((s) => s.resetStore);
 
   const q = useQuery({
     queryKey: ["session"],
@@ -28,8 +29,19 @@ export function useSession() {
     if (q.data) setSnapshot(q.data);
   }, [q.data, setSnapshot]);
 
+  const resetSession = useCallback(async () => {
+    await fetch("/api/session", { method: "DELETE", credentials: "include" });
+    resetStore();
+    qc.invalidateQueries({ queryKey: ["session"] });
+    qc.invalidateQueries({ queryKey: ["map-state"] });
+  }, [qc, resetStore]);
+
   return {
     ...q,
-    refresh: () => qc.invalidateQueries({ queryKey: ["session"] }),
+    refresh: () => {
+      qc.invalidateQueries({ queryKey: ["session"] });
+      qc.invalidateQueries({ queryKey: ["map-state"] });
+    },
+    resetSession,
   };
 }

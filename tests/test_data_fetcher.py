@@ -28,14 +28,24 @@ pytestmark = pytest.mark.skip(
 # ---------------------------------------------------------------------------
 # Import the module under test
 # ---------------------------------------------------------------------------
-from utils.data_fetcher import (
-    DataFetcher,
-    DataFetchError,
-    GeocodingError,
-    PopulationDataError,
-    _OSMNX_POI_TAGS,
-    NOMINATIM_URL,
-)
+try:
+    from utils.data_fetcher import (
+        DataFetcher,
+        DataFetchError,
+        GeocodingError,
+        PopulationDataError,
+        NOMINATIM_URL,
+    )
+    # _OSMNX_POI_TAGS was removed in the fetchers refactor; stub it out so
+    # collection succeeds even though this whole file is skipped.
+    try:
+        from utils.data_fetcher import _OSMNX_POI_TAGS  # type: ignore[attr-defined]
+    except ImportError:
+        _OSMNX_POI_TAGS = {}  # type: ignore[assignment]
+except ImportError:
+    DataFetcher = DataFetchError = GeocodingError = PopulationDataError = None  # type: ignore
+    NOMINATIM_URL = ""
+    _OSMNX_POI_TAGS = {}
 
 
 # ---------------------------------------------------------------------------

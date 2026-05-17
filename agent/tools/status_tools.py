@@ -26,7 +26,12 @@ def get_data_status(
 
     Returns:
         dict with keys:
-          datasets (list[dict]): each has name, num_features, geometry_type, source
+          datasets (list[dict]): each has name, num_features, geometry_type, source.
+              POI datasets additionally include `amenity_subtype_counts`
+              (dict of subtype → count, e.g. {"primary_school": 12,
+              "school": 30, "preschool": 4}), `amenity_subtype_total`,
+              and `amenity_subtype_unique` so the agent can answer
+              breakdown questions without a separate query tool.
           problem_type (str | None): currently identified problem type
           parameters (dict): current optimization parameters
           pending_optimization (bool): True if stage_optimization was called
@@ -44,12 +49,28 @@ def get_data_status(
             )
         except Exception:
             geom_type = "Unknown"
-        dataset_summaries.append({
+        summary = {
             "name": name,
             "num_features": len(gdf),
             "geometry_type": geom_type,
             "source": gdf.attrs.get("source", "uploaded"),
-        })
+        }
+        # For POI datasets, expose the exact subtype breakdown so the agent
+        # can answer questions like "how many primary_school vs school?"
+        # without needing a separate query tool.
+        if "amenity" in gdf.columns and len(gdf) > 0:
+            try:
+                counts = (
+                    gdf["amenity"].astype(str).value_counts().to_dict()
+                )
+                summary["amenity_subtype_counts"] = {
+                    str(k): int(v) for k, v in counts.items()
+                }
+                summary["amenity_subtype_total"] = int(sum(counts.values()))
+                summary["amenity_subtype_unique"] = len(counts)
+            except Exception as exc:
+                logger.warning("amenity breakdown failed for %s: %s", name, exc)
+        dataset_summaries.append(summary)
 
     solution = ps.get("solution")
     pending = (

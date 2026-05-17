@@ -1,17 +1,57 @@
 "use client";
 
-import { Download, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { Download, RotateCcw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tooltip } from "@/components/ui/tooltip";
 import { useStore } from "@/lib/store";
+import { useSession } from "@/hooks/use-session";
 import { formatNumber } from "@/lib/format";
 import { sourceLabel } from "@/lib/sources";
 import { UploadDropzone } from "@/components/sidebar/upload-dropzone";
+import type { DatasetSummary } from "@/types";
 
 export function Sidebar() {
   const datasets = useStore((s) => s.datasets);
   const snapshot = useStore((s) => s.snapshot);
+  const updateDatasetSubcategories = useStore((s) => s.updateDatasetSubcategories);
+  const updateDatasetSummary = useStore((s) => s.updateDatasetSummary);
   const hasSolution = Boolean(snapshot?.has_solution);
+  const { resetSession } = useSession();
+  const [confirmReset, setConfirmReset] = useState(false);
+
+  async function applySubcategoryFilter(dataset: DatasetSummary, next: string[]) {
+    // Optimistic update so the UI reacts instantly.
+    updateDatasetSubcategories(dataset.name, next);
+    try {
+      const resp = await fetch(
+        `/api/data/${encodeURIComponent(dataset.name)}/filter`,
+        {
+          method: "PATCH",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ active_subcategories: next }),
+        },
+      );
+      if (resp.ok) {
+        // Replace with the server's authoritative summary so
+        // active_num_features etc. reflect the real filter result.
+        const body = (await resp.json()) as DatasetSummary;
+        updateDatasetSummary(body);
+      }
+    } catch {
+      // optimistic update stays; map will re-sync on next poll
+    }
+  }
+
+  function toggleSubcategory(dataset: DatasetSummary, sub: string) {
+    const available = dataset.available_subcategories ?? [];
+    const current = dataset.active_subcategories ?? available;
+    const next = current.includes(sub)
+      ? current.filter((s) => s !== sub)
+      : [...current, sub];
+    applySubcategoryFilter(dataset, next);
+  }
 
   return (
     <aside className="flex h-full w-[260px] flex-col bg-surface hairline-r">
@@ -25,6 +65,17 @@ export function Sidebar() {
           <ul className="mt-2 space-y-1">
             {datasets.map((d) => {
               const source = d.source || "local";
+              const sourceDetails = d.source_details || [];
+              const numericSummary =
+                d.numeric_summary && d.numeric_summary.length > 0
+                  ? d.numeric_summary.slice(0, 2)
+                  : Object.entries(d.numeric_preview || {})
+                      .slice(0, 2)
+                      .map(([key, value]) => ({
+                        key,
+                        label: key,
+                        value,
+                      }));
               return (
                 <li
                   key={d.name}
@@ -37,7 +88,19 @@ export function Sidebar() {
                   </div>
                   <div className="mt-0.5 flex items-center gap-1.5 text-2xs text-text-faint">
                     <span className="mono">
-                      {formatNumber(d.num_features)} · {d.geometry_type}
+                      {d.active_num_features !== undefined &&
+                      d.active_num_features !== d.num_features ? (
+                        <>
+                          <span className="text-accent">
+                            {formatNumber(d.active_num_features)}
+                          </span>
+                          <span> / {formatNumber(d.num_features)}</span>
+                        </>
+                      ) : (
+                        <>{formatNumber(d.num_features)}</>
+                      )}
+                      {" · "}
+                      {d.geometry_type}
                     </span>
                   </div>
                   <Tooltip content={`Source: ${sourceLabel(source)}`}>
@@ -48,6 +111,32 @@ export function Sidebar() {
                       </span>
                     </div>
                   </Tooltip>
+                  <div className="mt-0.5 flex flex-wrap items-center gap-1 text-2xs text-text-faint">
+                    {d.role ? (
+                      <span className="rounded border border-border px-1 py-[1px] uppercase tracking-wide">
+                        {d.role}
+                      </span>
+                    ) : null}
+                    {sourceDetails.length > 0 ? (
+                      <span className="truncate">
+                        {sourceDetails.map((s) => sourceLabel(s)).join(" · ")}
+                      </span>
+                    ) : null}
+                  </div>
+                  {numericSummary.length > 0 ? (
+                    <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-2xs text-text-faint">
+                      {numericSummary.map((item) => (
+                        <span key={item.key} className="mono">
+                          {item.label}:{formatNumber(item.value)}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                  <SubcategoryFilter
+                    dataset={d}
+                    onToggle={(sub) => toggleSubcategory(d, sub)}
+                    onSetAll={(next) => applySubcategoryFilter(d, next)}
+                  />
                 </li>
               );
             })}
@@ -94,11 +183,146 @@ export function Sidebar() {
         ) : null}
       </div>
 
-      <div className="hairline-t px-3 py-2 text-2xs text-text-faint">
-        <Sparkles className="mr-1 inline h-3 w-3" strokeWidth={1.5} />
-        solver: gurobi ⇄ pulp
+      <div className="hairline-t px-3 py-2 flex items-center justify-between text-2xs text-text-faint">
+        <span>
+          <Sparkles className="mr-1 inline h-3 w-3" strokeWidth={1.5} />
+          solver: gurobi ⇄ pulp
+        </span>
+        {confirmReset ? (
+          <div className="flex items-center gap-1">
+            <span className="text-text-muted">reset?</span>
+            <button
+              onClick={() => {
+                setConfirmReset(false);
+                resetSession();
+              }}
+              className="text-red-400 hover:text-red-300 transition-colors"
+            >
+              yes
+            </button>
+            <span>/</span>
+            <button
+              onClick={() => setConfirmReset(false)}
+              className="hover:text-text transition-colors"
+            >
+              no
+            </button>
+          </div>
+        ) : (
+          <Tooltip content="Clear session and start over">
+            <button
+              onClick={() => setConfirmReset(true)}
+              className="flex items-center gap-1 hover:text-text transition-colors"
+            >
+              <RotateCcw className="h-3 w-3" strokeWidth={1.5} />
+              reset
+            </button>
+          </Tooltip>
+        )}
       </div>
     </aside>
+  );
+}
+
+function SubcategoryFilter({
+  dataset,
+  onToggle,
+  onSetAll,
+}: {
+  dataset: DatasetSummary;
+  onToggle: (sub: string) => void;
+  onSetAll: (active: string[]) => void;
+}) {
+  const available = dataset.available_subcategories ?? [];
+  if (available.length === 0) return null;
+
+  const counts = dataset.subcategory_counts ?? {};
+  const active = dataset.active_subcategories ?? available;
+  const activeSet = new Set(active);
+  const activeCount = active.length;
+  const allOn = activeCount === available.length;
+  const [expanded, setExpanded] = useState(true);
+
+  const activeFeatureCount = available.reduce(
+    (sum, sub) => (activeSet.has(sub) ? sum + (counts[sub] ?? 0) : sum),
+    0,
+  );
+  const totalFeatureCount = available.reduce(
+    (sum, sub) => sum + (counts[sub] ?? 0),
+    0,
+  );
+
+  return (
+    <div className="mt-1.5 border-t border-border/50 pt-1.5">
+      <div className="flex items-center justify-between">
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="flex items-center gap-1 text-2xs text-text-muted hover:text-text transition-colors"
+        >
+          <span className="font-medium">PoI subtypes</span>
+          <span
+            className={`mono ${activeCount < available.length ? "text-accent" : "text-text-faint"}`}
+          >
+            {activeCount}/{available.length}
+          </span>
+          <span className="text-text-faint">{expanded ? "▲" : "▼"}</span>
+        </button>
+        <div className="flex items-center gap-2 text-2xs text-text-faint">
+          {totalFeatureCount > 0 && (
+            <span className="mono">
+              <span
+                className={
+                  activeFeatureCount < totalFeatureCount ? "text-accent" : ""
+                }
+              >
+                {activeFeatureCount.toLocaleString()}
+              </span>
+              <span> / {totalFeatureCount.toLocaleString()} feat.</span>
+            </span>
+          )}
+          {allOn ? (
+            <button onClick={() => onSetAll([])} className="hover:text-text transition-colors">
+              clear all
+            </button>
+          ) : (
+            <button onClick={() => onSetAll(available)} className="hover:text-text transition-colors">
+              select all
+            </button>
+          )}
+        </div>
+      </div>
+      {expanded ? (
+        <div className="mt-1 flex flex-col gap-0.5">
+          {available.map((sub) => {
+            const on = active.includes(sub);
+            const n = counts[sub];
+            return (
+              <button
+                key={sub}
+                onClick={() => onToggle(sub)}
+                title={on ? "Click to exclude from analysis" : "Click to include in analysis"}
+                className={`flex items-center justify-between rounded border px-1.5 py-[3px] text-2xs transition-colors text-left ${
+                  on
+                    ? "border-accent/60 bg-accent/10 text-text"
+                    : "border-border bg-transparent text-text-faint opacity-50"
+                }`}
+              >
+                <span className={on ? "" : "line-through"}>{sub.replace(/_/g, " ")}</span>
+                {n !== undefined && (
+                  <span
+                    className={`mono ml-2 shrink-0 ${
+                      on ? "text-text-muted" : "text-text-faint"
+                    }`}
+                  >
+                    {n.toLocaleString()}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
   );
 }
 

@@ -31,7 +31,7 @@ from agent.prompts import build_data_summary_text
 from agent.tools.fetch_tools import fetch_city_data
 from agent.tools.optimize_tools import confirm_optimization, stage_optimization
 from agent.tools.sensitivity_tools import run_sensitivity_analysis
-from agent.tools.state_bridge import set_current_context
+from agent.tools.state_bridge import clear_current_context, set_current_context
 from agent.tools.status_tools import get_data_status
 from config.settings import settings
 
@@ -73,6 +73,7 @@ class SOCAAgent:
 
         The generator never raises — errors are emitted as ``error`` events.
         """
+        context_set = False
         try:
             runner = self._get_runner()
             session = await self._get_or_create_session_async(problem_state)
@@ -86,6 +87,7 @@ class SOCAAgent:
                 generated_sites_seed=problem_state.get("_generated_sites_seed"),
                 network_manager=problem_state.get("_network_manager"),
             )
+            context_set = True
 
             message = self._build_message(
                 user_message,
@@ -110,7 +112,10 @@ class SOCAAgent:
                             args = getattr(fc, "args", None) or {}
                             try:
                                 args = dict(args)
-                            except Exception:
+                            except Exception as exc:
+                                logger.warning(
+                                    "ADK function_call args parse failed: %s", exc
+                                )
                                 args = {}
                             if name:
                                 tool_calls.append(name)
@@ -127,7 +132,10 @@ class SOCAAgent:
                             summary: Any
                             try:
                                 summary = dict(response) if response else {}
-                            except Exception:
+                            except Exception as exc:
+                                logger.warning(
+                                    "ADK function_response parse failed: %s", exc
+                                )
                                 summary = {"raw": str(response)}
                             yield {
                                 "type": "tool_call_result",
@@ -141,7 +149,10 @@ class SOCAAgent:
                             if hasattr(event, "is_final_response"):
                                 try:
                                     is_final = bool(event.is_final_response())
-                                except Exception:
+                                except Exception as exc:
+                                    logger.warning(
+                                        "ADK is_final_response check failed: %s", exc
+                                    )
                                     is_final = True
                             if is_final:
                                 text_parts.append(text)
@@ -166,6 +177,12 @@ class SOCAAgent:
         except Exception as exc:
             logger.error("SOCAAgent.chat_stream error: %s", exc, exc_info=True)
             yield {"type": "error", "message": self._friendly_error(exc)}
+        finally:
+            # Always clear the thread-local bridge so the next request on
+            # this worker thread doesn't see a stale data dict, problem_state,
+            # or NetworkManager from the previous turn.
+            if context_set:
+                clear_current_context()
 
     # ------------------------------------------------------------------
     # Internal helpers

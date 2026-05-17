@@ -22,6 +22,7 @@ export function useChat(onTurnFinished?: () => void) {
     appendAssistantToken,
     appendToolCallStart,
     appendToolCallResult,
+    closeOpenToolCalls,
     finalizeTurn,
     errorTurn,
   } = useStore.getState();
@@ -56,9 +57,13 @@ export function useChat(onTurnFinished?: () => void) {
               appendToolCallResult(assistantId, f.data);
               break;
             case "final":
+              closeOpenToolCalls(assistantId, { status: "completed" });
               finalizeTurn(assistantId, f.data.text || "");
               break;
             case "error":
+              closeOpenToolCalls(assistantId, {
+                error: f.data.message || "Something went wrong.",
+              });
               errorTurn(assistantId, f.data.message || "Something went wrong.");
               break;
             default:
@@ -67,6 +72,7 @@ export function useChat(onTurnFinished?: () => void) {
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        closeOpenToolCalls(assistantId, { error: `Stream interrupted: ${msg}` });
         errorTurn(assistantId, `Stream interrupted: ${msg}`);
       } finally {
         setBusy(false);
@@ -81,6 +87,7 @@ export function useChat(onTurnFinished?: () => void) {
       appendAssistantToken,
       appendToolCallStart,
       appendToolCallResult,
+      closeOpenToolCalls,
       finalizeTurn,
       errorTurn,
       onTurnFinished,

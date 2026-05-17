@@ -14,9 +14,14 @@ const LABELS: Record<string, string> = {
   kontur: "Kontur Population",
   hdx: "HDX (Humanitarian Data Exchange)",
   "kontur-hdx": "Kontur · HDX",
+  hdx_facebook_population: "HDX population",
+  hdx_kontur_population: "Kontur · HDX population",
+  auto_fetched: "Auto-fetched",
   user: "Uploaded by user",
   local: "Local file",
   synthetic: "Synthetic (fallback)",
+  synthetic_uniform_grid: "Synthetic population grid",
+  generated: "Generated",
 };
 
 export function sourceLabel(source: string | null | undefined): string {

@@ -200,6 +200,20 @@ def stage_optimization(
     """
     registry = get_problem_registry()
     data_store = get_data()
+    try:
+        from utils.activity_log import log_event as _log_event
+    except Exception:
+        _log_event = None
+
+    def _log_stage(status: str, detail: str) -> None:
+        if _log_event is None:
+            return
+        try:
+            _log_event("optimization.stage", status, detail)
+        except Exception:
+            pass
+
+    _log_stage("try", "Checking available data and optimization parameters")
 
     # Validate problem type
     pt = (problem_type or "").lower().strip()
@@ -213,6 +227,7 @@ def stage_optimization(
                 problem_solver = registry.get_problem(pt)
 
     if pt not in _VALID_PROBLEM_TYPES:
+        _log_stage("fail", f"Unknown optimization problem type: {problem_type}")
         return {
             "staged": False,
             "error": (
@@ -225,8 +240,17 @@ def stage_optimization(
     boundary_keys, demand_keys, candidate_keys = _categorise_data(data_store)
     has_demand = bool(demand_keys)
     has_candidates = bool(candidate_keys)
+    _log_stage(
+        "info",
+        (
+            f"Found {len(demand_keys)} demand dataset(s), "
+            f"{len(candidate_keys)} candidate dataset(s), "
+            f"and {len(boundary_keys)} boundary dataset(s)"
+        ),
+    )
 
     if not has_demand:
+        _log_stage("fail", "No demand data is available for optimization")
         return {
             "staged": False,
             "error": (
@@ -289,6 +313,7 @@ def stage_optimization(
             )
     elif pt == "mclp":
         if radius_metres is None:
+            _log_stage("fail", "MCLP needs a service radius before staging")
             return {
                 "staged": False,
                 "error": "MCLP requires a service_radius. Please specify one (with unit, e.g. 5 km).",
@@ -300,6 +325,7 @@ def stage_optimization(
             parameters["k_coverage"] = 2
     elif pt == "lscp":
         if radius_metres is None:
+            _log_stage("fail", "LSCP needs a service radius before staging")
             return {
                 "staged": False,
                 "error": "LSCP requires a service_radius.",
@@ -332,6 +358,7 @@ def stage_optimization(
         "boundary_datasets": list(boundary_keys),
         "will_generate_candidates": has_demand and not has_candidates,
     }
+    _log_stage("ok", f"{pt} is ready for confirmation")
 
     return {
         "staged": True,
@@ -493,6 +520,7 @@ def _prepare_solver_inputs(
     problem_solver,
     parameters: dict,
     existing_facilities_key: Optional[str] = None,
+    dataset_filters: Optional[dict] = None,
 ) -> tuple:
     """Build data_dict and finalise parameters for the solver.
 
@@ -505,7 +533,11 @@ def _prepare_solver_inputs(
     for name in demand_keys:
         data_dict["demand_points"] = data_store[name]
     for name in candidate_keys:
-        data_dict["candidate_sites"] = data_store[name]
+        gdf = data_store[name]
+        if dataset_filters and name in dataset_filters and "amenity" in gdf.columns:
+            active = dataset_filters[name]
+            gdf = gdf[gdf["amenity"].isin(active)]
+        data_dict["candidate_sites"] = gdf
 
     if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
         non_boundary = [
@@ -688,25 +720,66 @@ def _fetch_network_graph(
             return None, "euclidean", network_warnings, None
 
     fetch_timeout = float(getattr(settings, "NETWORK_FETCH_TIMEOUT", 45.0))
-    try:
-        with ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="netfetch"
-        ) as pool:
+    # Transient errors get one retry — a single Overpass blip shouldn't
+    # silently downgrade an entire run to geodesic. Anything outside this
+    # set (ValueError, KeyError, projection errors) is treated as
+    # deterministic and not retried.
+    transient_errors = (FutureTimeoutError, TimeoutError, ConnectionError, OSError)
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):  # original + 1 retry
+        pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="netfetch")
+        try:
             future = pool.submit(nm.get_graph, demand_gdf, boundary_polygon)
             try:
                 G_proj, crs_proj = future.result(timeout=fetch_timeout)
-                return (G_proj, crs_proj), distance_metric, network_warnings, None
             except FutureTimeoutError:
                 future.cancel()
                 raise TimeoutError(
                     f"road-network fetch exceeded {fetch_timeout:.0f}s wall-clock"
                 )
-    except Exception as exc:
-        logger.error(
-            "confirm_optimization: road network fetch error: %s", exc, exc_info=True
-        )
-        err = _fallback(str(exc))
-        return None, "euclidean", network_warnings, err
+            else:
+                return (G_proj, crs_proj), distance_metric, network_warnings, None
+        except transient_errors as exc:
+            last_exc = exc
+            if attempt == 0:
+                logger.warning(
+                    "confirm_optimization: network fetch transient error (%s); retrying once",
+                    exc,
+                )
+                try:
+                    from utils.activity_log import log_event
+                    log_event(
+                        "network.fetch",
+                        "info",
+                        f"transient error, retrying: {type(exc).__name__}: {exc}",
+                        source="OpenStreetMap",
+                    )
+                except Exception:  # pragma: no cover
+                    pass
+                continue
+            # Both attempts exhausted — fall back to geodesic.
+            logger.error(
+                "confirm_optimization: network fetch failed after retry: %s",
+                exc, exc_info=True,
+            )
+            err = _fallback(f"{type(exc).__name__}: {exc}")
+            return None, "euclidean", network_warnings, err
+        except Exception as exc:
+            # Deterministic failure (graph projection error, malformed AOI,
+            # etc.) — retrying buys nothing.
+            logger.error(
+                "confirm_optimization: road network fetch error: %s", exc, exc_info=True
+            )
+            err = _fallback(str(exc))
+            return None, "euclidean", network_warnings, err
+        finally:
+            # Don't block on stuck worker threads — the OSMnx request will
+            # die on its own socket timeout. Mirrors prefetch_network_graph.
+            pool.shutdown(wait=False)
+
+    # Defensive — the loop should always return.
+    err = _fallback(str(last_exc) if last_exc else "unknown network error")
+    return None, "euclidean", network_warnings, err
 
 
 def _run_solver_with_timeout(
@@ -997,11 +1070,13 @@ def confirm_optimization(
     data_store = get_data()
     ps = get_problem_state()
     boundary_keys, demand_keys, candidate_keys = _categorise_data(data_store)
+    dataset_filters = ps.get("dataset_filters") or {}
 
     data_dict, parameters, err = _prepare_solver_inputs(
         data_store, boundary_keys, demand_keys, candidate_keys,
         problem_type, problem_solver, parameters,
         existing_facilities_key=existing_facilities_key,
+        dataset_filters=dataset_filters,
     )
     if err is not None:
         return err

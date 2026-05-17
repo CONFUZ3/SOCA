@@ -14,7 +14,7 @@ const MAX_KM2 = 50_000;
 
 // MapboxDraw default styles patched for MapLibre compatibility:
 // array branches inside `case` expressions must be wrapped in ["literal", [...]]
-const DRAW_STYLES: MapboxDraw.MapboxDrawOptions["styles"] = [
+export const DRAW_STYLES: MapboxDraw.MapboxDrawOptions["styles"] = [
   {
     id: "gl-draw-polygon-fill",
     type: "fill",

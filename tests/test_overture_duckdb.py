@@ -52,10 +52,10 @@ def test_query_divisions_lima():
 
 
 def test_query_division_area_by_id_for_lima():
-    """The 'Lima' region row (which has a polygon) returns WKB bytes."""
+    """The 'Lima' division row (which has a polygon) returns WKB bytes."""
     df = od.query_divisions(
         bbox=(-77.5, -12.5, -76.5, -11.5),
-        subtypes=["region"],
+        subtypes=["locality", "localadmin", "county", "region"],
         name_query="lima",
     )
     lima_region = df[df["name"].astype(str).str.lower() == "lima"].iloc[0]

@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import (
     APIRouter,
@@ -16,6 +16,7 @@ from fastapi import (
     UploadFile,
     status,
 )
+from pydantic import BaseModel
 
 from backend.deps import get_bus, resolve_session
 from utils.activity_log import log_event
@@ -35,7 +36,9 @@ def _get_processor(record: Dict[str, Any]):
     return dp
 
 
-def _dataset_info(name: str, gdf) -> Dict[str, Any]:
+def _dataset_info(
+    name: str, gdf, filters: Optional[Dict[str, List[str]]] = None
+) -> Dict[str, Any]:
     geom_type = "Unknown"
     try:
         if len(gdf) > 0:
@@ -47,14 +50,92 @@ def _dataset_info(name: str, gdf) -> Dict[str, Any]:
     except Exception:
         bounds = []
     columns = [c for c in getattr(gdf, "columns", []) if c != "geometry"]
-    return {
+    source_values: List[str] = []
+    if gdf is not None and "data_source" in columns:
+        try:
+            source_values = [
+                str(v)
+                for v in gdf["data_source"].dropna().astype(str).unique().tolist()[:3]
+            ]
+        except Exception:
+            source_values = []
+
+    numeric_preview: Dict[str, float] = {}
+    preferred_numeric = ("population", "demand", "weight", "capacity", "cost")
+    if gdf is not None:
+        try:
+            for col in preferred_numeric:
+                if col not in columns:
+                    continue
+                series = gdf[col].dropna()
+                if len(series) == 0:
+                    continue
+                numeric_preview[col] = float(series.mean())
+                if len(numeric_preview) >= 2:
+                    break
+        except Exception:
+            numeric_preview = {}
+
+    lname = name.lower()
+    if lname.startswith("boundary"):
+        role = "boundary"
+    elif lname.startswith("demand") or "population" in lname:
+        role = "demand"
+    elif "candidate" in lname or "facilit" in lname or "generated" in lname:
+        role = "candidate"
+    else:
+        role = "other"
+
+    available_subcategories: List[str] = []
+    subcategory_counts: Dict[str, int] = {}
+    if gdf is not None and "amenity" in columns:
+        try:
+            counts = gdf["amenity"].dropna().astype(str).value_counts()
+            subcategory_counts = {str(k): int(v) for k, v in counts.items()}
+            # Sort by count desc, then alphabetically for stable order.
+            available_subcategories = sorted(
+                subcategory_counts.keys(),
+                key=lambda k: (-subcategory_counts[k], k),
+            )
+        except Exception:
+            available_subcategories = []
+            subcategory_counts = {}
+
+    total_features = int(len(gdf)) if gdf is not None else 0
+
+    active_subcategories: Optional[List[str]] = None
+    if filters is not None and name in filters:
+        active_subcategories = filters[name]
+
+    # Compute the post-filter feature count so the UI can show the actual
+    # number of features that will be passed to the optimizer / map.
+    if active_subcategories is not None and "amenity" in columns and gdf is not None:
+        try:
+            active_set = {str(s) for s in active_subcategories}
+            mask = gdf["amenity"].astype(str).isin(active_set)
+            active_num_features = int(mask.sum())
+        except Exception:
+            active_num_features = total_features
+    else:
+        active_num_features = total_features
+
+    result: Dict[str, Any] = {
         "name": name,
-        "num_features": int(len(gdf)) if gdf is not None else 0,
+        "num_features": total_features,
+        "active_num_features": active_num_features,
         "geometry_type": geom_type,
         "columns": columns,
         "bounds": bounds,
         "source": gdf.attrs.get("source") if hasattr(gdf, "attrs") else None,
+        "role": role,
+        "source_details": source_values,
+        "numeric_preview": numeric_preview,
+        "available_subcategories": available_subcategories,
+        "subcategory_counts": subcategory_counts,
     }
+    if active_subcategories is not None:
+        result["active_subcategories"] = active_subcategories
+    return result
 
 
 class _NamedBuffer(io.BytesIO):
@@ -65,11 +146,37 @@ class _NamedBuffer(io.BytesIO):
         self.name = name
 
 
+class _SubcategoryFilterBody(BaseModel):
+    active_subcategories: List[str]
+
+
 @router.get("")
 def list_datasets(ctx=Depends(resolve_session)) -> Dict[str, List[Dict[str, Any]]]:
     _session_id, record = ctx
-    data = record["problem_state"].get("data") or {}
-    return {"datasets": [_dataset_info(n, g) for n, g in data.items()]}
+    ps = record["problem_state"]
+    data = ps.get("data") or {}
+    filters = ps.get("dataset_filters") or {}
+    return {"datasets": [_dataset_info(n, g, filters) for n, g in data.items()]}
+
+
+@router.patch("/{name}/filter")
+def set_subcategory_filter(
+    name: str,
+    body: _SubcategoryFilterBody,
+    ctx=Depends(resolve_session),
+) -> Dict[str, Any]:
+    _session_id, record = ctx
+    ps = record["problem_state"]
+    data = ps.get("data") or {}
+    if name not in data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No dataset named {name!r} in session.",
+        )
+    filters = ps.setdefault("dataset_filters", {})
+    filters[name] = body.active_subcategories
+    gdf = data[name]
+    return _dataset_info(name, gdf, filters)
 
 
 @router.post("/upload")
@@ -111,10 +218,11 @@ async def upload_dataset(
                     source="user",
                 )
 
+        filters = ps.get("dataset_filters") or {}
         return {
             "loaded": loaded,
             "errors": errors,
-            "datasets": [_dataset_info(n, g) for n, g in data_store.items()],
+            "datasets": [_dataset_info(n, g, filters) for n, g in data_store.items()],
         }
     finally:
         bus.bind_session(None)

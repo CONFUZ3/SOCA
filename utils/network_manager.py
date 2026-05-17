@@ -5,6 +5,7 @@ Lives in st.session_state["network_manager"] so the large graph objects are
 never JSON-serialised into ADK session state.
 """
 
+import concurrent.futures
 import hashlib
 import logging
 import threading
@@ -355,6 +356,12 @@ def prefetch_network_graph(
     _set(NETWORK_STATUS_KEY, "fetching")
     _set(NETWORK_STATUS_ERROR_KEY, None)
 
+    # Wall-clock budget for the entire prefetch — protects against a stuck
+    # Overpass request pinning this daemon thread until the process exits.
+    fetch_timeout = 90.0
+    if _soca_settings is not None:
+        fetch_timeout = float(getattr(_soca_settings, "NETWORK_FETCH_TIMEOUT", 90.0))
+
     try:
         if aoi_gdf is None or len(aoi_gdf) == 0:
             raise ValueError("AOI GeoDataFrame is empty")
@@ -368,7 +375,24 @@ def prefetch_network_graph(
         except Exception:
             boundary_polygon = aoi_gdf.geometry.iloc[0]
 
-        G_proj, _crs = network_manager.get_graph(aoi_gdf, boundary_polygon=boundary_polygon)
+        pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="prefetch-netfetch",
+        )
+        try:
+            future = pool.submit(
+                network_manager.get_graph, aoi_gdf, boundary_polygon
+            )
+            try:
+                G_proj, _crs = future.result(timeout=fetch_timeout)
+            except concurrent.futures.TimeoutError:
+                future.cancel()
+                raise TimeoutError(
+                    f"Road graph fetch exceeded {fetch_timeout:.0f}s wall-clock"
+                )
+        finally:
+            # Don't block waiting for a stuck worker — the OSMnx request
+            # has its own socket timeout and will exit on its own.
+            pool.shutdown(wait=False)
         n_nodes = len(G_proj.nodes) if hasattr(G_proj, "nodes") else 0
         n_edges = len(G_proj.edges) if hasattr(G_proj, "edges") else 0
         _set(NETWORK_STATUS_STATS_KEY, {"nodes": n_nodes, "edges": n_edges})

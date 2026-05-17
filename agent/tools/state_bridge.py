@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 _bridge = threading.local()
 
 
+_BRIDGE_ATTRS = (
+    "data",
+    "problem_state",
+    "registry",
+    "generated_sites_count",
+    "generated_sites_seed",
+    "network_manager",
+)
+
+
 def set_current_context(
     data: Dict[str, Any],
     problem_state: Dict[str, Any],
@@ -41,6 +51,22 @@ def set_current_context(
     _bridge.generated_sites_seed = generated_sites_seed
     _bridge.network_manager = network_manager
     logger.debug("state_bridge: context set (data keys=%s)", list(data.keys()))
+
+
+def clear_current_context() -> None:
+    """Drop every reference set by ``set_current_context``.
+
+    Must be called from a ``finally`` block by every caller of
+    ``set_current_context`` so thread-pool workers (uvicorn, Streamlit) do
+    not leak the previous request's data dict, problem_state, or
+    NetworkManager into the next turn.
+    """
+    for attr in _BRIDGE_ATTRS:
+        if hasattr(_bridge, attr):
+            try:
+                delattr(_bridge, attr)
+            except AttributeError:  # pragma: no cover - race-safe no-op
+                pass
 
 
 def get_data() -> Dict[str, Any]:

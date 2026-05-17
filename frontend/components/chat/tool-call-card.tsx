@@ -16,6 +16,7 @@ import {
 import { cn } from "@/lib/cn";
 import { formatDurationMs, formatNumber } from "@/lib/format";
 import { sourceLabel } from "@/lib/sources";
+import { formatActivityDetail, formatActivityStage } from "@/lib/activity-format";
 import type { ChatTurnToolCall } from "@/lib/store";
 
 const LABELS: Record<string, { label: string; icon: React.ReactNode }> = {
@@ -428,7 +429,7 @@ export function ToolCallCard({ tc }: { tc: ChatTurnToolCall }) {
                 <li key={i} className="flex items-center gap-2 py-0.5 text-2xs">
                   <span className="shrink-0">{statusGlyph(evt.status)}</span>
                   <span className="mono w-32 shrink-0 truncate text-text-muted">
-                    {evt.stage}
+                    {formatActivityStage(evt)}
                   </span>
                   {evt.source ? (
                     <span className="mono shrink-0 text-text-faint">
@@ -436,7 +437,7 @@ export function ToolCallCard({ tc }: { tc: ChatTurnToolCall }) {
                     </span>
                   ) : null}
                   <span className="flex-1 truncate text-text-muted">
-                    {evt.detail}
+                    {formatActivityDetail(evt)}
                   </span>
                   {evt.duration_ms != null ? (
                     <span className="mono shrink-0 text-text-faint tabular-nums">

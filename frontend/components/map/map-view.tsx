@@ -4,6 +4,7 @@ import "@mapbox/mapbox-gl-draw/dist/mapbox-gl-draw.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import MapboxDraw from "@mapbox/mapbox-gl-draw";
+import { DRAW_STYLES } from "@/components/aoi/aoi-draw-map";
 import area from "@turf/area";
 import { Check, Loader2, Pencil, X } from "lucide-react";
 import type { MapLayer, MapSolution, MapState } from "@/types";
@@ -532,6 +533,7 @@ export function MapView({ state }: Props) {
     const draw = new MapboxDraw({
       displayControlsDefault: false,
       controls: { polygon: true, trash: true },
+      styles: DRAW_STYLES,
     });
     map.addControl(draw as unknown as maplibregl.IControl);
     drawRef.current = draw;

@@ -44,6 +44,29 @@ def test_create_session_sets_cookie_and_returns_snapshot(client):
         assert key in body
 
 
+def test_dataset_summary_reports_total_population():
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    from backend.api.session import _dataset_summary
+
+    gdf = gpd.GeoDataFrame(
+        {"population": [100, 150, 250]},
+        geometry=[Point(0, 0), Point(1, 1), Point(2, 2)],
+        crs="EPSG:4326",
+    )
+
+    summary = _dataset_summary("demand_test", gdf)
+
+    assert summary["numeric_preview"]["population"] == 500 / 3
+    assert summary["numeric_summary"][0] == {
+        "key": "population",
+        "label": "total population",
+        "value": 500.0,
+        "stat": "total",
+    }
+
+
 def test_session_is_idempotent(client):
     first = client.post("/api/session")
     assert first.status_code == 200

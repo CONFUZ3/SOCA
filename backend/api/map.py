@@ -387,6 +387,8 @@ def map_state(ctx=Depends(resolve_session)) -> JSONResponse:
     view_state: Dict[str, float] = {"longitude": 0.0, "latitude": 20.0, "zoom": 2.0}
     view_set = False
 
+    dataset_filters = ps.get("dataset_filters") or {}
+
     # --- Data layers (boundary, demand, candidate) ------------------------
     for name, gdf in data.items():
         # Skip internal data attached at solve time.
@@ -394,6 +396,10 @@ def map_state(ctx=Depends(resolve_session)) -> JSONResponse:
             continue
         try:
             role = _classify_role(name)
+            active = dataset_filters.get(name)
+            if active is not None and "amenity" in gdf.columns:
+                active_set = {str(s) for s in active}
+                gdf = gdf[gdf["amenity"].astype(str).isin(active_set)]
             gj = _to_geojson(gdf, role)
             if not gj or not gj.get("features"):
                 continue

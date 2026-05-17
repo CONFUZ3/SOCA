@@ -24,6 +24,44 @@ from .state_bridge import get_data, get_problem_state, get_aoi, get_aoi_boundary
 logger = logging.getLogger(__name__)
 
 
+def _activity_bus():
+    """Return the already-loaded FastAPI event bus, if this process has one."""
+    import sys
+
+    module = sys.modules.get("backend.services.event_bus")
+    if module is None:
+        return None
+    get_default_bus = getattr(module, "get_default_bus", None)
+    if get_default_bus is None:
+        return None
+    try:
+        return get_default_bus()
+    except Exception:
+        return None
+
+
+def _current_activity_session_id() -> Optional[str]:
+    bus = _activity_bus()
+    if bus is None:
+        return None
+    try:
+        return bus.current_session()
+    except Exception:
+        return None
+
+
+def _bind_activity_session(session_id: Optional[str]) -> Optional[str]:
+    bus = _activity_bus()
+    if bus is None:
+        return None
+    try:
+        previous = bus.current_session()
+        bus.bind_session(session_id)
+        return previous
+    except Exception:
+        return None
+
+
 def _step_boundaries(
     fetcher,
     processor,
@@ -36,10 +74,18 @@ def _step_boundaries(
     """Fetch boundary polygon. Returns (gdf_or_None, key_or_None, summaries, errors)."""
     from utils.data_fetcher import DataFetchError
     from utils.scale_classifier import validate_boundary_scale
+    from utils.activity_log import timed
 
     summaries: list = []
     try:
-        gdf = fetcher.fetch_boundaries(location, admin_level=admin_level, scale=scale)
+        with timed(
+            "fetch.boundary",
+            detail=f"Finding the AOI boundary for {location}",
+        ) as step:
+            gdf = fetcher.fetch_boundaries(
+                location, admin_level=admin_level, scale=scale
+            )
+            step.detail = f"AOI boundary ready for {location}"
         gdf = processor.preprocess_data(gdf)
         key = f"boundary_{slug}"
         gdf.attrs["source"] = "auto_fetched"
@@ -48,8 +94,11 @@ def _step_boundaries(
             valid, hint = validate_boundary_scale(gdf, scale)
             if not valid:
                 summaries.append(f"Note: {hint}")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Validation must not break the fetch — but the user should know
+            # the scale check was inconclusive instead of silently passing.
+            logger.warning("boundary scale validation failed: %s", exc)
+            summaries.append(f"Note: boundary scale check inconclusive ({exc}).")
         msg = (
             f"Boundary ({location}): 1 polygon "
             f"[scale={scale}, admin_level={admin_level}]"
@@ -74,11 +123,17 @@ def _step_population(
 ) -> tuple:
     """Fetch population demand grid. Returns (key_or_None, summaries, errors)."""
     from utils.data_fetcher import DataFetchError
+    from utils.activity_log import timed
 
     if boundary_gdf is None:
         return None, [], ["Population step skipped: boundary not available."]
     try:
-        gdf = fetcher.fetch_population(boundary_gdf)
+        with timed(
+            "fetch.population",
+            detail=f"Loading population grid for {location}",
+        ) as step:
+            gdf = fetcher.fetch_population(boundary_gdf)
+            step.detail = f"Population grid ready for {location}"
         gdf = processor.preprocess_data(gdf)
         key = f"demand_{slug}"
         gdf.attrs["source"] = "auto_fetched"
@@ -112,21 +167,41 @@ def _step_pois(
 ) -> tuple:
     """Fetch POI candidate sites. Returns (key_or_None, summaries, errors)."""
     from utils.data_fetcher import DataFetchError
+    from utils.activity_log import timed
 
     if boundary_gdf is None:
         return None, [], [
             f"POI step ('{poi_category}') skipped: boundary not available."
         ]
     try:
-        gdf = fetcher.fetch_pois(boundary_gdf, poi_category)
+        with timed(
+            "fetch.pois",
+            detail=f"Loading {poi_category} facility locations",
+        ) as step:
+            gdf = fetcher.fetch_pois(boundary_gdf, poi_category)
+            step.detail = f"{poi_category.title()} facility locations ready"
+        # Preserve provenance attrs across DataProcessor.preprocess_data.
+        tier_counts = gdf.attrs.get("tier_counts", {})
+        tier_errors = gdf.attrs.get("tier_errors", {})
         gdf = processor.preprocess_data(gdf)
+        if tier_counts:
+            gdf.attrs["tier_counts"] = tier_counts
+        if tier_errors:
+            gdf.attrs["tier_errors"] = tier_errors
         key = f"{poi_category}_facilities_{slug}"
         gdf.attrs["source"] = "auto_fetched"
         data_store[key] = gdf
-        msg = (
-            f"{poi_category.title()} facilities ({location}): "
-            f"{len(gdf)} points from public sources"
-        )
+        if tier_counts:
+            msg = (
+                f"{poi_category.title()} facilities ({location}): "
+                f"{len(gdf)} points (Overture: {tier_counts.get('overture', 0)}, "
+                f"OSM: {tier_counts.get('overpass', 0)})"
+            )
+        else:
+            msg = (
+                f"{poi_category.title()} facilities ({location}): "
+                f"{len(gdf)} points from public sources"
+            )
         logger.info("fetch_city_data: %s", msg)
         return key, [msg], []
     except DataFetchError as exc:
@@ -150,95 +225,106 @@ def _fetch_city_data_sync(
     aoi_info,
     aoi_gdf,
     tool_context: Optional[ToolContext],
+    activity_session_id: Optional[str],
 ) -> dict:
     """Synchronous body of fetch_city_data — runs in a thread pool worker."""
     from utils.data_fetcher import DataFetcher
     from utils.data_processor import DataProcessor
+    from utils.activity_log import log_event
 
-    scale = scale.strip().lower()
-    if scale not in VALID_SCALES:
-        from utils.scale_classifier import heuristic_scale_from_location
-        scale = heuristic_scale_from_location(location)
-        logger.info("fetch_city_data: scale inferred as '%s' for '%s'", scale, location)
+    previous_session = _bind_activity_session(activity_session_id)
+    try:
+        scale = scale.strip().lower()
+        if scale not in VALID_SCALES:
+            from utils.scale_classifier import heuristic_scale_from_location
+            scale = heuristic_scale_from_location(location)
+            logger.info("fetch_city_data: scale inferred as '%s' for '%s'", scale, location)
 
-    if not isinstance(admin_level, int) or not (2 <= admin_level <= 10):
-        admin_level = SCALE_ADMIN_LEVELS.get(scale, 7)
-        logger.info("fetch_city_data: admin_level defaulted to %d", admin_level)
+        if not isinstance(admin_level, int) or not (2 <= admin_level <= 10):
+            admin_level = SCALE_ADMIN_LEVELS.get(scale, 7)
+            logger.info("fetch_city_data: admin_level defaulted to %d", admin_level)
 
-    if poi_category not in VALID_POI_CATEGORIES:
-        poi_category = "health"
+        if poi_category not in VALID_POI_CATEGORIES:
+            poi_category = "health"
 
-    fetcher = DataFetcher()
-    processor = DataProcessor()
-    slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_") or "aoi"
+        fetcher = DataFetcher()
+        processor = DataProcessor()
+        slug = re.sub(r"[^a-z0-9]+", "_", location.lower()).strip("_") or "aoi"
 
-    fetched_datasets: list = []
-    summaries: list = []
-    errors: list = []
-    boundary_gdf = None
+        fetched_datasets: list = []
+        summaries: list = []
+        errors: list = []
+        boundary_gdf = None
 
-    # AOI short-circuit: reuse user-defined AOI as the boundary
-    if aoi_info is not None and aoi_gdf is not None and len(aoi_gdf) > 0:
-        boundary_gdf = aoi_gdf
-        aoi_name = aoi_info.get("name", "AOI")
-        summaries.append(
-            f"Using user-defined AOI '{aoi_name}' "
-            f"({aoi_info.get('area_km2', 0):,.1f} km²) as boundary — skipping geocoding."
+        # AOI short-circuit: reuse user-defined AOI as the boundary
+        if aoi_info is not None and aoi_gdf is not None and len(aoi_gdf) > 0:
+            boundary_gdf = aoi_gdf
+            aoi_name = aoi_info.get("name", "AOI")
+            log_event(
+                "fetch.boundary",
+                "ok",
+                f"Using the selected AOI boundary for {aoi_name}",
+            )
+            summaries.append(
+                f"Using user-defined AOI '{aoi_name}' "
+                f"({aoi_info.get('area_km2', 0):,.1f} km²) as boundary — skipping geocoding."
+            )
+            logger.info("fetch_city_data: AOI short-circuit for '%s'", aoi_name)
+        elif include_boundaries:
+            boundary_gdf, key, new_summaries, new_errors = _step_boundaries(
+                fetcher, processor, location, admin_level, scale, data_store, slug
+            )
+            summaries.extend(new_summaries)
+            errors.extend(new_errors)
+            if key:
+                fetched_datasets.append(key)
+
+        if include_population:
+            key, new_summaries, new_errors = _step_population(
+                fetcher, processor, location, scale, boundary_gdf, data_store, slug
+            )
+            summaries.extend(new_summaries)
+            errors.extend(new_errors)
+            if key:
+                fetched_datasets.append(key)
+
+        if include_pois:
+            key, new_summaries, new_errors = _step_pois(
+                fetcher, processor, location, poi_category, boundary_gdf, data_store, slug
+            )
+            summaries.extend(new_summaries)
+            errors.extend(new_errors)
+            if key:
+                fetched_datasets.append(key)
+
+        # Update data_summary in ADK session state so the agent knows what's available
+        if tool_context is not None:
+            existing = dict(tool_context.state.get("data_summary") or {})
+            for key in fetched_datasets:
+                gdf = data_store.get(key)
+                if gdf is not None:
+                    existing[key] = {
+                        "num_features": len(gdf),
+                        "geometry_type": (
+                            gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown"
+                        ),
+                        "columns": [c for c in gdf.columns if c != "geometry"],
+                        "source": "auto_fetched",
+                    }
+            tool_context.state["data_summary"] = existing
+
+        overall_status = "error" if (not fetched_datasets and errors) else (
+            "partial" if errors else "success"
         )
-        logger.info("fetch_city_data: AOI short-circuit for '%s'", aoi_name)
-    elif include_boundaries:
-        boundary_gdf, key, new_summaries, new_errors = _step_boundaries(
-            fetcher, processor, location, admin_level, scale, data_store, slug
-        )
-        summaries.extend(new_summaries)
-        errors.extend(new_errors)
-        if key:
-            fetched_datasets.append(key)
 
-    if include_population:
-        key, new_summaries, new_errors = _step_population(
-            fetcher, processor, location, scale, boundary_gdf, data_store, slug
-        )
-        summaries.extend(new_summaries)
-        errors.extend(new_errors)
-        if key:
-            fetched_datasets.append(key)
-
-    if include_pois:
-        key, new_summaries, new_errors = _step_pois(
-            fetcher, processor, location, poi_category, boundary_gdf, data_store, slug
-        )
-        summaries.extend(new_summaries)
-        errors.extend(new_errors)
-        if key:
-            fetched_datasets.append(key)
-
-    # Update data_summary in ADK session state so the agent knows what's available
-    if tool_context is not None:
-        existing = dict(tool_context.state.get("data_summary") or {})
-        for key in fetched_datasets:
-            gdf = data_store.get(key)
-            if gdf is not None:
-                existing[key] = {
-                    "num_features": len(gdf),
-                    "geometry_type": (
-                        gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown"
-                    ),
-                    "columns": [c for c in gdf.columns if c != "geometry"],
-                    "source": "auto_fetched",
-                }
-        tool_context.state["data_summary"] = existing
-
-    overall_status = "error" if (not fetched_datasets and errors) else (
-        "partial" if errors else "success"
-    )
-
-    return {
-        "status": overall_status,
-        "fetched_datasets": fetched_datasets,
-        "summaries": summaries,
-        "errors": errors,
-    }
+        return {
+            "status": overall_status,
+            "fetched_datasets": fetched_datasets,
+            "summaries": summaries,
+            "errors": errors,
+        }
+    finally:
+        _bind_activity_session(previous_session)
 
 
 async def fetch_city_data(
@@ -291,6 +377,7 @@ async def fetch_city_data(
     data_store = get_data()
     aoi_info = get_aoi()
     aoi_gdf = get_aoi_boundary_gdf()
+    activity_session_id = _current_activity_session_id()
 
     return await asyncio.to_thread(
         _fetch_city_data_sync,
@@ -305,4 +392,5 @@ async def fetch_city_data(
         aoi_info,
         aoi_gdf,
         tool_context,
+        activity_session_id,
     )
