@@ -23,6 +23,8 @@ import time
 from dataclasses import dataclass, asdict
 from typing import Optional
 
+from utils.fetchers.http import NominatimRateLimiter
+
 try:
     import requests
     _REQUESTS_AVAILABLE = True
@@ -257,22 +259,14 @@ def _kind_to_rank(kind: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-_LAST_NOMINATIM_CALL: float = 0.0
-
-
-def _nominatim_rate_limit() -> None:
-    global _LAST_NOMINATIM_CALL
-    elapsed = time.monotonic() - _LAST_NOMINATIM_CALL
-    if elapsed < 1.0:
-        time.sleep(1.0 - elapsed)
-    _LAST_NOMINATIM_CALL = time.monotonic()
+_nominatim_limiter = NominatimRateLimiter()
 
 
 def _suggest_nominatim(query: str, *, limit: int) -> list[GeocodeCandidate]:
     if not _REQUESTS_AVAILABLE:
         return []
 
-    _nominatim_rate_limit()
+    _nominatim_limiter.wait()
     params = {
         "q": query,
         "format": "jsonv2",

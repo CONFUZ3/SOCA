@@ -176,6 +176,8 @@ export function Sidebar() {
             <div className="mt-5 heading-section">Exports</div>
             <div className="mt-2 flex flex-col gap-1">
               <ExportButton label="GeoJSON" href="/api/export/geojson" />
+              <ExportButton label="Shapefile (zip)" href="/api/export/shapefile" />
+              <ExportButton label="GeoPackage" href="/api/export/geopackage" />
               <ExportButton label="CSV (facilities)" href="/api/export/csv" />
               <ExportButton label="PDF report" href="/api/export/pdf" />
             </div>

@@ -460,6 +460,13 @@ _ISO3_ALIAS_MAP = {
 # Process-local cache for centroid→ISO3 lookups so retries inside a session
 # don't re-hit Photon/Nominatim/country.is. Key is a rounded centroid tuple.
 _ISO3_REVGEO_CACHE: dict[tuple, tuple[Optional[str], str]] = {}
+_ISO3_CACHE_MAXSIZE = 256
+
+
+def _iso3_cache_set(key, value) -> None:
+    if len(_ISO3_REVGEO_CACHE) >= _ISO3_CACHE_MAXSIZE:
+        _ISO3_REVGEO_CACHE.pop(next(iter(_ISO3_REVGEO_CACHE)))
+    _ISO3_REVGEO_CACHE[key] = value
 
 
 def _resolve_iso3(boundary_4326: gpd.GeoDataFrame, centroid) -> tuple[Optional[str], str]:
@@ -583,7 +590,7 @@ def _resolve_iso3(boundary_4326: gpd.GeoDataFrame, centroid) -> tuple[Optional[s
                     iso3 = _try_iso(countrycode) or _try_iso(country_en)
                     if iso3:
                         result = (iso3, country_en or countrycode)
-                        _ISO3_REVGEO_CACHE[cache_key] = result
+                        _iso3_cache_set(cache_key, result)
                         return result
                 else:
                     logger.warning(
@@ -615,7 +622,7 @@ def _resolve_iso3(boundary_4326: gpd.GeoDataFrame, centroid) -> tuple[Optional[s
         iso3 = _try_iso(cc) or _try_iso(cname)
         if iso3:
             result = (iso3, cname or cc)
-            _ISO3_REVGEO_CACHE[cache_key] = result
+            _iso3_cache_set(cache_key, result)
             return result
     except Exception as e:
         logger.debug(f"Nominatim reverse geocode for ISO3 failed: {e}")
@@ -634,7 +641,7 @@ def _resolve_iso3(boundary_4326: gpd.GeoDataFrame, centroid) -> tuple[Optional[s
         iso3 = _try_iso(iso2)
         if iso3:
             result = (iso3, iso2)
-            _ISO3_REVGEO_CACHE[cache_key] = result
+            _iso3_cache_set(cache_key, result)
             return result
     except Exception as e:
         logger.debug(f"country.is reverse geocode for ISO3 failed: {e}")
@@ -1070,8 +1077,25 @@ def fetch_population(
                     f"HDX population fetch timed out after {_HDX_FETCH_TIMEOUT_SEC}s; "
                     "falling back to synthetic grid."
                 )
+                from utils.activity_log import log_event
+                log_event(
+                    "population.fetch",
+                    "warn",
+                    f"HDX download timed out after {_HDX_FETCH_TIMEOUT_SEC}s "
+                    "(large country file) — using synthetic population grid instead. "
+                    "Results will be approximate.",
+                    source="HDX",
+                )
     except Exception as exc:
         logger.warning(f"HDX tier failed: {exc}")
+        from utils.activity_log import log_event
+        log_event(
+            "population.fetch",
+            "warn",
+            f"HDX download failed ({exc}) — using synthetic population grid instead. "
+            "Results will be approximate.",
+            source="HDX",
+        )
 
     # Tier 2: synthetic uniform grid.
     total = estimate_total_population(boundary_gdf)

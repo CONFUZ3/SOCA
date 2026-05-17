@@ -1,4 +1,4 @@
-"""Export endpoints — GeoJSON / CSV / PDF for the current solution."""
+"""Export endpoints — GeoJSON / CSV / PDF / Shapefile / GeoPackage."""
 
 from __future__ import annotations
 
@@ -6,8 +6,12 @@ import csv
 import io
 import json
 import logging
+import os
+import tempfile
+import zipfile
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -475,6 +479,225 @@ def export_pdf(ctx=Depends(resolve_session)) -> Response:
     return Response(
         content=buf.getvalue(),
         media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Shared builder — assemble the three feature GeoDataFrames used by
+# Shapefile + GeoPackage exports.
+# ---------------------------------------------------------------------------
+
+
+def _build_solution_layers(record: Dict[str, Any]) -> Tuple[Any, Any, Any, Dict[str, Any]]:
+    """Return (facilities_gdf, demand_gdf, assignments_gdf, metadata).
+
+    Any of the three GeoDataFrames may be ``None`` when the inputs don't
+    support that layer (e.g. no demand data → no assignment lines).
+    """
+    import geopandas as gpd  # local import — heavy module
+    from shapely.geometry import LineString
+
+    sol = _require_solution(record)
+    ps = record.get("problem_state") or {}
+    cand_gdf = _to_4326(_candidate_gdf(record))
+    demand_gdf_src = _to_4326(_demand_gdf(record))
+    selected: List[int] = [int(i) for i in (sol.get("selected_facilities") or [])]
+    assignments: Dict[Any, Any] = sol.get("assignments") or {}
+
+    # --- Facilities ---
+    facilities_gdf = None
+    if cand_gdf is not None and selected:
+        rows = []
+        geoms = []
+        for i in selected:
+            if i < 0 or i >= len(cand_gdf):
+                continue
+            row = cand_gdf.iloc[i]
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+            props: Dict[str, Any] = {"kind": "facility", "fac_idx": int(i)}
+            for key in ("name", "id", "capacity", "cost", "label"):
+                try:
+                    val = row[key]
+                    if val is not None:
+                        props[key] = val if not hasattr(val, "item") else val.item()
+                except Exception:
+                    continue
+            rows.append(props)
+            geoms.append(geom)
+        if rows:
+            facilities_gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
+
+    # --- Demand (full input demand set, not just assigned) ---
+    out_demand_gdf = None
+    if demand_gdf_src is not None and len(demand_gdf_src) > 0:
+        # Compact attribute set so Shapefile's 10-char column limit isn't painful.
+        keep_cols = [
+            c for c in ("name", "id", "population", "demand", "weight", "default_weight")
+            if c in demand_gdf_src.columns
+        ]
+        out = demand_gdf_src[keep_cols].copy() if keep_cols else demand_gdf_src[[]].copy()
+        out["demand_idx"] = range(len(demand_gdf_src))
+        out["kind"] = "demand"
+        out = out.set_geometry(demand_gdf_src.geometry)
+        out.set_crs("EPSG:4326", inplace=True, allow_override=True)
+        out_demand_gdf = out
+
+    # --- Assignment lines ---
+    assignments_gdf = None
+    if assignments and cand_gdf is not None and demand_gdf_src is not None:
+        rows = []
+        geoms = []
+        for d_idx, f_idx in assignments.items():
+            try:
+                di, fi = int(d_idx), int(f_idx)
+            except Exception:
+                continue
+            if di < 0 or di >= len(demand_gdf_src):
+                continue
+            if fi < 0 or fi >= len(cand_gdf):
+                continue
+            d_pt = demand_gdf_src.geometry.iloc[di]
+            f_pt = cand_gdf.geometry.iloc[fi]
+            if d_pt is None or f_pt is None or d_pt.is_empty or f_pt.is_empty:
+                continue
+            rows.append({"kind": "assignment", "demand_idx": di, "fac_idx": fi})
+            geoms.append(LineString([(d_pt.x, d_pt.y), (f_pt.x, f_pt.y)]))
+        if rows:
+            assignments_gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
+
+    metadata = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "problem_type": ps.get("problem_type"),
+        "parameters": ps.get("parameters") or {},
+        "objective_value": sol.get("objective_value"),
+        "solver": sol.get("solver"),
+        "status": sol.get("status"),
+        "distance_metric_used": sol.get("distance_metric_used"),
+        "n_selected": len(selected),
+    }
+    return facilities_gdf, out_demand_gdf, assignments_gdf, metadata
+
+
+# ---------------------------------------------------------------------------
+# GET /api/export/shapefile
+# ---------------------------------------------------------------------------
+
+
+@router.get("/shapefile")
+def export_shapefile(ctx=Depends(resolve_session)) -> Response:
+    _, record = ctx
+    facilities_gdf, demand_gdf, assignments_gdf, metadata = _build_solution_layers(record)
+    if facilities_gdf is None and demand_gdf is None and assignments_gdf is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No exportable features available.",
+        )
+
+    layers = [
+        ("facilities", facilities_gdf),
+        ("demand", demand_gdf),
+        ("assignments", assignments_gdf),
+    ]
+
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        tmp_path = Path(tmp)
+        for name, gdf in layers:
+            if gdf is None or len(gdf) == 0:
+                continue
+            shp_path = tmp_path / f"{name}.shp"
+            try:
+                gdf.to_file(str(shp_path), driver="ESRI Shapefile", encoding="utf-8")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("shapefile write failed for %s: %s", name, exc)
+
+        # metadata.txt — Shapefile has no metadata-side-channel so drop a sidecar.
+        (tmp_path / "metadata.json").write_text(
+            json.dumps(metadata, indent=2, default=str), encoding="utf-8"
+        )
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in sorted(tmp_path.iterdir()):
+                if p.is_file():
+                    zf.write(p, arcname=p.name)
+        body = buf.getvalue()
+
+    fname = f"soca-solution-{_timestamp_slug()}.zip"
+    return Response(
+        content=body,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/export/geopackage
+# ---------------------------------------------------------------------------
+
+
+@router.get("/geopackage")
+def export_geopackage(ctx=Depends(resolve_session)) -> Response:
+    _, record = ctx
+    facilities_gdf, demand_gdf, assignments_gdf, metadata = _build_solution_layers(record)
+    if facilities_gdf is None and demand_gdf is None and assignments_gdf is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No exportable features available.",
+        )
+
+    layers = [
+        ("facilities", facilities_gdf),
+        ("demand", demand_gdf),
+        ("assignments", assignments_gdf),
+    ]
+
+    # GeoPandas/Fiona/pyogrio cannot write to a BytesIO for GPKG — go via temp file.
+    # ignore_cleanup_errors covers Windows where the GPKG driver may briefly
+    # retain a file handle after to_file() returns.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+        gpkg_path = Path(tmp) / "solution.gpkg"
+        wrote_any = False
+        for name, gdf in layers:
+            if gdf is None or len(gdf) == 0:
+                continue
+            try:
+                gdf.to_file(str(gpkg_path), layer=name, driver="GPKG")
+                wrote_any = True
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("gpkg write failed for layer %s: %s", name, exc)
+
+        if not wrote_any:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="GeoPackage export failed: no layers written.",
+            )
+
+        # Attach metadata as a non-spatial table using sqlite.
+        try:
+            import sqlite3
+            with sqlite3.connect(str(gpkg_path)) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)"
+                )
+                conn.execute("DELETE FROM metadata")
+                for k, v in metadata.items():
+                    conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES (?, ?)",
+                        (str(k), json.dumps(v, default=str)),
+                    )
+                conn.commit()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("gpkg metadata write failed: %s", exc)
+
+        body = gpkg_path.read_bytes()
+
+    fname = f"soca-solution-{_timestamp_slug()}.gpkg"
+    return Response(
+        content=body,
+        media_type="application/geopackage+sqlite3",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 

@@ -1,0 +1,31 @@
+{
+  "timestamp": "2026-04-26T14:25:55.241136+00:00",
+  "boundary_wkt": null,
+  "demand_source": null,
+  "demand_n_points": 2,
+  "candidates_source": null,
+  "candidates_n": 2,
+  "distance_method": "euclidean",
+  "solver": null,
+  "solver_params": {
+    "n_facilities": 2,
+    "fallback_time_limit_seconds": 120.0,
+    "ga_time_budget_seconds": 120.0
+  },
+  "random_seed": 42,
+  "objective_value": 0.0,
+  "selected_facility_ids": [],
+  "extra": {
+    "problem_type": "p-median",
+    "variant": "base",
+    "elapsed_s": 0.0008606910705566406,
+    "existing_facilities": {},
+    "equity_metrics": {
+      "max_weighted_distance": 0.0,
+      "gini_coefficient": 0.0,
+      "pct_demand_within_threshold": null,
+      "bottom_decile_avg_distance": 0.0
+    }
+  },
+  "run_id": "2b741908-4542-4ab5-b5e8-5675a654b227"
+}

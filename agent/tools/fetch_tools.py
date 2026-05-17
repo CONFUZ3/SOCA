@@ -394,3 +394,169 @@ async def fetch_city_data(
         tool_context,
         activity_session_id,
     )
+
+
+def _fetch_custom_data_sync(
+    data_type: str,
+    location: str,
+    query: str,
+    osm_tags_dict: dict,
+    data_store: dict,
+    aoi_gdf,
+    tool_context: Optional[ToolContext],
+    activity_session_id: Optional[str],
+) -> dict:
+    from utils.fetchers import source_registry
+    from utils.data_fetcher import DataFetcher, DataFetchError
+    from utils.activity_log import timed, log_event
+
+    previous_session = _bind_activity_session(activity_session_id)
+    try:
+        plugin = source_registry.get(data_type)
+        if plugin is None:
+            return {
+                "status": "error",
+                "dataset_key": None,
+                "summary": None,
+                "error": f"Unknown plugin '{data_type}'.",
+                "available": source_registry.list_available(),
+            }
+
+        ok, msg = plugin.validate_params(query=query, osm_tags=osm_tags_dict)
+        if not ok:
+            return {
+                "status": "error",
+                "dataset_key": None,
+                "summary": None,
+                "error": f"Invalid params for plugin '{data_type}': {msg}",
+            }
+
+        boundary_gdf = aoi_gdf
+        if boundary_gdf is None or len(boundary_gdf) == 0:
+            if not location.strip():
+                return {
+                    "status": "error",
+                    "dataset_key": None,
+                    "summary": None,
+                    "error": "No AOI is set and no location was provided.",
+                }
+            try:
+                with timed("fetch.boundary", detail=f"Resolving boundary for {location}"):
+                    boundary_gdf = DataFetcher().fetch_boundaries(location)
+            except DataFetchError as exc:
+                return {
+                    "status": "error",
+                    "dataset_key": None,
+                    "summary": None,
+                    "error": f"Boundary resolution failed for '{location}': {exc}",
+                }
+
+        slug = re.sub(r"[^a-z0-9]+", "_", (location or "aoi").lower()).strip("_") or "aoi"
+        key = f"{data_type}_{slug}"
+
+        try:
+            with timed(
+                f"fetch.{data_type}",
+                detail=f"Fetching {data_type} data",
+                source=plugin.name,
+            ) as step:
+                gdf = plugin.fetch(boundary_gdf, query=query, osm_tags=osm_tags_dict)
+                step.detail = f"{data_type}: {len(gdf)} features"
+        except Exception as exc:
+            log_event(
+                f"fetch.{data_type}",
+                "fail",
+                str(exc),
+                source=plugin.name,
+            )
+            return {
+                "status": "error",
+                "dataset_key": None,
+                "summary": None,
+                "error": f"Plugin '{data_type}' fetch failed: {exc}",
+            }
+
+        gdf.attrs["source"] = f"plugin:{data_type}"
+        data_store[key] = gdf
+
+        if tool_context is not None:
+            existing = dict(tool_context.state.get("data_summary") or {})
+            existing[key] = {
+                "num_features": len(gdf),
+                "geometry_type": (
+                    gdf.geometry.type.unique()[0] if len(gdf) > 0 else "Unknown"
+                ),
+                "columns": [c for c in gdf.columns if c != "geometry"],
+                "source": f"plugin:{data_type}",
+            }
+            tool_context.state["data_summary"] = existing
+
+        return {
+            "status": "ok",
+            "dataset_key": key,
+            "summary": {
+                "num_features": len(gdf),
+                "plugin": data_type,
+            },
+            "error": None,
+        }
+    finally:
+        _bind_activity_session(previous_session)
+
+
+async def fetch_custom_data(
+    data_type: str,
+    location: str = "",
+    query: str = "",
+    osm_tags: str = "",
+    tool_context: Optional[ToolContext] = None,
+) -> dict:
+    """Fetch a non-standard dataset from a registered source plugin.
+
+    Use this when fetch_city_data does not cover the data type needed. The
+    data_type must be one of the registered plugin names; call get_data_status
+    to see which plugins are available.
+
+    Args:
+        data_type: Plugin name (e.g. 'hdx_generic', 'overpass_custom').
+        location: Place name, used to resolve boundary if no AOI is loaded.
+        query: Free-form search query (required for hdx_generic).
+        osm_tags: JSON-encoded OSM tag dict (required for overpass_custom),
+                  e.g. '{"amenity":"school"}'.
+        tool_context: Injected by ADK; do not pass manually.
+
+    Returns:
+        dict with keys: status, dataset_key, summary, error
+    """
+    import asyncio
+    import json
+
+    osm_tags_dict: dict = {}
+    if osm_tags:
+        try:
+            parsed = json.loads(osm_tags)
+            if isinstance(parsed, dict):
+                osm_tags_dict = parsed
+        except json.JSONDecodeError as exc:
+            return {
+                "status": "error",
+                "dataset_key": None,
+                "summary": None,
+                "error": f"osm_tags is not valid JSON: {exc}",
+            }
+
+    data_store = get_data()
+    aoi_gdf = get_aoi_boundary_gdf()
+    activity_session_id = _current_activity_session_id()
+
+    return await asyncio.to_thread(
+        _fetch_custom_data_sync,
+        data_type,
+        location,
+        query,
+        osm_tags_dict,
+        data_store,
+        aoi_gdf,
+        tool_context,
+        activity_session_id,
+    )

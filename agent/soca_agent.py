@@ -28,7 +28,7 @@ from google.genai import types as genai_types
 
 from agent.adk_prompts import build_adk_instruction
 from agent.prompts import build_data_summary_text
-from agent.tools.fetch_tools import fetch_city_data
+from agent.tools.fetch_tools import fetch_city_data, fetch_custom_data
 from agent.tools.optimize_tools import confirm_optimization, stage_optimization
 from agent.tools.sensitivity_tools import run_sensitivity_analysis
 from agent.tools.state_bridge import clear_current_context, set_current_context
@@ -207,7 +207,7 @@ class SOCAAgent:
             name="soca_agent",
             model=settings.GEMINI_MODEL,
             instruction=instruction,
-            tools=[fetch_city_data, stage_optimization, confirm_optimization, get_data_status, run_sensitivity_analysis],
+            tools=[fetch_city_data, fetch_custom_data, stage_optimization, confirm_optimization, get_data_status, run_sensitivity_analysis],
             generate_content_config=genai_types.GenerateContentConfig(
                 temperature=settings.GEMINI_TEMPERATURE,
             ),

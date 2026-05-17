@@ -962,7 +962,22 @@ def _enrich_and_explain(
                 "equity_metrics": solution.get("equity_metrics"),
             },
         )
-        log_path = ReproducibilityLogger().log_run(payload)
+        snapshot_solution = {
+            "selected_facilities": solution.get("selected_facilities") or [],
+            "assignments": solution.get("assignments") or {},
+            "objective_value": solution.get("objective_value"),
+            "metrics": solution.get("metrics") or {},
+            "warnings": solution.get("warnings") or [],
+            "equity_metrics": solution.get("equity_metrics"),
+            "distance_metric_used": solution.get("distance_metric_used"),
+        }
+        log_path = ReproducibilityLogger().log_run(
+            payload,
+            demand_gdf=data_dict.get("demand_points"),
+            candidates_gdf=data_dict.get("candidate_sites"),
+            boundary_polygon=boundary_polygon,
+            solution=snapshot_solution,
+        )
         solution["repro_log_path"] = str(log_path)
     except Exception as exc:
         logger.warning("enrich: repro log failed (%s)", exc)

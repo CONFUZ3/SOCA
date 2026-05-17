@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-05-17T15:12:46.523494+00:00",
+  "boundary_wkt": "POLYGON ((0 0, 2 0, 2 2, 0 2, 0 0))",
+  "demand_source": null,
+  "demand_n_points": 2,
+  "candidates_source": null,
+  "candidates_n": 2,
+  "distance_method": "euclidean",
+  "solver": null,
+  "solver_params": {
+    "n_facilities": 2,
+    "fallback_time_limit_seconds": 120.0,
+    "ga_time_budget_seconds": 120.0
+  },
+  "random_seed": 42,
+  "objective_value": 0.0,
+  "selected_facility_ids": [
+    0
+  ],
+  "extra": {
+    "problem_type": "p-median",
+    "variant": "base",
+    "elapsed_s": 0.001680612564086914,
+    "existing_facilities": {},
+    "equity_metrics": {
+      "max_weighted_distance": 14597.934885973544,
+      "gini_coefficient": 0.5,
+      "pct_demand_within_threshold": null,
+      "bottom_decile_avg_distance": 14597.934885973544
+    }
+  },
+  "run_id": "d13fbe27-cb23-4d6c-b641-65a32abbf493"
+}

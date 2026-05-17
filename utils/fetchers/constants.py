@@ -91,7 +91,7 @@ _MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1  # seconds — doubles each retry
 
 # Hard wall-clock for the HDX fetch path (some country files are >300 MB).
-_HDX_FETCH_TIMEOUT_SEC = 40
+_HDX_FETCH_TIMEOUT_SEC = 90
 
 # Hard cap on a single Overture read_all() / DuckDB query call.
 _OVERTURE_READ_TIMEOUT_SEC = 90

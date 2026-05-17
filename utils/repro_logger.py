@@ -76,15 +76,95 @@ def _json_safe(obj: Any) -> Any:
     return str(obj)
 
 
+def _write_snapshot(
+    run_id: str,
+    *,
+    demand_gdf=None,
+    candidates_gdf=None,
+    aoi_gdf=None,
+    boundary_polygon=None,
+    solution: Optional[Dict[str, Any]] = None,
+) -> Optional[Path]:
+    """Dump the GeoDataFrames + solution that produced a run to disk.
+
+    Writes ``RUNS_DIR/<run_id>/snapshot/{demand,candidates,aoi}.gpkg`` plus
+    ``solution.json``. Returns the snapshot directory path, or ``None`` if
+    nothing was written. Never raises — failures degrade silently with a
+    WARNING; the JSON run record is still produced by the caller.
+    """
+    try:
+        import geopandas as gpd  # noqa: F401  (presence check)
+    except Exception:
+        logger.warning("snapshot: geopandas unavailable, skipping")
+        return None
+
+    snap_dir = _runs_dir() / run_id / "snapshot"
+    try:
+        snap_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        logger.warning("snapshot: mkdir failed (%s)", exc)
+        return None
+
+    def _dump(gdf, name: str) -> None:
+        if gdf is None:
+            return
+        try:
+            if len(gdf) == 0:
+                return
+        except Exception:
+            return
+        try:
+            gdf.to_file(str(snap_dir / f"{name}.gpkg"), driver="GPKG", layer=name)
+        except Exception as exc:
+            logger.warning("snapshot: %s write failed (%s)", name, exc)
+
+    _dump(demand_gdf, "demand")
+    _dump(candidates_gdf, "candidates")
+
+    # AOI: prefer explicit gdf; else synthesise from polygon.
+    if aoi_gdf is not None:
+        _dump(aoi_gdf, "aoi")
+    elif boundary_polygon is not None:
+        try:
+            import geopandas as gpd
+            aoi = gpd.GeoDataFrame({"name": ["aoi"]}, geometry=[boundary_polygon], crs="EPSG:4326")
+            _dump(aoi, "aoi")
+        except Exception as exc:
+            logger.warning("snapshot: aoi-from-polygon failed (%s)", exc)
+
+    if solution is not None:
+        try:
+            (snap_dir / "solution.json").write_text(
+                json.dumps(_json_safe(solution), indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning("snapshot: solution.json write failed (%s)", exc)
+
+    return snap_dir
+
+
 class ReproducibilityLogger:
     """Writes one JSON file per optimization run to ``RUNS_DIR``."""
 
-    def log_run(self, payload: Dict[str, Any]) -> Path:
+    def log_run(
+        self,
+        payload: Dict[str, Any],
+        *,
+        demand_gdf=None,
+        candidates_gdf=None,
+        aoi_gdf=None,
+        boundary_polygon=None,
+        solution: Optional[Dict[str, Any]] = None,
+    ) -> Path:
         """Persist *payload* to ``RUNS_DIR/<uuid>.json`` and return its path.
 
-        Appends an ISO-8601 timestamp if missing. Never raises — write
-        failures are logged at WARNING and the original requested path is
-        returned unchanged for the caller's audit trail.
+        When any of *demand_gdf*, *candidates_gdf*, *aoi_gdf* /
+        *boundary_polygon*, or *solution* are supplied, a sibling
+        ``<run_id>/snapshot/`` directory is written and its path recorded in
+        the JSON as ``snapshot_dir``. Replay tooling is out of scope here —
+        this only persists the data so a future replay can be deterministic.
+
+        Never raises — write failures are logged at WARNING.
         """
         run_id = payload.get("run_id") or str(uuid.uuid4())
         payload = dict(payload)
@@ -92,6 +172,20 @@ class ReproducibilityLogger:
         payload.setdefault(
             "timestamp", datetime.now(timezone.utc).isoformat()
         )
+
+        snap_dir = None
+        if any(x is not None for x in (demand_gdf, candidates_gdf, aoi_gdf, boundary_polygon, solution)):
+            snap_dir = _write_snapshot(
+                run_id,
+                demand_gdf=demand_gdf,
+                candidates_gdf=candidates_gdf,
+                aoi_gdf=aoi_gdf,
+                boundary_polygon=boundary_polygon,
+                solution=solution,
+            )
+            if snap_dir is not None:
+                payload["snapshot_dir"] = str(snap_dir)
+
         path = _runs_dir() / f"{run_id}.json"
         try:
             with path.open("w", encoding="utf-8") as f:

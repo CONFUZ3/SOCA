@@ -28,6 +28,12 @@ from .constants import (
     _MAX_RETRIES,
 )
 from .facade import DataFetcher
+from .source_registry import DataSourcePlugin, source_registry
+from .plugin_hdx_generic import HDXGenericPlugin
+from .plugin_overpass_custom import OverpassCustomPlugin
+
+source_registry.register(HDXGenericPlugin())
+source_registry.register(OverpassCustomPlugin())
 
 __all__ = [
     "DataFetcher",
@@ -40,4 +46,6 @@ __all__ = [
     "OVERTURE_CATEGORIES",
     "_USER_AGENT",
     "_MAX_RETRIES",
+    "DataSourcePlugin",
+    "source_registry",
 ]

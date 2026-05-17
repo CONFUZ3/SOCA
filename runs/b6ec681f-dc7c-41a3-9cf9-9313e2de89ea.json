@@ -1,0 +1,21 @@
+{
+  "timestamp": "2026-04-26T14:22:27.870165+00:00",
+  "boundary_wkt": null,
+  "demand_source": "synthetic_uniform_grid",
+  "demand_n_points": 5,
+  "candidates_source": "synthetic_random_fallback",
+  "candidates_n": 10,
+  "distance_method": "euclidean",
+  "solver": "gurobi",
+  "solver_params": {
+    "p": 3
+  },
+  "random_seed": 42,
+  "objective_value": 12.3,
+  "selected_facility_ids": [
+    1,
+    2,
+    3
+  ],
+  "run_id": "b6ec681f-dc7c-41a3-9cf9-9313e2de89ea"
+}

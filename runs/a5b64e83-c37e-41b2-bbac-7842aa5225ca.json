@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-04-26T14:43:23.077096+00:00",
+  "boundary_wkt": "POLYGON ((71.63341458317413 29.417447323614525, 71.71032106499507 29.4209019313857, 71.71532171067415 29.351336568788312, 71.63531137981067 29.35990333804658, 71.63341458317413 29.417447323614525))",
+  "demand_source": "hdx_kontur_population",
+  "demand_n_points": 89,
+  "candidates_source": "overture_pois",
+  "candidates_n": 64,
+  "distance_method": "network",
+  "solver": "gurobi",
+  "solver_params": {
+    "n_facilities": 1,
+    "objective": "average",
+    "fallback_time_limit_seconds": 120.0,
+    "ga_time_budget_seconds": 120.0
+  },
+  "random_seed": 42,
+  "objective_value": 3455.80899813076,
+  "selected_facility_ids": [
+    39
+  ],
+  "extra": {
+    "problem_type": "p-median",
+    "variant": "base",
+    "elapsed_s": 14.323391914367676,
+    "existing_facilities": {
+      "existing_count": 64,
+      "existing_min_distance_avg": 902.414605900984
+    },
+    "equity_metrics": {
+      "max_weighted_distance": 8100.495832443482,
+      "gini_coefficient": 0.23079369348583,
+      "pct_demand_within_threshold": null,
+      "bottom_decile_avg_distance": 6785.140841872748
+    }
+  },
+  "run_id": "a5b64e83-c37e-41b2-bbac-7842aa5225ca"
+}
