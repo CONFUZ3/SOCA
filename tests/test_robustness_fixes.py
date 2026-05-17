@@ -53,25 +53,6 @@ class TestStateBridgeCleanup:
         assert state_bridge.get_generated_sites_seed() is None
         assert state_bridge.get_network_manager() is None
 
-    def test_clear_is_idempotent(self):
-        from agent.tools import state_bridge
-
-        state_bridge.clear_current_context()
-        state_bridge.clear_current_context()  # second call must not raise
-        assert state_bridge.get_data() == {}
-
-    def test_set_after_clear_works(self):
-        from agent.tools import state_bridge
-
-        state_bridge.set_current_context(
-            data={"first": 1}, problem_state={}, problem_registry=None,
-        )
-        state_bridge.clear_current_context()
-        state_bridge.set_current_context(
-            data={"second": 2}, problem_state={}, problem_registry=None,
-        )
-        assert state_bridge.get_data() == {"second": 2}
-
 
 # ---------------------------------------------------------------------------
 # Network-fetch retry

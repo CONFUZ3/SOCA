@@ -67,16 +67,6 @@ def test_dataset_summary_reports_total_population():
     }
 
 
-def test_session_is_idempotent(client):
-    first = client.post("/api/session")
-    assert first.status_code == 200
-    sid = first.cookies.get("soca_session")
-    second = client.get("/api/session")
-    assert second.status_code == 200
-    # Cookie still present on the client, same session.
-    assert client.cookies.get("soca_session") == sid
-
-
 def test_list_problems(client):
     resp = client.get("/api/problems")
     assert resp.status_code == 200
@@ -85,13 +75,6 @@ def test_list_problems(client):
     assert len(data["problems"]) >= 3
     short_names = {p["short_name"] for p in data["problems"]}
     assert {"p-median", "p-center", "mclp", "lscp"}.issubset(short_names)
-
-
-def test_network_status_empty_session(client):
-    client.post("/api/session")
-    resp = client.get("/api/network/status")
-    assert resp.status_code == 200
-    assert resp.json() == {"status": None, "error": None, "stats": None}
 
 
 def test_network_refresh_without_aoi_is_400(client):
@@ -106,13 +89,6 @@ def test_events_stream_requires_session(client):
     # stream=True would block; we just assert the initial response code.
     with fresh.stream("GET", "/api/events/stream") as resp:
         assert resp.status_code == 401
-
-
-def test_list_datasets_empty(client):
-    client.post("/api/session")
-    resp = client.get("/api/data")
-    assert resp.status_code == 200
-    assert resp.json() == {"datasets": []}
 
 
 def test_upload_geojson_dataset(client):

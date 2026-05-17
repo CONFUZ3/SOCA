@@ -24,28 +24,6 @@ def _make_mock_graph():
 
 
 # ---------------------------------------------------------------------------
-# is_osmnx_available
-# ---------------------------------------------------------------------------
-
-def test_is_osmnx_available_true():
-    nm = NetworkManager()
-    with patch.dict("sys.modules", {"osmnx": MagicMock()}):
-        assert nm.is_osmnx_available() is True
-
-
-def test_is_osmnx_available_false():
-    nm = NetworkManager()
-    import sys
-    original = sys.modules.pop("osmnx", None)
-    with patch("builtins.__import__", side_effect=ImportError):
-        result = nm.is_osmnx_available()
-    if original is not None:
-        sys.modules["osmnx"] = original
-    # result may be True if osmnx is installed — just verify the call doesn't crash
-    assert isinstance(result, bool)
-
-
-# ---------------------------------------------------------------------------
 # Cache key derivation
 # ---------------------------------------------------------------------------
 

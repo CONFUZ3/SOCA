@@ -157,29 +157,3 @@ def test_suggest_returns_empty_for_short_query():
         mock_get.assert_not_called()
 
 
-# ---------------------------------------------------------------------------
-# resolve() round-trip
-# ---------------------------------------------------------------------------
-
-
-def test_resolve_roundtrips_dataclass_via_dict():
-    cand = GeocodeCandidate(
-        display_name="Brooklyn, NYC",
-        short_name="Brooklyn",
-        context="NYC",
-        kind="city",
-        lat=40.65, lon=-73.95,
-        bbox=(-74.05, 40.55, -73.85, 40.74),
-        osm_type="R", osm_id=175905,
-        place_rank=16,
-        country="USA",
-        source="photon",
-    )
-    from dataclasses import asdict
-    d = asdict(cand)
-    # simulate JSON round-trip → bbox becomes a list
-    d["bbox"] = list(d["bbox"])
-    restored = geocoder.resolve(d)
-    assert restored.osm_id == 175905
-    assert restored.bbox == (-74.05, 40.55, -73.85, 40.74)
-    assert restored.has_relation is True

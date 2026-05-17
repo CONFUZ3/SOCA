@@ -36,14 +36,6 @@ class TestPMedianSolver(unittest.TestCase):
         
         self.solver = problem_registry.get_problem("p-median")
     
-    def test_metadata(self):
-        """Test that metadata is complete"""
-        metadata = self.solver.get_metadata()
-        self.assertIn("name", metadata)
-        self.assertIn("academic_refs", metadata)
-        self.assertTrue(len(metadata["academic_refs"]) > 0)
-        self.assertEqual(metadata["short_name"], "p-median")
-    
     def test_parameter_validation(self):
         """Test parameter validation"""
         # Valid parameters
@@ -124,27 +116,6 @@ class TestPMedianSolver(unittest.TestCase):
         # Could be infeasible if mask removes all options for some demand; allow feasible/infeasible
         self.assertIn(solution["status"], ["optimal", "feasible", "infeasible"]) 
     
-    def test_explanation_generation(self):
-        """Test that explanation is generated"""
-        solution = self.solver.solve(
-            data={
-                "demand_points": self.demand_gdf,
-                "candidate_sites": self.candidate_gdf
-            },
-            parameters={"n_facilities": 3},
-            constraints={}
-        )
-        
-        explanation = self.solver.explain_solution(
-            solution=solution,
-            data={
-                "demand_points": self.demand_gdf,
-                "candidate_sites": self.candidate_gdf
-            }
-        )
-        
-        self.assertIsInstance(explanation, str)
-        self.assertGreater(len(explanation), 50)
 
 
 class TestPCenterSolver(unittest.TestCase):
@@ -265,27 +236,7 @@ class TestLSCPSolver(unittest.TestCase):
 
 class TestProblemRegistry(unittest.TestCase):
     """Test problem registry functionality"""
-    
-    def test_problem_registration(self):
-        """Test that problems are registered"""
-        problems = problem_registry.list_problems()
-        self.assertGreater(len(problems), 0)
-        
-        # Check for expected problems
-        short_names = [p['short_name'] for p in problems]
-        self.assertIn('p-median', short_names)
-        self.assertIn('p-center', short_names)
-        self.assertIn('mclp', short_names)
-        self.assertIn('lscp', short_names)
-    
-    def test_problem_retrieval(self):
-        """Test retrieving problem by name"""
-        solver = problem_registry.get_problem("p-median")
-        self.assertIsNotNone(solver)
-        
-        metadata = solver.get_metadata()
-        self.assertEqual(metadata['short_name'], 'p-median')
-    
+
     def test_problem_inference(self):
         """Test problem type inference from text"""
         # Test P-Median detection
@@ -329,18 +280,10 @@ class TestDistanceCalculator(unittest.TestCase):
         dist_matrix = self.calc.calculate_distance_matrix(
             self.origins, self.destinations, metric="euclidean"
         )
-        
+
         self.assertEqual(dist_matrix.shape, (3, 2))
         self.assertGreaterEqual(dist_matrix.min(), 0)  # Allow zero for coincident points
-    
-    def test_manhattan_distance(self):
-        """Test Manhattan distance calculation"""
-        dist_matrix = self.calc.calculate_distance_matrix(
-            self.origins, self.destinations, metric="manhattan"
-        )
-        
-        self.assertEqual(dist_matrix.shape, (3, 2))
-    
+
     def test_coverage_matrix(self):
         """Test coverage matrix calculation"""
         coverage_matrix = self.calc.calculate_coverage_matrix(

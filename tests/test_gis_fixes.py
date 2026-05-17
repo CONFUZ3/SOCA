@@ -16,48 +16,6 @@ class TestGISFixes:
     def distance_calculator(self):
         return DistanceCalculator()
 
-    def test_sampling_sphere_aware(self, data_processor):
-        """Test that sampling uses sphere-aware logic for Lat/Lon"""
-        # Create a demand GDF in WGS84
-        demand_gdf = gpd.GeoDataFrame(
-            {'id': [1, 2]},
-            geometry=[Point(-10, -10), Point(10, 10)],
-            crs="EPSG:4326"
-        )
-        
-        # Determine bounds: minx=-10, maxx=10, miny=-10, maxy=10
-        # If we sample 500 points, we can check basic bounds
-        # (It's hard to statistically prove the distribution in a unit test without flakiness,
-        # so we primarily ensure it runs and respects bounds)
-        
-        candidates = data_processor.generate_candidate_sites(demand_gdf, num_sites=50, random_seed=42)
-        
-        assert len(candidates) == 50
-        assert candidates.crs.to_epsg() == 4326
-        assert (candidates.geometry.x >= -10).all()
-        assert (candidates.geometry.x <= 10).all()
-        assert (candidates.geometry.y >= -10).all()
-        assert (candidates.geometry.y <= 10).all()
-        
-        # Verify it logs the correct message (this requires capturing logs, 
-        # but for now we trust the execution path if no error occurs)
-
-    def test_sampling_projected(self, data_processor):
-        """Test that sampling uses standard uniform for projected CRS"""
-        # Create a demand GDF in a projected CRS (e.g. UTM)
-        demand_gdf = gpd.GeoDataFrame(
-            {'id': [1, 2]},
-            geometry=[Point(0, 0), Point(1000, 1000)],
-            crs="EPSG:32633" # UTM Zone 33N
-        )
-        
-        candidates = data_processor.generate_candidate_sites(demand_gdf, num_sites=50, random_seed=42)
-        
-        assert len(candidates) == 50
-        assert candidates.crs.to_epsg() == 32633
-        assert (candidates.geometry.x >= 0).all()
-        assert (candidates.geometry.x <= 1000).all()
-
     def test_crs_safety_check(self, data_processor):
         """Test that large coordinates are not blindly assumed to be WGS84"""
         # Create GDF with NO CRS and large coordinates

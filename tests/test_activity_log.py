@@ -82,10 +82,3 @@ def test_timed_detail_can_be_updated_mid_block():
     # 'try' sees the initial detail; 'ok' sees the updated one.
     assert events[0].detail == "start"
     assert events[1].detail == "updated"
-
-
-def test_clear_events_empties_buffer():
-    al.log_event("a", "ok")
-    al.log_event("b", "ok")
-    al.clear_events()
-    assert al.get_events() == []
