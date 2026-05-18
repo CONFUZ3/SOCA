@@ -11,7 +11,7 @@ import logging
 import time
 import inspect
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
-from typing import Optional
+from typing import List, Optional
 
 from google.adk.tools.tool_context import ToolContext
 
@@ -142,6 +142,9 @@ def stage_optimization(
     strict_network: bool = False,
     force: bool = False,
     existing_facilities_key: Optional[str] = None,
+    fixed_open: Optional[List[int]] = None,
+    fixed_closed: Optional[List[int]] = None,
+    existing_facilities: Optional[List[int]] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """Stage an optimization run for user confirmation.
@@ -189,6 +192,16 @@ def stage_optimization(
                         pointing to a GeoDataFrame of already-placed
                         facilities. When provided, the solver treats those
                         facilities as fixed-open / pre-covering demand.
+        fixed_open: Optional list of candidate-site indices that MUST be
+                        selected. Works on every problem and every variant
+                        (conditional location). Counts toward n_facilities.
+        fixed_closed: Optional list of candidate-site indices that MUST NOT
+                        be selected. Works on every problem and every variant.
+        existing_facilities: Alias of fixed_open used by the literature for
+                        "conditional" variants — pre-existing facilities
+                        treated as already selected. Counts toward
+                        n_facilities. Indices must be in range and must not
+                        overlap with fixed_closed.
 
     Returns:
         dict with keys:
@@ -294,6 +307,41 @@ def stage_optimization(
         parameters["objective"] = objective
     if distance_metric != "network":
         parameters["distance_metric"] = distance_metric
+
+    # Cross-cutting facility-set params (work on every problem/variant)
+    def _coerce_idx_list(name: str, value):
+        if value is None:
+            return None
+        if not isinstance(value, (list, tuple)):
+            return f"{name} must be a list of candidate-site indices (integers)"
+        coerced = []
+        for v in value:
+            if isinstance(v, bool) or not isinstance(v, int):
+                return f"{name} entries must be integers, got {type(v).__name__}"
+            if v < 0:
+                return f"{name} entries must be non-negative; got {v}"
+            coerced.append(int(v))
+        return coerced
+
+    for _pname, _pval in (
+        ("fixed_open", fixed_open),
+        ("fixed_closed", fixed_closed),
+        ("existing_facilities", existing_facilities),
+    ):
+        result = _coerce_idx_list(_pname, _pval)
+        if isinstance(result, str):
+            _log_stage("fail", result)
+            return {"staged": False, "error": result}
+        if result:
+            parameters[_pname] = result
+
+    _open = set(parameters.get("fixed_open") or []) | set(parameters.get("existing_facilities") or [])
+    _closed = set(parameters.get("fixed_closed") or [])
+    _overlap = _open & _closed
+    if _overlap:
+        msg = f"facility indices cannot be both fixed_open and fixed_closed: {sorted(_overlap)}"
+        _log_stage("fail", msg)
+        return {"staged": False, "error": msg}
 
     # Variant-specific validation warnings
     warnings: list = []
@@ -536,7 +584,7 @@ def _prepare_solver_inputs(
         gdf = data_store[name]
         if dataset_filters and name in dataset_filters and "amenity" in gdf.columns:
             active = dataset_filters[name]
-            gdf = gdf[gdf["amenity"].isin(active)]
+            gdf = gdf[gdf["amenity"].isin(active)].reset_index(drop=True)
         data_dict["candidate_sites"] = gdf
 
     if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
@@ -1100,6 +1148,13 @@ def confirm_optimization(
     # covered by existing facilities for coverage models; records stats
     # for non-coverage models. Mutates data_dict in place.
     existing_info = _apply_existing_facilities(data_dict, parameters)
+
+    # Snapshot the exact GDFs (post-filter, post-existing-facilities) the
+    # solver will use so map_state() can index into them correctly.
+    # selected_facilities/assignments are positional indices into these GDFs;
+    # if map.py uses the original unfiltered datasets, wrong rows are shown.
+    ps["_solved_candidate_sites"] = data_dict.get("candidate_sites")
+    ps["_solved_demand_points"] = data_dict.get("demand_points")
 
     # Distance-metric auto-downgrade for very large AOIs (Priority 3
     # heuristic). If the user/agent did not explicitly pick "euclidean"

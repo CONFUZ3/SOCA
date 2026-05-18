@@ -22,8 +22,11 @@ const BASEMAP =
 // below demand points so population dots remain clickable.
 const ROLE_ORDER: MapLayer["role"][] = [
   "coverage",
+  "facility_coverage",
   "assignment",
   "demand",
+  "access_heatmap",
+  "facility_gaps",
   "candidate",
   "boundary",
   "other",
@@ -185,6 +188,78 @@ function layerSpecs(
           },
         } as maplibregl.LineLayerSpecification,
       ];
+    case "facility_coverage":
+      return [
+        {
+          id: `${id}--fill`,
+          type: "fill",
+          source: id,
+          paint: {
+            "fill-color": "#2E7D32",
+            "fill-opacity": 0.06,
+          },
+        } as maplibregl.FillLayerSpecification,
+        {
+          id: `${id}--line`,
+          type: "line",
+          source: id,
+          paint: {
+            "line-color": "#2E7D32",
+            "line-width": 1,
+            "line-opacity": 0.4,
+            "line-dasharray": [2, 2],
+          },
+        } as maplibregl.LineLayerSpecification,
+      ];
+    case "access_heatmap": {
+      // Graduated colour green → amber → red on access_distance_m.
+      const p95 = computeP95(
+        (layer.geojson.features ?? []) as GeoJSON.Feature[],
+        "access_distance_m",
+      );
+      const high = p95 && p95 > 0 ? p95 : 5000;
+      const mid = high / 2;
+      const colorExpr: maplibregl.DataDrivenPropertyValueSpecification<string> = [
+        "interpolate",
+        ["linear"],
+        ["coalesce", ["get", "access_distance_m"], 0],
+        0,
+        "#2E7D32",
+        mid,
+        "#F9A825",
+        high,
+        "#C62828",
+      ];
+      return [
+        {
+          id: `${id}--circle`,
+          type: "circle",
+          source: id,
+          paint: {
+            "circle-color": colorExpr,
+            "circle-radius": 4,
+            "circle-opacity": 0.75,
+            "circle-stroke-width": 0,
+          },
+        } as maplibregl.CircleLayerSpecification,
+      ];
+    }
+    case "facility_gaps":
+      return [
+        {
+          id: `${id}--circle`,
+          type: "circle",
+          source: id,
+          paint: {
+            "circle-color": "#C62828",
+            "circle-radius": 7,
+            "circle-opacity": 0.18,
+            "circle-stroke-width": 2,
+            "circle-stroke-color": "#C62828",
+            "circle-stroke-opacity": 0.9,
+          },
+        } as maplibregl.CircleLayerSpecification,
+      ];
     default:
       return [
         {
@@ -245,7 +320,9 @@ function applyLayers(
         if (
           layer.role === "demand" ||
           layer.role === "candidate" ||
-          layer.role === "selected"
+          layer.role === "selected" ||
+          layer.role === "access_heatmap" ||
+          layer.role === "facility_gaps"
         ) {
           interactiveLayerIds.push(spec.id);
         }
@@ -396,6 +473,18 @@ export function MapView({ state }: Props) {
   const sol = state.solution;
   const warnings = useMemo(() => sol?.warnings ?? [], [sol]);
 
+  const accessLayer = state.layers.find((l) => l.role === "access_heatmap");
+  const accessP95 = useMemo(
+    () =>
+      accessLayer
+        ? computeP95(
+            (accessLayer.geojson.features ?? []) as GeoJSON.Feature[],
+            "access_distance_m",
+          )
+        : null,
+    [accessLayer],
+  );
+
   // Initialise map once on mount
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -462,7 +551,11 @@ export function MapView({ state }: Props) {
         ? "selected"
         : layerId.includes("candidate")
           ? "candidate"
-          : "demand";
+          : layerId.includes("facility_gaps")
+            ? "facility_gaps"
+            : layerId.includes("access_heatmap")
+              ? "access_heatmap"
+              : "demand";
       setHover({
         x: e.point.x,
         y: e.point.y,
@@ -671,6 +764,13 @@ export function MapView({ state }: Props) {
         {state.layers.some((l) => l.role === "coverage") && (
           <LegendRow color="#B5482E" label="Service radius" dashed />
         )}
+        {accessLayer && <GradientLegendRow p95m={accessP95} />}
+        {state.layers.some((l) => l.role === "facility_coverage") && (
+          <LegendRow color="#2E7D32" label="Facility coverage" dashed />
+        )}
+        {state.layers.some((l) => l.role === "facility_gaps") && (
+          <LegendRow color="#C62828" label="Uncovered (no nearby facility)" ring />
+        )}
       </div>
 
       {/* Solution metrics overlay */}
@@ -823,11 +923,13 @@ function LegendRow({
   label,
   line,
   dashed,
+  ring,
 }: {
   color: string;
   label: string;
   line?: boolean;
   dashed?: boolean;
+  ring?: boolean;
 }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -840,6 +942,14 @@ function LegendRow({
               : color,
           }}
         />
+      ) : ring ? (
+        <div
+          className="h-2.5 w-2.5 shrink-0 rounded-full"
+          style={{
+            background: `${color}30`,
+            border: `2px solid ${color}`,
+          }}
+        />
       ) : (
         <div
           className="h-2.5 w-2.5 shrink-0 rounded-full"
@@ -847,6 +957,25 @@ function LegendRow({
         />
       )}
       <span>{label}</span>
+    </div>
+  );
+}
+
+function GradientLegendRow({ p95m }: { p95m: number | null }) {
+  const farLabel = p95m ? formatDistanceMeters(p95m) : "far";
+  return (
+    <div className="space-y-0.5">
+      <span className="text-[10px] text-text-muted">Access distance</span>
+      <div
+        className="h-2 w-24 rounded-full"
+        style={{
+          background: "linear-gradient(to right, #2E7D32, #F9A825, #C62828)",
+        }}
+      />
+      <div className="flex justify-between text-[9px] text-text-faint" style={{ width: 96 }}>
+        <span>near</span>
+        <span>{farLabel}</span>
+      </div>
     </div>
   );
 }
@@ -879,6 +1008,15 @@ function HoverTooltip({ info }: { info: HoverInfo }) {
   const name = typeof props.name === "string" ? props.name : null;
   if (role === "demand") {
     pushNumeric("Population", "population");
+  } else if (role === "access_heatmap") {
+    pushNumeric("Population", "population");
+    pushNumeric("Distance to facility", "access_distance_m", formatDistanceMeters);
+  } else if (role === "facility_gaps") {
+    pushNumeric("Distance to nearest facility", "access_distance_m", formatDistanceMeters);
+    const di = props.demand_idx;
+    if (typeof di === "number") {
+      rows.push({ label: "Demand #", value: String(di) });
+    }
   } else if (role === "candidate" || role === "selected") {
     pushNumeric("Capacity", "capacity");
     pushNumeric("Cost", "cost");
@@ -894,7 +1032,11 @@ function HoverTooltip({ info }: { info: HoverInfo }) {
       style={{ left: x, top: y }}
     >
       <div className="mono text-[10px] font-medium uppercase tracking-wider text-text-faint">
-        {role}
+        {role === "access_heatmap"
+          ? "demand point"
+          : role === "facility_gaps"
+            ? "uncovered demand"
+            : role}
         {name ? ` · ${name}` : ""}
       </div>
       {rows.length === 0 ? (

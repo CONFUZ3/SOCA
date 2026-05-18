@@ -339,6 +339,116 @@ def _build_assignment_lines(
         return None
 
 
+def _build_analysis_layers(
+    ps: Dict[str, Any], data: Dict[str, Any], layers: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """Inject access_heatmap / facility_coverage / facility_gaps layers.
+
+    Mutates ``layers`` in-place: removes the plain demand layer and replaces
+    it with an ``access_heatmap`` layer carrying per-feature
+    ``access_distance_m``; appends coverage rings around the analysed
+    facility layer and a ``facility_gaps`` layer for uncovered demand
+    points. Returns the analysis summary block (or ``None`` if no analysis
+    is loaded).
+    """
+    fa = ps.get("facility_analysis")
+    if not fa:
+        return None
+
+    facility_key = fa.get("facility_dataset_key")
+    radius_m = float(fa.get("service_radius_m") or 0)
+    distances = fa.get("per_point_distance_m") or []
+    uncovered = fa.get("uncovered_demand_indices") or []
+    summary = fa.get("summary") or {}
+
+    demand_gdf = _find_demand_gdf(data)
+
+    # Replace the plain demand layer with an access_heatmap variant.
+    if demand_gdf is not None and distances:
+        try:
+            d4326 = _to_4326(demand_gdf)
+            gj = json.loads(d4326.to_json())
+            features = gj.get("features") or []
+            rows = list(d4326.itertuples(index=False))
+            for i, feat in enumerate(features):
+                props = feat.setdefault("properties", {}) or {}
+                if i < len(rows):
+                    pop = _first_numeric(rows[i]._asdict(), _POPULATION_KEYS)
+                    if pop is not None:
+                        props["population"] = pop
+                if i < len(distances):
+                    try:
+                        props["access_distance_m"] = float(distances[i])
+                    except (TypeError, ValueError):
+                        pass
+                feat["properties"] = props
+            # Drop the original demand layer to avoid double-rendering.
+            for j in range(len(layers) - 1, -1, -1):
+                if layers[j].get("role") == "demand":
+                    layers.pop(j)
+            layers.append(
+                {"id": "access_heatmap", "role": "access_heatmap", "geojson": gj}
+            )
+        except Exception as exc:
+            logger.warning("map_state: access_heatmap build failed: %s", exc)
+
+    # Coverage rings around analysed facilities.
+    if facility_key and facility_key in data and radius_m > 0:
+        try:
+            facilities_gdf = _to_4326(data[facility_key])
+            rings = _coverage_rings(facilities_gdf, radius_m)
+            if rings is not None:
+                layers.append(
+                    {
+                        "id": "facility_coverage",
+                        "role": "facility_coverage",
+                        "geojson": rings,
+                    }
+                )
+        except Exception as exc:
+            logger.warning("map_state: facility_coverage failed: %s", exc)
+
+    # Gap demand points.
+    if demand_gdf is not None and uncovered:
+        try:
+            d4326 = _to_4326(demand_gdf)
+            valid = [int(i) for i in uncovered if 0 <= int(i) < len(d4326)]
+            if valid:
+                gap_gdf = d4326.iloc[valid].copy()
+                gj = json.loads(gap_gdf.to_json())
+                for i, feat in enumerate(gj.get("features") or []):
+                    props = feat.setdefault("properties", {}) or {}
+                    props["demand_idx"] = valid[i]
+                    if i < len(valid) and valid[i] < len(distances):
+                        try:
+                            props["access_distance_m"] = float(distances[valid[i]])
+                        except (TypeError, ValueError):
+                            pass
+                    feat["properties"] = props
+                if gj.get("features"):
+                    layers.append(
+                        {
+                            "id": "facility_gaps",
+                            "role": "facility_gaps",
+                            "geojson": gj,
+                        }
+                    )
+        except Exception as exc:
+            logger.warning("map_state: facility_gaps failed: %s", exc)
+
+    return {
+        "facility_dataset_key": facility_key,
+        "service_radius_m": radius_m,
+        **{k: v for k, v in summary.items() if k != "spatial_breakdown"},
+        "spatial_breakdown": {
+            "worst_access_points": (
+                summary.get("spatial_breakdown", {}).get("worst_access_points", [])
+            ),
+            "n_uncovered_demand_points": len(uncovered),
+        },
+    }
+
+
 def _build_solution_summary(
     solution: Dict[str, Any], ps: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -426,8 +536,13 @@ def map_state(ctx=Depends(resolve_session)) -> JSONResponse:
     if solution and solution.get("status") in _RENDERABLE_STATUSES:
         selected = solution.get("selected_facilities") or []
         assignments = solution.get("assignments") or {}
-        cand_gdf = _find_candidate_gdf(data)
-        demand_gdf = _find_demand_gdf(data)
+        # Use the exact GDFs the solver ran against so positional indices
+        # in selected_facilities/assignments are correct.  Falls back to
+        # searching the raw data store when no solve has run yet.
+        _sc = ps.get("_solved_candidate_sites")
+        cand_gdf = _sc if _sc is not None else _find_candidate_gdf(data)
+        _sd = ps.get("_solved_demand_points")
+        demand_gdf = _sd if _sd is not None else _find_demand_gdf(data)
 
         # Selected facilities
         sel_layer_gj, sel_gdf_4326 = _build_selected_layer(cand_gdf, selected)
@@ -468,10 +583,14 @@ def map_state(ctx=Depends(resolve_session)) -> JSONResponse:
 
         solution_summary = _build_solution_summary(solution, ps)
 
+    # --- Facility-analysis layers (independent of solution) ---------------
+    analysis_summary = _build_analysis_layers(ps, data, layers)
+
     return JSONResponse(
         {
             "view_state": view_state,
             "layers": layers,
             "solution": solution_summary,
+            "analysis": analysis_summary,
         }
     )

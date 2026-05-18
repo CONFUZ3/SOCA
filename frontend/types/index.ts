@@ -113,6 +113,9 @@ export type MapLayerRole =
   | "selected"
   | "assignment"
   | "coverage"
+  | "access_heatmap"
+  | "facility_coverage"
+  | "facility_gaps"
   | "other";
 
 export interface MapViewState {
@@ -151,10 +154,50 @@ export interface MapSolution {
   warnings?: string[];
 }
 
+export interface AnalysisWorstPoint {
+  demand_idx: number;
+  distance_m: number;
+  weight: number;
+  lat: number;
+  lon: number;
+}
+
+export interface MapAnalysis {
+  facility_dataset_key: string | null;
+  service_radius_m: number;
+  coverage?: {
+    pct_demand_covered: number;
+    pct_points_covered: number;
+    uncovered_demand_weight: number;
+    service_radius_m: number;
+  };
+  access?: {
+    avg_distance_m: number;
+    max_distance_m: number;
+    p90_distance_m: number;
+    gini_coefficient: number;
+    bottom_decile_avg_distance_m: number;
+  };
+  density?: {
+    facilities_per_km2: number;
+    facilities_per_1000_people: number;
+    area_km2: number;
+    n_facilities: number;
+    n_demand_points: number;
+  };
+  distance_metric_used?: string;
+  warnings?: string[];
+  spatial_breakdown?: {
+    worst_access_points: AnalysisWorstPoint[];
+    n_uncovered_demand_points: number;
+  };
+}
+
 export interface MapState {
   view_state: MapViewState;
   layers: MapLayer[];
   solution: MapSolution | null;
+  analysis?: MapAnalysis | null;
 }
 
 export interface ProblemInfo {

@@ -725,6 +725,35 @@ class DataProcessor:
             crs=crs_proj,
         ).to_crs(target_crs)
 
+        # OSMnx graph_from_polygon includes nodes of roads that cross the
+        # boundary edge, so nodes in neighboring regions can appear. Clip to
+        # the boundary polygon to remove them.
+        try:
+            boundary_in_target = gpd.GeoSeries(
+                [boundary_polygon], crs="EPSG:4326"
+            ).to_crs(target_crs).iloc[0]
+            before = len(node_gdf)
+            node_gdf = node_gdf[
+                node_gdf.geometry.within(boundary_in_target)
+            ].reset_index(drop=True)
+            if len(node_gdf) < before:
+                logger.info(
+                    "generate_candidate_sites: clipped %d road nodes outside "
+                    "boundary (%d → %d)",
+                    before - len(node_gdf), before, len(node_gdf),
+                )
+            if len(node_gdf) == 0:
+                logger.warning(
+                    "generate_candidate_sites: all road nodes outside boundary "
+                    "after clip; falling back to synthetic sampling"
+                )
+                return None
+        except Exception as clip_exc:
+            logger.warning(
+                "generate_candidate_sites: boundary clip of road nodes failed "
+                "(%s); proceeding unclipped", clip_exc
+            )
+
         n = len(node_gdf)
         out = gpd.GeoDataFrame(
             {

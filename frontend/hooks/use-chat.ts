@@ -10,10 +10,11 @@ type Frame =
   | { event: "token"; data: { text: string } }
   | { event: "tool_call_start"; data: ToolCallStart }
   | { event: "tool_call_result"; data: ToolCallResult }
+  | { event: "map_update"; data: { name?: string } }
   | { event: "final"; data: { text: string; tool_calls: string[] } }
   | { event: "error"; data: { message: string } };
 
-export function useChat(onTurnFinished?: () => void) {
+export function useChat(onTurnFinished?: () => void, onMapUpdate?: () => void) {
   const [busy, setBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const {
@@ -56,6 +57,9 @@ export function useChat(onTurnFinished?: () => void) {
             case "tool_call_result":
               appendToolCallResult(assistantId, f.data);
               break;
+            case "map_update":
+              onMapUpdate?.();
+              break;
             case "final":
               closeOpenToolCalls(assistantId, { status: "completed" });
               finalizeTurn(assistantId, f.data.text || "");
@@ -91,6 +95,7 @@ export function useChat(onTurnFinished?: () => void) {
       finalizeTurn,
       errorTurn,
       onTurnFinished,
+      onMapUpdate,
     ],
   );
 

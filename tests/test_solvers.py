@@ -234,6 +234,90 @@ class TestLSCPSolver(unittest.TestCase):
         self.assertEqual(solution["metrics"]["coverage_percentage"], 100.0)
 
 
+class TestFacilitySetConstraints(unittest.TestCase):
+    """Cross-cutting fixed_open / fixed_closed / existing_facilities."""
+
+    def setUp(self):
+        demand_coords = [(i, j) for i in range(5) for j in range(5)]
+        self.demand_gdf = gpd.GeoDataFrame(
+            {"demand": [1.0] * 25},
+            geometry=[Point(x, y) for x, y in demand_coords],
+            crs="EPSG:3857",
+        )
+        candidate_coords = [(i, j) for i in range(0, 5, 2) for j in range(0, 5, 2)]
+        self.candidate_gdf = gpd.GeoDataFrame(
+            geometry=[Point(x, y) for x, y in candidate_coords],
+            crs="EPSG:3857",
+        )
+        self.data = {
+            "demand_points": self.demand_gdf,
+            "candidate_sites": self.candidate_gdf,
+        }
+
+    def _assert_includes_excludes(self, solution, must_include, must_exclude):
+        self.assertIn(solution["status"], ["optimal", "feasible"])
+        selected = set(solution["selected_facilities"])
+        for j in must_include:
+            self.assertIn(j, selected, f"fixed_open index {j} missing from selection {selected}")
+        for j in must_exclude:
+            self.assertNotIn(j, selected, f"fixed_closed index {j} present in selection {selected}")
+
+    def test_p_median_fixed_open_and_closed(self):
+        solver = problem_registry.get_problem("p-median")
+        solution = solver.solve(
+            data=self.data,
+            parameters={"n_facilities": 3, "fixed_open": [0], "fixed_closed": [8]},
+            constraints={},
+            distance_metric="euclidean",
+        )
+        self._assert_includes_excludes(solution, must_include=[0], must_exclude=[8])
+
+    def test_p_center_existing_facilities(self):
+        solver = problem_registry.get_problem("p-center")
+        solution = solver.solve(
+            data=self.data,
+            parameters={"n_facilities": 3, "existing_facilities": [4], "fixed_closed": [0]},
+            constraints={},
+            distance_metric="euclidean",
+        )
+        self._assert_includes_excludes(solution, must_include=[4], must_exclude=[0])
+
+    def test_mclp_fixed_open(self):
+        solver = problem_registry.get_problem("mclp")
+        solution = solver.solve(
+            data=self.data,
+            parameters={"n_facilities": 3, "service_radius": 2.0, "fixed_open": [2]},
+            constraints={},
+            distance_metric="euclidean",
+        )
+        self._assert_includes_excludes(solution, must_include=[2], must_exclude=[])
+
+    def test_lscp_fixed_closed(self):
+        solver = problem_registry.get_problem("lscp")
+        solution = solver.solve(
+            data=self.data,
+            parameters={"service_radius": 3.0, "fixed_closed": [0, 8]},
+            constraints={},
+            distance_metric="euclidean",
+        )
+        self._assert_includes_excludes(solution, must_include=[], must_exclude=[0, 8])
+
+    def test_validation_rejects_overlap(self):
+        solver = problem_registry.get_problem("p-median")
+        ok, err = solver.validate_parameters(
+            {"n_facilities": 3, "fixed_open": [1], "fixed_closed": [1]}
+        )
+        self.assertFalse(ok)
+        self.assertIn("both", err.lower())
+
+    def test_validation_rejects_non_int(self):
+        solver = problem_registry.get_problem("p-center")
+        ok, err = solver.validate_parameters(
+            {"n_facilities": 2, "fixed_open": ["a"]}
+        )
+        self.assertFalse(ok)
+
+
 class TestProblemRegistry(unittest.TestCase):
     """Test problem registry functionality"""
 

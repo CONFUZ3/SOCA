@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useStore } from "@/lib/store";
 import { useChat } from "@/hooks/use-chat";
 import { useSession } from "@/hooks/use-session";
@@ -8,12 +9,18 @@ import { Composer } from "./composer";
 import { Message } from "./message";
 import { ActivityGroupCard } from "./activity-group-card";
 import { NetworkStatusStrip } from "./network-status-strip";
+import { SubcategoryPicker } from "./subcategory-picker";
 
 export function ChatPanel() {
   const items = useStore((s) => s.items);
   const scrollerRef = useRef<HTMLDivElement>(null);
+  const qc = useQueryClient();
   const { refresh } = useSession();
-  const { send, cancel, busy } = useChat(refresh);
+  const handleMapUpdate = useCallback(
+    () => qc.invalidateQueries({ queryKey: ["map-state"] }),
+    [qc],
+  );
+  const { send, cancel, busy } = useChat(refresh, handleMapUpdate);
 
   useEffect(() => {
     const el = scrollerRef.current;
@@ -45,7 +52,8 @@ export function ChatPanel() {
       </div>
 
       <div className="border-t border-border bg-surface/80 px-3 py-2 backdrop-blur">
-        <div className="mx-auto max-w-3xl">
+        <div className="mx-auto max-w-3xl space-y-2">
+          <SubcategoryPicker />
           <Composer onSend={send} onCancel={cancel} busy={busy} />
         </div>
       </div>

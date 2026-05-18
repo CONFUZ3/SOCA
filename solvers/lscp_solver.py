@@ -106,7 +106,11 @@ Where:
         
         if not isinstance(params["service_radius"], (int, float)) or params["service_radius"] <= 0:
             return False, "service_radius must be a positive number"
-        
+
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         return True, None
     
     def solve(
@@ -156,6 +160,8 @@ Where:
                 if not np.any(coverage_matrix[i, :]):
                     uncoverable.append(i)
             
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
+
             if uncoverable:
                 return {
                     "status": "infeasible",

@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 import logging
 from typing import Dict, List, Any, Optional
 import geopandas as gpd
+import numpy as np
 
 from config.settings import settings
 
@@ -191,6 +192,66 @@ class SpatialOptimizationProblem(ABC):
             "service_area_opacity": 0.2
         }
     
+    # ------------------------------------------------------------------
+    # Cross-cutting: fixed-open / fixed-closed / existing facility sets
+    # ------------------------------------------------------------------
+    # These parameters are orthogonal to every variant and let any solver
+    # express conditional location (some facilities pre-existing or forbidden)
+    # without a dedicated variant string. They piggy-back on each solver's
+    # existing `constraints["must_include"]` / `constraints["must_exclude"]`
+    # wiring, so no MIP-layer changes are needed once `solve()` calls
+    # `_merge_facility_set_constraints()` near the top.
+    #
+    # `existing_facilities` is treated as an alias of `fixed_open` — the
+    # selected facilities are counted toward `n_facilities`. Users who want
+    # "locate p *additional* facilities" should set n_facilities = p + k.
+
+    def _validate_facility_sets(
+        self,
+        params: Dict[str, Any],
+        n_candidates: Optional[int] = None,
+    ) -> tuple[bool, Optional[str]]:
+        keys = ("fixed_open", "fixed_closed", "existing_facilities")
+        for key in keys:
+            val = params.get(key)
+            if val is None:
+                continue
+            if not isinstance(val, (list, tuple)):
+                return False, f"{key} must be a list of facility indices"
+            for v in val:
+                if isinstance(v, bool) or not isinstance(v, (int, np.integer)):
+                    return False, f"{key} entries must be integers, got {type(v).__name__}"
+                if int(v) < 0:
+                    return False, f"{key} entries must be non-negative; got {int(v)}"
+                if n_candidates is not None and int(v) >= int(n_candidates):
+                    return False, f"{key} index {int(v)} is out of range (n_candidates={n_candidates})"
+        fo = set(int(v) for v in (params.get("fixed_open") or []))
+        fo |= set(int(v) for v in (params.get("existing_facilities") or []))
+        fc = set(int(v) for v in (params.get("fixed_closed") or []))
+        overlap = fo & fc
+        if overlap:
+            return False, f"facility indices cannot be both open and closed: {sorted(overlap)}"
+        return True, None
+
+    def _merge_facility_set_constraints(
+        self,
+        constraints: Optional[Dict[str, Any]],
+        parameters: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Fold fixed_open / fixed_closed / existing_facilities into the
+        constraints dict's must_include / must_exclude lists."""
+        merged = dict(constraints or {})
+        must_include = set(int(v) for v in (merged.get("must_include") or []))
+        must_exclude = set(int(v) for v in (merged.get("must_exclude") or []))
+        for key in ("fixed_open", "existing_facilities"):
+            for v in (parameters.get(key) or []):
+                must_include.add(int(v))
+        for v in (parameters.get("fixed_closed") or []):
+            must_exclude.add(int(v))
+        merged["must_include"] = sorted(must_include)
+        merged["must_exclude"] = sorted(must_exclude)
+        return merged
+
     def sensitivity_analysis(
         self,
         data: Dict[str, gpd.GeoDataFrame],

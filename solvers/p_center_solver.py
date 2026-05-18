@@ -113,7 +113,11 @@ Where:
         n_facilities = params["n_facilities"]
         if not isinstance(n_facilities, int) or n_facilities <= 0:
             return False, "n_facilities must be a positive integer"
-        
+
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         return True, None
     
     def solve(
@@ -137,6 +141,8 @@ Where:
             p = parameters['n_facilities']
             service_radius_unit = parameters.get('service_radius_unit', 'm')
             
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
+
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
             

@@ -138,6 +138,11 @@ Where:
             if params["objective"] not in ["total", "average"]:
                 return False, "objective must be either 'total' or 'average'"
         
+        # Cross-cutting facility-set params
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         # Variant validation
         variant = params.get("variant", "base")
         if variant not in ["base", "capacitated", "budget", "max_distance"]:
@@ -188,6 +193,9 @@ Where:
             use_ga_after_timeout = True
             logger.info(f"P-Median: Fallback time limit set to {fallback_time_limit:.2f} seconds")
             
+            # Merge fixed_open/fixed_closed/existing_facilities into constraints
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
+
             # Validate p
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")

@@ -185,7 +185,11 @@ Where:
             k = params.get("k_coverage", 2 if variant == "backup" else 1)
             if not isinstance(k, int) or k <= 0:
                 return False, "k_coverage must be a positive integer"
-        
+
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         return True, None
     
     def solve(
@@ -214,6 +218,8 @@ Where:
             
             variant = parameters.get('variant', 'classical')
             logger.info(f"MCLP Solver: Using variant '{variant}' with parameters: {parameters}")
+
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
             
             # Select variant-specific solver
             mip_start = time.time()

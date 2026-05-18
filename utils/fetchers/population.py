@@ -846,6 +846,13 @@ def _read_hdx_gpkg(
             crs="EPSG:3857",
         )
         clipped["geometry"] = centroids_3857.to_crs("EPSG:4326").values
+        # Edge hexagons clipped by gpd.clip can produce centroids that fall
+        # fractionally outside the boundary due to floating-point precision.
+        # Re-apply the boundary filter to the centroid points.
+        try:
+            clipped = clipped[clipped.geometry.within(boundary_union)].copy()
+        except Exception:
+            pass
         clipped = clipped.rename(columns={pop_col: "population"})
         result = clipped[["population", "geometry"]].copy()
         result["data_source"] = "hdx_kontur_population"

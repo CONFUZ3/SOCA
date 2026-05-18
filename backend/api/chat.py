@@ -94,6 +94,9 @@ def _build_data_summary(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return summary
 
 
+_MAP_UPDATE_TOOLS = frozenset({"confirm_optimization", "run_sensitivity_analysis"})
+
+
 def _sse(kind: str, payload: Dict[str, Any]) -> bytes:
     return (
         f"event: {kind}\ndata: {json.dumps(payload, default=str)}\n\n"
@@ -187,10 +190,13 @@ async def chat_stream(
                         {"name": ev.get("name"), "args": ev.get("args") or {}},
                     )
                 elif kind == "tool_call_result":
+                    tool_name = ev.get("name")
                     yield _sse(
                         "tool_call_result",
-                        {"name": ev.get("name"), "summary": ev.get("summary")},
+                        {"name": tool_name, "summary": ev.get("summary")},
                     )
+                    if tool_name in _MAP_UPDATE_TOOLS:
+                        yield _sse("map_update", {"name": tool_name})
                 elif kind == "token":
                     yield _sse("token", {"text": ev.get("text") or ""})
                 elif kind == "final":
