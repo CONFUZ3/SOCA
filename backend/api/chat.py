@@ -117,6 +117,14 @@ async def chat_stream(
     ps["_network_manager"] = record.get("_network_manager")
     ps["_generated_sites_count"] = record.get("generated_sites_count", 100)
     ps["_generated_sites_seed"] = record.get("generated_sites_seed")
+    # Bus.publish puts into an asyncio.Queue that lives on this event loop.
+    # ADK runs sync tool callbacks on a worker thread, so we marshal the
+    # publish back onto the loop with call_soon_threadsafe — without this,
+    # solution_ready can be silently dropped and the map fails to refresh.
+    loop = asyncio.get_running_loop()
+    ps["_map_update_publisher"] = lambda: loop.call_soon_threadsafe(
+        bus.publish, session_id, "solution_ready", {}
+    )
 
     history = list(record.get("messages") or [])
     record.setdefault("messages", []).append(

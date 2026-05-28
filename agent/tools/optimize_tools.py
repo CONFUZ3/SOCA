@@ -1263,6 +1263,13 @@ def confirm_optimization(
     ps["solution_history"] = ps.get("solution_history", [])
     ps["solution_history"].append(solution)
 
+    cb = ps.get("_map_update_publisher")
+    if callable(cb):
+        try:
+            cb()
+        except Exception as _cb_exc:
+            logger.warning("confirm_optimization: map update publisher failed: %s", _cb_exc)
+
     if tool_context is not None:
         tool_context.state["solution_summary"] = {
             "status": solution.get("status"),

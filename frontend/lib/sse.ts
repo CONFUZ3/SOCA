@@ -36,6 +36,7 @@ export function subscribeGetSse<T = unknown>(
     "activity",
     "network",
     "keepalive",
+    "solution_ready",
   ]) {
     es.addEventListener(name, raw(name) as EventListener);
   }

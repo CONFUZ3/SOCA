@@ -73,6 +73,25 @@ OSM_AMENITY_TAGS: dict[str, list[tuple[str, str]]] = {
     "emergency": [("amenity", "shelter"), ("emergency", "assembly_point")],
 }
 
+# Foursquare OS Places category mapping.
+# Each list contains label substrings matched case-insensitively against the
+# fsq_category_labels array column (e.g. "Health & Medicine > Hospital").
+FSQ_OS_CATEGORIES: dict[str, list[str]] = {
+    "health":       ["Hospital", "Medical Center", "Clinic", "Pharmacy", "Doctor", "Dentist", "Nursing Home"],
+    "education":    ["School", "University", "College", "Kindergarten", "Preschool"],
+    "food":         ["Supermarket", "Grocery Store", "Convenience Store", "Market"],
+    "finance":      ["Bank", "ATM"],
+    "fire_station": ["Fire Station"],
+    "police":       ["Police Station"],
+    "library":      ["Library"],
+    "transport":    ["Bus Stop", "Train Station", "Subway", "Ferry", "Airport", "Transit"],
+    "water":        ["Drinking Water", "Water Well", "Water Works"],
+    "emergency":    ["Emergency Shelter", "Evacuation"],
+}
+
+# Hard cap matching the other POI tier timeouts.
+_FSQ_OS_READ_TIMEOUT_SEC = 90
+
 # Overture division subtype → approximate OSM admin_level.
 _OVERTURE_SUBTYPE_ADMIN_LEVEL: dict[str, int] = {
     "country": 2,

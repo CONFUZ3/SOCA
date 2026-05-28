@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { subscribeGetSse } from "@/lib/sse";
 import { useStore } from "@/lib/store";
 import type { ActivityEvent, NetworkSseEvent } from "@/types";
@@ -15,6 +16,7 @@ export function useEventsStream(enabled: boolean) {
   const ref = useRef<(() => void) | null>(null);
   const appendActivity = useStore((s) => s.appendActivity);
   const setNetwork = useStore((s) => s.setNetwork);
+  const qc = useQueryClient();
 
   useEffect(() => {
     if (!enabled) return;
@@ -32,6 +34,11 @@ export function useEventsStream(enabled: boolean) {
           error: d.error ?? null,
           stats: d.stats ?? null,
         });
+      } else if (evt.event === "solution_ready") {
+        qc.invalidateQueries({ queryKey: ["session"] });
+        // Force a network refetch directly so the new solution appears the
+        // moment confirm_optimization writes it, regardless of staleTime.
+        qc.refetchQueries({ queryKey: ["map-state"] });
       }
     });
     ref.current = unsub;
@@ -43,5 +50,5 @@ export function useEventsStream(enabled: boolean) {
       }
       ref.current = null;
     };
-  }, [enabled, appendActivity, setNetwork]);
+  }, [enabled, appendActivity, setNetwork, qc]);
 }

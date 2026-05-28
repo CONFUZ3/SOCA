@@ -95,9 +95,20 @@ def analyze_facilities(
             "Road-network graph not available; using geodesic distance for this analysis."
         )
 
+    # Bound the Dijkstra search radius for network distance. Points farther
+    # than ``cutoff_m`` from any facility are by definition outside any
+    # reasonable coverage envelope; their cells stay inf and get filled by
+    # the geodesic fallback inside _network_distance, which is a fine lower
+    # bound for "very far". Only matters when metric == "network".
+    cutoff_m = max(radius_m * 5.0, 5000.0) if metric == "network" else None
+
     try:
         D = dist_calc.calculate_distance_matrix(
-            demand_gdf, facilities_gdf, metric=metric, network_graph=network_graph
+            demand_gdf,
+            facilities_gdf,
+            metric=metric,
+            network_graph=network_graph,
+            cutoff_m=cutoff_m,
         )
     except Exception as exc:
         logger.warning(

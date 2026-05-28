@@ -84,20 +84,25 @@ class DistanceCalculator:
         return False
     
     def _generate_cache_key(
-        self, 
-        origins: gpd.GeoDataFrame, 
-        destinations: gpd.GeoDataFrame, 
-        metric: str
+        self,
+        origins: gpd.GeoDataFrame,
+        destinations: gpd.GeoDataFrame,
+        metric: str,
+        cutoff_m: Optional[float] = None,
     ) -> str:
         """Generate cache key for distance matrix including CRS information."""
         origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
         dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
-        
+
         # Include CRS in cache key to avoid incorrect cached results
         origin_crs = str(origins.crs) if origins.crs else "None"
         dest_crs = str(destinations.crs) if destinations.crs else "None"
-        
-        key_data = f"{origin_coords.tobytes()}{dest_coords.tobytes()}{metric}{origin_crs}{dest_crs}"
+        cutoff_tag = f"c{float(cutoff_m):.0f}" if cutoff_m else "c0"
+
+        key_data = (
+            f"{origin_coords.tobytes()}{dest_coords.tobytes()}"
+            f"{metric}{origin_crs}{dest_crs}{cutoff_tag}"
+        )
         return hashlib.md5(key_data.encode()).hexdigest()
     
     def _manage_cache(self, key: str, value: np.ndarray):
@@ -218,7 +223,8 @@ class DistanceCalculator:
         origins: gpd.GeoDataFrame,
         destinations: gpd.GeoDataFrame,
         metric: str = "euclidean",
-        network_graph: Optional[Any] = None
+        network_graph: Optional[Any] = None,
+        cutoff_m: Optional[float] = None,
     ) -> np.ndarray:
         """Calculate distance matrix with caching for performance.
         
@@ -241,7 +247,7 @@ class DistanceCalculator:
         - network: Road network distance (not implemented, falls back to euclidean)
         """
         # Check cache first
-        cache_key = self._generate_cache_key(origins, destinations, metric)
+        cache_key = self._generate_cache_key(origins, destinations, metric, cutoff_m)
         if cache_key in self._cache:
             logger.debug("Using cached distance matrix")
             return self._cache[cache_key]
@@ -283,7 +289,9 @@ class DistanceCalculator:
                 else:
                     result = self._euclidean_distance(origins, destinations)
             else:
-                result = self._network_distance(origins, destinations, network_graph)
+                result = self._network_distance(
+                    origins, destinations, network_graph, cutoff_m=cutoff_m
+                )
         else:
             raise ValueError(f"Unknown distance metric: {metric}. Use 'euclidean', 'manhattan', or 'network'")
         
@@ -341,6 +349,7 @@ class DistanceCalculator:
         origins: gpd.GeoDataFrame,
         destinations: gpd.GeoDataFrame,
         network_graph,
+        cutoff_m: Optional[float] = None,
     ) -> np.ndarray:
         """Road-network shortest-path distances via OSMnx + NetworkX Dijkstra.
 
@@ -400,7 +409,7 @@ class DistanceCalculator:
                 break
             try:
                 lengths = nx.single_source_dijkstra_path_length(
-                    G_proj, dest_node, weight="length"
+                    G_proj, dest_node, cutoff=cutoff_m, weight="length"
                 )
             except nx.NodeNotFound:
                 processed += 1
@@ -433,12 +442,20 @@ class DistanceCalculator:
                 try:
                     from utils.activity_log import log_event
 
+                    cutoff_note = (
+                        f" (cutoff {cutoff_m:.0f} m)"
+                        if cutoff_m
+                        else ""
+                    )
+                    pct = (n_inf / max(1, n_origins * n_dests)) * 100.0
                     log_event(
                         "distance.network",
                         "fail",
                         (
-                            f"Dijkstra budget exceeded — used geodesic fallback for "
-                            f"{n_inf:,} of {n_origins * n_dests:,} pairs"
+                            f"Dijkstra budget ({budget:.0f}s){cutoff_note} exceeded — "
+                            f"geodesic fallback used for {n_inf:,}/"
+                            f"{n_origins * n_dests:,} pairs ({pct:.1f}%). "
+                            "Consider a smaller AOI or fewer facilities."
                         ),
                     )
                 except Exception:

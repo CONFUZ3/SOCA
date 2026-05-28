@@ -32,6 +32,7 @@ from .constants import (
 )
 from .errors import DataFetchError
 from .pois_overpass import fetch_pois_via_overpass
+from .pois_fsq_os import fetch_pois_via_fsq_os
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +365,7 @@ def fetch_pois(
         columns=["name", "amenity", "geometry"], crs="EPSG:4326"
     )
 
-    tier_results: dict = {"overture": empty, "overpass": empty}
+    tier_results: dict = {"overture": empty, "overpass": empty, "fsq_os": empty}
     tier_errors: dict = {}
 
     def _run_overture():
@@ -373,10 +374,14 @@ def fetch_pois(
     def _run_overpass():
         return fetch_pois_via_overpass(bbox, category)
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+    def _run_fsq_os():
+        return fetch_pois_via_fsq_os(bbox, category)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         futures = {
             pool.submit(_run_overture): "overture",
             pool.submit(_run_overpass): "overpass",
+            pool.submit(_run_fsq_os):   "fsq_os",
         }
         for fut in concurrent.futures.as_completed(futures):
             label = futures[fut]
@@ -385,29 +390,33 @@ def fetch_pois(
             except Exception as exc:
                 tier_errors[label] = str(exc)
                 logger.warning(
-                    "POI tier '%s' failed: %s — continuing with the other tier",
+                    "POI tier '%s' failed: %s — continuing with remaining tiers",
                     label, exc,
                 )
 
     ovr_gdf = tier_results["overture"]
     osm_gdf = tier_results["overpass"]
+    fsq_gdf = tier_results["fsq_os"]
     ovr_n = len(ovr_gdf) if ovr_gdf is not None else 0
     osm_n = len(osm_gdf) if osm_gdf is not None else 0
+    fsq_n = len(fsq_gdf) if fsq_gdf is not None else 0
 
-    if ovr_n == 0 and osm_n == 0:
+    if ovr_n == 0 and osm_n == 0 and fsq_n == 0:
         err_detail = "; ".join(f"{k}: {v}" for k, v in tier_errors.items())
         raise DataFetchError(
             f"No '{category}' POIs found for this area. "
-            f"Overture returned 0 features and Overpass returned 0 features. "
+            f"All three tiers (Overture, Overpass, FSQ OS) returned 0 features. "
             + (f"Tier errors: {err_detail}" if err_detail else
-               "The category may not be represented in either provider for this region.")
+               "The category may not be represented in any provider for this region.")
         )
 
     merged = _dedup_and_union(ovr_gdf, osm_gdf, radius_m=_POI_DEDUP_RADIUS_M)
+    merged = _dedup_and_union(merged, fsq_gdf, radius_m=_POI_DEDUP_RADIUS_M)
     merged = _clip_to_boundary(merged, boundary_gdf)
     merged.attrs["tier_counts"] = {
         "overture": int(ovr_n),
         "overpass": int(osm_n),
+        "fsq_os":   int(fsq_n),
         "after_union": int(len(merged)),
     }
     if tier_errors:
@@ -415,7 +424,7 @@ def fetch_pois(
 
     merged["candidates_are_synthetic"] = False
     logger.info(
-        "POI fetch (%s): Overture=%d, Overpass=%d, after union+clip=%d",
-        category, ovr_n, osm_n, len(merged),
+        "POI fetch (%s): Overture=%d, Overpass=%d, FSQ_OS=%d, after union+clip=%d",
+        category, ovr_n, osm_n, fsq_n, len(merged),
     )
     return merged

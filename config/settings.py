@@ -75,7 +75,7 @@ class Settings:
     # Max wall-clock budget for the per-destination Dijkstra sweep in
     # DistanceCalculator._network_distance().
     NETWORK_DIJKSTRA_BUDGET_SECONDS: float = _env_float(
-        "SOCA_DIJKSTRA_BUDGET", 120.0
+        "SOCA_DIJKSTRA_BUDGET", 300.0
     )
     # osmnx requests_timeout (per HTTP call, not total).
     OSMNX_REQUESTS_TIMEOUT: int = _env_int("SOCA_OSMNX_REQUESTS_TIMEOUT", 120)

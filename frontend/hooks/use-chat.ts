@@ -40,6 +40,7 @@ export function useChat(onTurnFinished?: () => void, onMapUpdate?: () => void) {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
 
+      let receivedFinal = false;
       try {
         for await (const frame of streamPostSse<unknown>(
           "/api/chat/stream",
@@ -61,10 +62,12 @@ export function useChat(onTurnFinished?: () => void, onMapUpdate?: () => void) {
               onMapUpdate?.();
               break;
             case "final":
+              receivedFinal = true;
               closeOpenToolCalls(assistantId, { status: "completed" });
               finalizeTurn(assistantId, f.data.text || "");
               break;
             case "error":
+              receivedFinal = true;
               closeOpenToolCalls(assistantId, {
                 error: f.data.message || "Something went wrong.",
               });
@@ -73,6 +76,13 @@ export function useChat(onTurnFinished?: () => void, onMapUpdate?: () => void) {
             default:
               break;
           }
+        }
+        // Stream ended without a final event (server detected disconnect and
+        // cancelled the pump mid-turn). Close any open tool calls so the UI
+        // doesn't spin forever; the map will update via the events stream.
+        if (!receivedFinal) {
+          closeOpenToolCalls(assistantId, { status: "completed" });
+          finalizeTurn(assistantId, "");
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

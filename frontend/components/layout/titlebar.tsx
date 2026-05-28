@@ -2,11 +2,7 @@
 
 import { useStore } from "@/lib/store";
 import { Chip } from "@/components/ui/chip";
-import { Button } from "@/components/ui/button";
-import { Tooltip } from "@/components/ui/tooltip";
-import { RotateCw, Settings2 } from "lucide-react";
 import { formatArea, formatNumber } from "@/lib/format";
-import { apiPost } from "@/lib/api";
 
 export function Titlebar() {
   const snapshot = useStore((s) => s.snapshot);
@@ -62,26 +58,6 @@ export function Titlebar() {
         {networkChip}
       </div>
 
-      <div className="ml-auto flex items-center gap-1">
-        <Tooltip content="Refresh road network">
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => {
-              apiPost("/api/network/refresh").catch(() => {});
-            }}
-            aria-label="Refresh road network"
-            disabled={!aoi}
-          >
-            <RotateCw className="h-3.5 w-3.5" strokeWidth={1.75} />
-          </Button>
-        </Tooltip>
-        <Tooltip content="Settings">
-          <Button size="icon" variant="ghost" aria-label="Settings">
-            <Settings2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-          </Button>
-        </Tooltip>
-      </div>
     </header>
   );
 }

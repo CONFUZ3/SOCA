@@ -43,19 +43,30 @@ export function SubcategoryPicker() {
 
   if (poiDatasets.length === 0) return null;
 
-  function toggle(dataset: DatasetSummary, sub: string) {
-    const available = dataset.available_subcategories ?? [];
-    const current = dataset.active_subcategories ?? available;
+  function toggle(datasetName: string, sub: string) {
+    // Read the latest dataset from the store, not from the render closure.
+    // Without this, two rapid clicks both see the same pre-click
+    // `active_subcategories` and the second click reverts the first.
+    const ds = useStore
+      .getState()
+      .datasets.find((d) => d.name === datasetName);
+    if (!ds) return;
+    const available = ds.available_subcategories ?? [];
+    const current = ds.active_subcategories ?? available;
     const next = current.includes(sub)
       ? current.filter((s) => s !== sub)
       : [...current, sub];
-    applyFilter(dataset, next, updateDatasetSubcategories, updateDatasetSummary).then(
+    applyFilter(ds, next, updateDatasetSubcategories, updateDatasetSummary).then(
       () => qc.invalidateQueries({ queryKey: ["map-state"] }),
     );
   }
 
-  function setAll(dataset: DatasetSummary, active: string[]) {
-    applyFilter(dataset, active, updateDatasetSubcategories, updateDatasetSummary).then(
+  function setAll(datasetName: string, active: string[]) {
+    const ds = useStore
+      .getState()
+      .datasets.find((d) => d.name === datasetName);
+    if (!ds) return;
+    applyFilter(ds, active, updateDatasetSubcategories, updateDatasetSummary).then(
       () => qc.invalidateQueries({ queryKey: ["map-state"] }),
     );
   }
@@ -81,7 +92,7 @@ export function SubcategoryPicker() {
               return (
                 <button
                   key={sub}
-                  onClick={() => toggle(dataset, sub)}
+                  onClick={() => toggle(dataset.name, sub)}
                   className={cn(
                     "rounded-full border px-2 py-0.5 text-[10px] font-medium transition-colors",
                     on
@@ -94,9 +105,7 @@ export function SubcategoryPicker() {
               );
             })}
             <button
-              onClick={() =>
-                setAll(dataset, allOn ? [] : available)
-              }
+              onClick={() => setAll(dataset.name, allOn ? [] : available)}
               className="ml-auto shrink-0 text-[10px] text-text-faint hover:text-text"
             >
               {allOn ? "clear all" : "select all"}
