@@ -60,9 +60,7 @@ Where:
                 "capacitated",
                 "probabilistic",
                 "multi_coverage",
-                "backup",
-                "hierarchical",
-                "dynamic"
+                "backup"
             ]
         }
     
@@ -861,18 +859,18 @@ Where:
         z_vtype = GRB.CONTINUOUS if variant == "probabilistic" else GRB.BINARY
         z = model.addVars(n_demand, vtype=z_vtype, lb=0.0, ub=1.0, name="z")  # demand covered or fraction covered
         
-        # For capacitated variant, add assignment variables
+        # For capacitated variant, add single-source assignment variables.
+        # Binary y → each demand is served in full by at most one facility (the
+        # canonical capacitated MCLP, Pirkul & Schilling 1991). This mirrors the
+        # PuLP backend so both solvers optimise the same model rather than the
+        # fractional/splittable relaxation used previously.
         if variant == "capacitated":
-            # Fractional assignment variables: fraction of demand i served by facility j (0..1)
-            y = model.addVars(n_demand, n_candidates, vtype=GRB.CONTINUOUS, lb=0.0, ub=1.0, name="y")
-        
-        # Objective: maximize weighted coverage
-        # Capacitated: maximize total served population directly via y
-        if variant == "capacitated":
-            obj = gp.quicksum(float(demand_weights[i]) * y[i, j] for i in range(n_demand) for j in range(n_candidates) if coverage_matrix[i, j] == 1)
-        else:
-            # Non-capacitated and probabilistic variants use z
-            obj = gp.quicksum(float(demand_weights[i]) * z[i] for i in range(n_demand))
+            y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")
+
+        # Objective: maximize weighted coverage (Σ wᵢ zᵢ for every variant). For
+        # capacitated, zᵢ is tied to the assignment vars below (zᵢ ≤ Σⱼ yᵢⱼ), so
+        # this equals the served demand under single-source assignment.
+        obj = gp.quicksum(float(demand_weights[i]) * z[i] for i in range(n_demand))
         model.setObjective(obj, GRB.MAXIMIZE)
         
         # Facility selection constraints
@@ -900,12 +898,13 @@ Where:
                 # Require at least k facilities to claim coverage
                 model.addConstr(gp.quicksum(x[j] for j in covering_facilities) >= int(k_coverage) * z[i], f"kcover_{i}")
             elif variant == "capacitated":
-                # For capacitated variant, coverage indicator z[i] is 1 if any positive fraction served
+                # Coverage indicator z[i] = 1 only if demand i is assigned to a facility
                 model.addConstr(z[i] <= gp.quicksum(y[i, j] for j in covering_facilities), f"cover_{i}")
-                # Assignment constraints: can only serve from open facilities and total fraction ≤ 1
+                # Assignment constraints: can only serve from open facilities and
+                # each demand is assigned to at most one facility (single source)
                 for j in covering_facilities:
                     model.addConstr(y[i, j] <= x[j], f"assign_{i}_{j}")
-                model.addConstr(gp.quicksum(y[i, j] for j in covering_facilities) <= 1.0, f"fraction_sum_{i}")
+                model.addConstr(gp.quicksum(y[i, j] for j in covering_facilities) <= 1, f"assign_sum_{i}")
             else:
                 # classical and budget: binary coverage if any facility covers
                 model.addConstr(z[i] <= gp.quicksum(x[j] for j in covering_facilities), f"cover_{i}")

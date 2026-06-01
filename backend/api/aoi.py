@@ -104,6 +104,93 @@ def resolve_aoi(
 
 
 # ---------------------------------------------------------------------------
+# POST /api/aoi/from-dataset — derive an AOI from an uploaded dataset
+# ---------------------------------------------------------------------------
+
+
+class FromDatasetRequest(BaseModel):
+    name: str = Field(
+        ...,
+        description="Dataset key in problem_state['data'] (a prior /api/data/upload).",
+    )
+    margin_pct: float = Field(
+        0.05,
+        description="Bounding-box padding as a fraction of the larger bbox side.",
+    )
+
+
+@router.post("/from-dataset")
+def aoi_from_dataset(
+    body: FromDatasetRequest,
+    ctx=Depends(resolve_session),
+):
+    """Derive a candidate AOI polygon from an already-uploaded dataset.
+
+    Point/line geometry → padded bounding box; polygon geometry → dissolved
+    outline used directly. Returns the same shape as ``/api/aoi/resolve`` so the
+    frontend can hand it straight to the editable map + ``/api/aoi/confirm``.
+    """
+    import json
+
+    import geopandas as gpd
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    from config.settings import settings
+    from utils.aoi_selector import _validate
+
+    crs_standard = settings.CRS_STANDARD
+    crs_projected = settings.CRS_PROJECTED
+
+    _session_id, record = ctx
+    ps = record["problem_state"]
+    gdf = (ps.get("data") or {}).get(body.name)
+    if gdf is None or len(gdf) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No dataset named {body.name!r} in session.",
+        )
+
+    geom_types = set(gdf.geometry.geom_type.unique())
+    is_polygonal = geom_types <= {"Polygon", "MultiPolygon"}
+
+    if is_polygonal:
+        geom = unary_union(gdf.geometry.values)
+    else:
+        # Padded bounding box, computed in a metric CRS so the margin + floor
+        # are in meters (handles single-point / collinear uploads gracefully).
+        proj = gdf.to_crs(crs_projected)
+        minx, miny, maxx, maxy = proj.total_bounds
+        # 500 m floor keeps a single-point / tightly-clustered upload above the
+        # 0.5 km² minimum AOI area enforced by _validate.
+        pad = max(body.margin_pct * max(maxx - minx, maxy - miny), 500.0)
+        padded = box(minx - pad, miny - pad, maxx + pad, maxy + pad)
+        geom = (
+            gpd.GeoSeries([padded], crs=crs_projected)
+            .to_crs(crs_standard)
+            .iloc[0]
+        )
+
+    ok, err, area = _validate(geom)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=err or "Could not derive a valid AOI from this dataset.",
+        )
+
+    out = gpd.GeoDataFrame({"name": ["aoi"], "geometry": [geom]}, crs=crs_standard)
+    label = ("Boundary from " if is_polygonal else "Bounds from ") + body.name
+    return {
+        "name": label,
+        "display_name": body.name,
+        "source": "upload",
+        "derived": "boundary" if is_polygonal else "bbox",
+        "area_km2": area,
+        "geojson": json.loads(out.to_json()),
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /api/aoi/confirm — commit AOI, kick road-network prefetch
 # ---------------------------------------------------------------------------
 

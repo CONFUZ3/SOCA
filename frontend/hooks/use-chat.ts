@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useRef, useState } from "react";
+import { apiGet } from "@/lib/api";
 import { streamPostSse } from "@/lib/sse";
 import { useStore } from "@/lib/store";
 import type { ToolCallResult, ToolCallStart } from "@/types";
@@ -77,12 +78,35 @@ export function useChat(onTurnFinished?: () => void, onMapUpdate?: () => void) {
               break;
           }
         }
-        // Stream ended without a final event (server detected disconnect and
-        // cancelled the pump mid-turn). Close any open tool calls so the UI
-        // doesn't spin forever; the map will update via the events stream.
+        // Stream ended without a final event (server detected a disconnect
+        // mid-turn). The backend worker still finishes the turn and persists
+        // the assistant message, so recover it from chat history rather than
+        // leaving the turn blank; also refresh the map for any new layers.
         if (!receivedFinal) {
           closeOpenToolCalls(assistantId, { status: "completed" });
-          finalizeTurn(assistantId, "");
+          // The worker may still be generating the narration when the stream
+          // drops, so poll a few times for an assistant message that lands
+          // AFTER this turn's user message (older assistant messages belong
+          // to previous turns and must not be shown here).
+          let recovered = "";
+          for (let attempt = 0; attempt < 4 && !recovered; attempt++) {
+            if (attempt > 0) await new Promise((r) => setTimeout(r, 1500));
+            try {
+              const { messages } = await apiGet<{
+                messages: { role: string; content: string }[];
+              }>("/api/chat/history");
+              const msgs = messages || [];
+              const lastUserIdx = msgs.map((m) => m.role).lastIndexOf("user");
+              recovered =
+                msgs
+                  .slice(lastUserIdx + 1)
+                  .find((m) => m.role === "assistant")?.content || "";
+            } catch {
+              break;
+            }
+          }
+          finalizeTurn(assistantId, recovered);
+          onMapUpdate?.();
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

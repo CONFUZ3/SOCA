@@ -79,7 +79,7 @@ The legacy Streamlit `app.py` still works against the same agent/solvers/utils, 
 
 **`agent/tools/`** — ADK tool implementations (imported individually in `soca_agent.py`; `__init__.py` is a marker):
 - `fetch_tools.py` — `fetch_city_data`: boundaries (Overture → Nominatim fallback), population (HDX), POIs (Overture/Overpass).
-- `optimize_tools.py` — `stage_optimization` / `confirm_optimization`. Confirmation also writes a reproducibility record via `utils/repro_logger.py` and attaches `equity_metrics` to the result.
+- `optimize_tools.py` — `stage_optimization` / `confirm_optimization`. Confirmation also writes a reproducibility record via `utils/repro_logger.py`, attaches `equity_metrics`, and builds an `analysis_facts` block (via `utils/solution_report.py`) — a fully unit-labeled facts payload (distance distribution in km, per-facility breakdown with reverse-geocoded place names, located coverage gaps, interpretable equity) that the agent narrates from. The deterministic `solution_summary` template remains as a fallback.
 - `status_tools.py` — `get_data_status`.
 - `sensitivity_tools.py` — `run_sensitivity_analysis`: drop-one re-optimization over each selected facility, reporting per-facility objective degradation and the `most_critical` facility. Reuses cached road graph + `data_dict`; never re-fetches.
 - `state_bridge.py` — thread-local bridge so ADK tools can read/write the active session's `problem_state` (works for both Streamlit `st.session_state` and the FastAPI `SessionStore`); call `bind_session()` before each `Runner.run()`.

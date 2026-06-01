@@ -125,6 +125,86 @@ def suggest(query: str, *, limit: int = 8) -> list[GeocodeCandidate]:
     return candidates[:limit]
 
 
+_REVERSE_CACHE: dict[tuple[float, float], Optional[str]] = {}
+
+
+def reverse_geocode(lat: float, lon: float) -> Optional[str]:
+    """Best-effort place label for a coordinate (e.g. a chosen facility site).
+
+    Returns a short human label like "Miraflores, Lima" or a street name, or
+    ``None`` when nothing usable is found. Tries Photon reverse first (fast, no
+    enforced rate limit), then Nominatim. Never raises — failures return
+    ``None`` so callers can fall back to raw coordinates. Results are cached on
+    rounded coordinates to avoid re-querying nearby facilities.
+    """
+    if not _REQUESTS_AVAILABLE:
+        return None
+    key = (round(float(lat), 5), round(float(lon), 5))
+    if key in _REVERSE_CACHE:
+        return _REVERSE_CACHE[key]
+
+    label: Optional[str] = None
+    try:
+        label = _reverse_photon(lat, lon)
+    except Exception as exc:
+        logger.debug("reverse_geocode Photon failed (%s)", exc)
+    if not label:
+        try:
+            label = _reverse_nominatim(lat, lon)
+        except Exception as exc:
+            logger.debug("reverse_geocode Nominatim failed (%s)", exc)
+
+    _REVERSE_CACHE[key] = label
+    return label
+
+
+def _label_from_address(p: dict) -> Optional[str]:
+    """Compose a 1–2 part label from address-component fields (Photon/Nominatim)."""
+    specific = next(
+        (p.get(f) for f in (
+            "name", "suburb", "neighbourhood", "quarter", "city_district",
+            "district", "road", "locality",
+        ) if p.get(f)),
+        None,
+    )
+    area = next(
+        (p.get(f) for f in ("city", "town", "village", "municipality", "county")
+         if p.get(f)),
+        None,
+    )
+    parts = [x for x in (specific, area) if x]
+    # Drop a redundant second part identical to the first.
+    if len(parts) == 2 and parts[0] == parts[1]:
+        parts = parts[:1]
+    return ", ".join(parts) if parts else None
+
+
+def _reverse_photon(lat: float, lon: float) -> Optional[str]:
+    resp = requests.get(
+        f"{PHOTON_URL}/reverse",
+        params={"lat": lat, "lon": lon, "lang": "en"},
+        headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
+        timeout=5,
+    )
+    resp.raise_for_status()
+    features = (resp.json() or {}).get("features") or []
+    if not features:
+        return None
+    return _label_from_address(features[0].get("properties") or {})
+
+
+def _reverse_nominatim(lat: float, lon: float) -> Optional[str]:
+    _nominatim_limiter.wait()
+    resp = requests.get(
+        f"{NOMINATIM_URL}/reverse",
+        params={"lat": lat, "lon": lon, "format": "jsonv2", "addressdetails": 1, "zoom": 16},
+        headers={"User-Agent": _USER_AGENT, "Accept": "application/json"},
+        timeout=8,
+    )
+    resp.raise_for_status()
+    return _label_from_address((resp.json() or {}).get("address") or {})
+
+
 def resolve(candidate_dict: dict) -> GeocodeCandidate:
     """Re-hydrate a GeocodeCandidate from a dict (e.g. stored in session_state)."""
     # Normalise bbox — JSON serialisation turns tuples into lists.

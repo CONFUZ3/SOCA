@@ -87,9 +87,17 @@ interface Props {
   onDrawn: (geojson: GeoJSON.FeatureCollection, area_km2: number) => void;
   onAreaChange: (area_km2: number | null, error: string | null) => void;
   initialGeojson?: GeoJSON.FeatureCollection | null;
+  // Read-only points drawn under the editable polygon (e.g. the source dataset
+  // an AOI was derived from). Purely contextual — not editable.
+  pointsGeojson?: GeoJSON.FeatureCollection | null;
 }
 
-export function AoiDrawMap({ onDrawn, onAreaChange, initialGeojson }: Props) {
+export function AoiDrawMap({
+  onDrawn,
+  onAreaChange,
+  initialGeojson,
+  pointsGeojson,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const drawRef = useRef<MapboxDraw | null>(null);
@@ -130,6 +138,26 @@ export function AoiDrawMap({ onDrawn, onAreaChange, initialGeojson }: Props) {
     });
 
     map.on("load", () => {
+      // Source-points overlay (read-only) sits below the draw layers.
+      if (pointsGeojson?.features?.length) {
+        map.addSource("aoi-source-points", {
+          type: "geojson",
+          data: pointsGeojson,
+        });
+        map.addLayer({
+          id: "aoi-source-points",
+          type: "circle",
+          source: "aoi-source-points",
+          paint: {
+            "circle-radius": 3,
+            "circle-color": "#64748b",
+            "circle-opacity": 0.6,
+            "circle-stroke-width": 0.5,
+            "circle-stroke-color": "#475569",
+          },
+        });
+      }
+
       map.addControl(draw as unknown as maplibregl.IControl);
       drawRef.current = draw;
 

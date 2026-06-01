@@ -2,39 +2,11 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useStore } from "@/lib/store";
-import type { DatasetSummary } from "@/types";
 import { cn } from "@/lib/cn";
-
-async function applyFilter(
-  dataset: DatasetSummary,
-  next: string[],
-  updateDatasetSubcategories: (name: string, active: string[]) => void,
-  updateDatasetSummary: (summary: DatasetSummary) => void,
-) {
-  updateDatasetSubcategories(dataset.name, next);
-  try {
-    const resp = await fetch(
-      `/api/data/${encodeURIComponent(dataset.name)}/filter`,
-      {
-        method: "PATCH",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ active_subcategories: next }),
-      },
-    );
-    if (resp.ok) {
-      const body = (await resp.json()) as DatasetSummary;
-      updateDatasetSummary(body);
-    }
-  } catch {
-    // optimistic update stays; map resyncs on next poll
-  }
-}
+import { applySubcategoryFilter, nextToggled } from "@/lib/subcategory-filter";
 
 export function SubcategoryPicker() {
   const datasets = useStore((s) => s.datasets);
-  const updateDatasetSubcategories = useStore((s) => s.updateDatasetSubcategories);
-  const updateDatasetSummary = useStore((s) => s.updateDatasetSummary);
   const qc = useQueryClient();
 
   const poiDatasets = datasets.filter(
@@ -44,30 +16,14 @@ export function SubcategoryPicker() {
   if (poiDatasets.length === 0) return null;
 
   function toggle(datasetName: string, sub: string) {
-    // Read the latest dataset from the store, not from the render closure.
-    // Without this, two rapid clicks both see the same pre-click
-    // `active_subcategories` and the second click reverts the first.
-    const ds = useStore
-      .getState()
-      .datasets.find((d) => d.name === datasetName);
-    if (!ds) return;
-    const available = ds.available_subcategories ?? [];
-    const current = ds.active_subcategories ?? available;
-    const next = current.includes(sub)
-      ? current.filter((s) => s !== sub)
-      : [...current, sub];
-    applyFilter(ds, next, updateDatasetSubcategories, updateDatasetSummary).then(
-      () => qc.invalidateQueries({ queryKey: ["map-state"] }),
+    applySubcategoryFilter(datasetName, nextToggled(datasetName, sub)).then(() =>
+      qc.invalidateQueries({ queryKey: ["map-state"] }),
     );
   }
 
   function setAll(datasetName: string, active: string[]) {
-    const ds = useStore
-      .getState()
-      .datasets.find((d) => d.name === datasetName);
-    if (!ds) return;
-    applyFilter(ds, active, updateDatasetSubcategories, updateDatasetSummary).then(
-      () => qc.invalidateQueries({ queryKey: ["map-state"] }),
+    applySubcategoryFilter(datasetName, active).then(() =>
+      qc.invalidateQueries({ queryKey: ["map-state"] }),
     );
   }
 

@@ -324,8 +324,13 @@ class PMedianGeneticSolver:
 class PCenterGeneticSolver:
     """Genetic algorithm fallback for the P-Center problem."""
 
+    SUPPORTED_VARIANTS = {"vertex", "weighted", "conditional"}
+
     def __init__(self, config: GAConfig) -> None:
         self.config = config
+
+    def supports_variant(self, variant: str) -> bool:
+        return variant in self.SUPPORTED_VARIANTS
 
     def solve(
         self,
@@ -333,39 +338,72 @@ class PCenterGeneticSolver:
         p: int,
         initial_solution: Optional[np.ndarray] = None,
         time_budget_seconds: Optional[float] = None,
+        variant: str = "vertex",
+        demand_weights: Optional[np.ndarray] = None,
+        existing: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        logger.info(f"P-Center GA: Starting solve with p={p}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"P-Center GA: Starting solve with p={p}")
+        variant = variant or "vertex"
+        logger.info(f"P-Center GA: Starting solve with variant={variant}, p={p}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"P-Center GA: Starting solve with variant={variant}, p={p}")
         n_demand, n_candidates = distance_matrix.shape
 
+        if not self.supports_variant(variant):
+            raise ValueError(f"Variant '{variant}' is not supported by GA fallback")
+
+        weights = demand_weights.astype(float) if demand_weights is not None else np.ones(n_demand)
+
+        # Conditional variant: optimise over the non-existing candidates only and
+        # union the (always-open) existing facilities back in when evaluating.
+        existing_idx = sorted(set(int(j) for j in (existing or []) if 0 <= int(j) < n_candidates))
+        if variant == "conditional":
+            free = np.array([j for j in range(n_candidates) if j not in set(existing_idx)], dtype=int)
+            n_genes = int(free.size)
+            existing_arr = np.array(existing_idx, dtype=int)
+            # Translate the incumbent mask into the restricted gene space.
+            restricted_initial: Optional[np.ndarray] = None
+            if initial_solution is not None:
+                projected = np.asarray(initial_solution, dtype=np.int8)[free]
+                if int(projected.sum()) == int(p):
+                    restricted_initial = projected
+        else:
+            free = np.arange(n_candidates, dtype=int)
+            n_genes = n_candidates
+            existing_arr = np.array([], dtype=int)
+            restricted_initial = initial_solution
+
         optimizer = _BinaryGeneticOptimizer(
-            n_genes=n_candidates,
+            n_genes=n_genes,
             config=self.config,
             fixed_ones=int(p),
             minimum_ones=int(min(1, p)),
         )
 
         def evaluate(individual: np.ndarray) -> Tuple[float, Dict[str, Any]]:
-            open_idx = np.where(individual == 1)[0]
+            new_idx = free[np.where(individual == 1)[0]]
+            open_idx = np.concatenate([new_idx, existing_arr]) if existing_arr.size else new_idx
             if open_idx.size == 0:
                 return np.inf, {}
             dm = distance_matrix[:, open_idx]
             assign_cols = np.argmin(dm, axis=1)
             selected_facilities = open_idx[assign_cols]
-            max_distance = float(np.max(dm[np.arange(n_demand), assign_cols]))
-            average_distance = float(np.mean(dm[np.arange(n_demand), assign_cols]))
+            nearest = dm[np.arange(n_demand), assign_cols]
+            if variant == "weighted":
+                objective = float(np.max(weights * nearest))
+            else:
+                objective = float(np.max(nearest))
+            average_distance = float(np.mean(nearest))
             assignments = {i: int(selected_facilities[i]) for i in range(n_demand)}
             payload = {
-                "selected": open_idx.tolist(),
+                "selected": [int(j) for j in open_idx],
                 "assignments": assignments,
-                "max_distance": max_distance,
+                "max_distance": objective,
                 "average_distance": average_distance,
                 "feasible": True,
             }
-            return max_distance, payload
+            return objective, payload
 
         result = optimizer.run(
             evaluate_fn=evaluate,
-            initial_solution=initial_solution,
+            initial_solution=restricted_initial,
             time_limit=time_budget_seconds,
         )
 
@@ -378,7 +416,7 @@ class PCenterGeneticSolver:
             "objective_value": payload["max_distance"],
             "selected_facilities": payload["selected"],
             "assignments": payload["assignments"],
-            "solver_details": self._solver_details(result, "p-center"),
+            "solver_details": self._solver_details(result, f"p-center-{variant}"),
         }
 
     def _solver_details(self, result: Dict[str, Any], formulation: str) -> Dict[str, Any]:
@@ -396,8 +434,13 @@ class PCenterGeneticSolver:
 class LSCPGeneticSolver:
     """Genetic algorithm fallback for the LSCP solver."""
 
+    SUPPORTED_VARIANTS = {"base", "backup", "conditional", "probabilistic", "partial"}
+
     def __init__(self, config: GAConfig) -> None:
         self.config = config
+
+    def supports_variant(self, variant: str) -> bool:
+        return variant in self.SUPPORTED_VARIANTS
 
     def solve(
         self,
@@ -405,49 +448,107 @@ class LSCPGeneticSolver:
         distance_matrix: np.ndarray,
         time_budget_seconds: Optional[float] = None,
         initial_solution: Optional[np.ndarray] = None,
+        variant: str = "base",
+        k_coverage: int = 2,
+        demand_weights: Optional[np.ndarray] = None,
+        reliability: Optional[np.ndarray] = None,
+        coverage_reliability: float = 0.95,
+        coverage_fraction: float = 0.95,
+        existing: Optional[List[int]] = None,
     ) -> Dict[str, Any]:
-        logger.info(f"LSCP GA: Starting solve with time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else "LSCP GA: Starting solve")
+        variant = variant or "base"
+        logger.info(f"LSCP GA: Starting solve with variant={variant}, time_budget={time_budget_seconds:.2f}s" if time_budget_seconds else f"LSCP GA: Starting solve with variant={variant}")
         n_demand, n_candidates = coverage_matrix.shape
+
+        if not self.supports_variant(variant):
+            raise ValueError(f"Variant '{variant}' is not supported by GA fallback")
+
+        weights = demand_weights.astype(float) if demand_weights is not None else np.ones(n_demand)
+        total_weight = float(np.sum(weights))
+        reliability = reliability.astype(float) if reliability is not None else np.ones(n_candidates)
+        k_required = max(1, int(k_coverage))
+        alpha = float(coverage_reliability)
+        fraction = float(coverage_fraction)
+        penalty_scale = max(10, n_candidates)
+
+        # Conditional variant: optimise over the non-existing candidates only and
+        # union the (always-open) existing facilities back in when evaluating; the
+        # objective counts only the additional facilities.
+        existing_idx = sorted(set(int(j) for j in (existing or []) if 0 <= int(j) < n_candidates))
+        if variant == "conditional":
+            free = np.array([j for j in range(n_candidates) if j not in set(existing_idx)], dtype=int)
+            existing_arr = np.array(existing_idx, dtype=int)
+            restricted_initial: Optional[np.ndarray] = None
+            if initial_solution is not None and free.size:
+                restricted_initial = np.asarray(initial_solution, dtype=np.int8)[free]
+        else:
+            free = np.arange(n_candidates, dtype=int)
+            existing_arr = np.array([], dtype=int)
+            restricted_initial = initial_solution
+
         optimizer = _BinaryGeneticOptimizer(
-            n_genes=n_candidates,
+            n_genes=int(free.size),
             config=self.config,
             fixed_ones=None,
             minimum_ones=1,
         )
 
-        penalty_scale = max(10, n_candidates)
-
         def evaluate(individual: np.ndarray) -> Tuple[float, Dict[str, Any]]:
-            open_idx = np.where(individual == 1)[0]
+            new_idx = free[np.where(individual == 1)[0]]
+            open_idx = np.concatenate([new_idx, existing_arr]) if existing_arr.size else new_idx
             if open_idx.size == 0:
                 return np.inf, {}
 
             cover_slice = coverage_matrix[:, open_idx]
-            covered_mask = cover_slice.any(axis=1)
-            uncovered = int(np.count_nonzero(~covered_mask))
-            facility_count = int(open_idx.size)
-            penalty = uncovered * penalty_scale
+            cover_counts = cover_slice.sum(axis=1)
+            # Facility count for the objective: conditional counts only the additions.
+            facility_count = int(new_idx.size) if variant == "conditional" else int(open_idx.size)
+
+            if variant == "backup":
+                covered_mask = cover_counts >= k_required
+                violations = int(np.count_nonzero(~covered_mask))
+                penalty = violations * penalty_scale
+            elif variant == "probabilistic":
+                covered_mask = cover_counts >= 1
+                prob_not_served = np.ones(n_demand)
+                for facility in open_idx:
+                    facility_rel = float(reliability[facility])
+                    prob_not_served *= np.where(coverage_matrix[:, facility] == 1, 1.0 - facility_rel, 1.0)
+                achieved = 1.0 - prob_not_served
+                violations = int(np.count_nonzero(achieved < alpha - 1e-9))
+                penalty = violations * penalty_scale
+            elif variant == "partial":
+                covered_mask = cover_counts >= 1
+                covered_weight = float(np.sum(weights[covered_mask]))
+                required = fraction * total_weight
+                penalty = penalty_scale * max(0.0, required - covered_weight)
+            else:
+                # base / conditional: every demand needs at least one covering facility
+                covered_mask = cover_counts >= 1
+                violations = int(np.count_nonzero(~covered_mask))
+                penalty = violations * penalty_scale
+
             objective = facility_count + penalty
 
             assignments: Dict[int, int] = {}
             for demand_idx in range(n_demand):
                 covering = np.where(cover_slice[demand_idx] == 1)[0]
                 if covering.size > 0:
-                    facility = int(open_idx[covering[0]])
-                    assignments[demand_idx] = facility
+                    assignments[demand_idx] = int(open_idx[covering[0]])
 
+            uncovered = int(np.count_nonzero(~(cover_counts >= 1)))
             payload = {
-                "selected": open_idx.tolist(),
+                "selected": [int(j) for j in open_idx],
                 "assignments": assignments,
                 "uncovered": uncovered,
                 "covered_pct": float((1 - uncovered / n_demand) * 100 if n_demand else 100.0),
-                "feasible": uncovered == 0,
+                "feasible": penalty == 0,
             }
             return objective, payload
 
         result = optimizer.run(
             evaluate_fn=evaluate,
-            initial_solution=initial_solution,
+            initial_solution=restricted_initial,
             time_limit=time_budget_seconds,
         )
 
@@ -461,7 +562,7 @@ class LSCPGeneticSolver:
             "objective_value": len(payload["selected"]),
             "selected_facilities": payload["selected"],
             "assignments": payload["assignments"],
-            "solver_details": self._solver_details(result, "lscp"),
+            "solver_details": self._solver_details(result, f"lscp-{variant}"),
         }
 
     def _solver_details(self, result: Dict[str, Any], formulation: str) -> Dict[str, Any]:
@@ -550,13 +651,14 @@ class MCLPGeneticSolver:
                 coverage_mask = cover_slice.any(axis=1)
 
             if variant == "probabilistic":
-                reliabilities = reliability[open_idx]
-                prob_not_served = np.ones(n_demand)
-                for idx, facility in enumerate(open_idx):
-                    facility_rel = reliability[facility]
-                    prob_not_served *= np.where(coverage_matrix[:, facility] == 1, 1 - facility_rel, 1)
-                expected_cover = weights * (1 - prob_not_served)
-                covered_weight = float(np.sum(expected_cover))
+                # Match the MIP's linear coverage surrogate  z_i ≤ Σ_{j∈Nᵢ} r_j x_j
+                # (capped at 1) so the GA fallback optimises the *same* objective
+                # the MIP was approximating, instead of the exact product form
+                # (which would make MIP and GA disagree on the same instance).
+                rel_open = reliability[open_idx]
+                rel_sum = coverage_matrix[:, open_idx] @ rel_open
+                z_lin = np.minimum(1.0, rel_sum)
+                covered_weight = float(np.sum(weights * z_lin))
             else:
                 covered_weight = float(np.sum(weights[coverage_mask]))
 

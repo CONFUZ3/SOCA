@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import queue
+import threading
 import time
 from typing import Any, AsyncIterator, Dict, List, Optional
 
@@ -94,7 +96,28 @@ def _build_data_summary(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return summary
 
 
-_MAP_UPDATE_TOOLS = frozenset({"confirm_optimization", "run_sensitivity_analysis"})
+_MAP_UPDATE_TOOLS = frozenset(
+    {"confirm_optimization", "run_sensitivity_analysis", "analyze_existing_facilities"}
+)
+
+
+def _ensure_agent_loop(record: Dict[str, Any]):
+    """Return ``(loop, lock)`` for driving this session's agent turns.
+
+    The loop is created once per session and **never closed** so the genai
+    SDK's cached ``httpx.AsyncClient`` (whose connection pool binds to the
+    loop on first use) stays valid across turns. Each turn runs on a fresh
+    thread via ``loop.run_until_complete``; the lock serialises the rare case
+    of two concurrent turns for the same session (a single loop cannot be run
+    re-entrantly).
+    """
+    loop = record.get("_agent_loop")
+    if loop is None or loop.is_closed():
+        loop = asyncio.new_event_loop()
+        record["_agent_loop"] = loop
+    if "_agent_lock" not in record:
+        record["_agent_lock"] = threading.Lock()
+    return loop, record["_agent_lock"]
 
 
 def _sse(kind: str, payload: Dict[str, Any]) -> bytes:
@@ -136,18 +159,24 @@ async def chat_stream(
     HEARTBEAT_SECS = 5.0
 
     async def generator() -> AsyncIterator[bytes]:
-        bus.bind_session(session_id)
-        final_text = ""
-        tool_calls: List[str] = []
-
-        # Bridge the agent's async generator through a queue so we can race
-        # it against periodic heartbeats and client-disconnect checks.  A
-        # tool invocation (e.g. the solver) can run for tens of seconds —
-        # without this the browser closes the SSE connection for "stalled".
-        queue: asyncio.Queue = asyncio.Queue()
+        # Drive the agent turn on a dedicated OS thread instead of an asyncio
+        # task on this request's event loop.  A CPU-bound tool (e.g. the
+        # facility-analysis road-distance matrix) runs for tens of seconds of
+        # pure-Python work; on the event loop that starves the heartbeat
+        # coroutine, the browser drops the "stalled" SSE connection, and the
+        # completed result is lost.  On a worker thread the GIL is released
+        # periodically, so this loop keeps emitting heartbeats and the
+        # connection survives.  Events cross back via a thread-safe queue.
+        agent_loop, agent_lock = _ensure_agent_loop(record)
+        out_q: "queue.Queue" = queue.Queue()
         _SENTINEL = object()
+        final = {"text": "", "tools": []}
 
-        async def pump() -> None:
+        async def _run() -> None:
+            # ADK tools run on this loop's thread; activity-log routing is
+            # thread-local, so bind the session here for analysis.*/network.*
+            # events to reach /api/events/stream.
+            bus.bind_session(session_id)
             try:
                 async for ev in agent.chat_stream(
                     user_message=body.message,
@@ -155,14 +184,41 @@ async def chat_stream(
                     problem_state=ps,
                     uploaded_data_summary=data_summary,
                 ):
-                    await queue.put(ev)
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.error("chat_stream pump error: %s", exc, exc_info=True)
-                await queue.put({"type": "error", "message": str(exc)})
+                    if ev.get("type") == "final":
+                        final["text"] = ev.get("text") or ""
+                        final["tools"] = list(ev.get("tool_calls") or [])
+                    out_q.put(ev)
             finally:
-                await queue.put(_SENTINEL)
+                bus.bind_session(None)
 
-        pump_task = asyncio.create_task(pump(), name=f"chat-pump-{session_id}")
+        def _drive() -> None:
+            asyncio.set_event_loop(agent_loop)
+            with agent_lock:
+                try:
+                    agent_loop.run_until_complete(_run())
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.error(
+                        "chat_stream worker error: %s", exc, exc_info=True
+                    )
+                    out_q.put({"type": "error", "message": str(exc)})
+                finally:
+                    # Persist the assistant message here — independent of the
+                    # client connection — so a dropped stream never discards a
+                    # completed turn.
+                    if final["text"]:
+                        record["messages"].append(
+                            {
+                                "role": "assistant",
+                                "content": final["text"],
+                                "tool_calls": final["tools"],
+                            }
+                        )
+                    out_q.put(_SENTINEL)
+
+        worker = threading.Thread(
+            target=_drive, name=f"chat-turn-{session_id}", daemon=True
+        )
+        worker.start()
 
         try:
             yield _sse("start", {"ok": True})
@@ -170,15 +226,17 @@ async def chat_stream(
 
             while True:
                 try:
-                    ev = await asyncio.wait_for(queue.get(), timeout=HEARTBEAT_SECS)
-                except asyncio.TimeoutError:
+                    ev = await asyncio.to_thread(out_q.get, True, HEARTBEAT_SECS)
+                except queue.Empty:
                     # No event for HEARTBEAT_SECS — check disconnect then emit
                     # a heartbeat so the browser keeps the connection open.
                     if await request.is_disconnected():
+                        # Stop relaying, but DO NOT stop the worker: it keeps
+                        # running, finishes the turn, and persists the result.
                         logger.info(
-                            "chat_stream: client disconnected, cancelling pump"
+                            "chat_stream: client disconnected; "
+                            "turn finishes in background"
                         )
-                        pump_task.cancel()
                         break
                     elapsed = time.monotonic() - last_activity
                     yield _sse(
@@ -208,31 +266,19 @@ async def chat_stream(
                 elif kind == "token":
                     yield _sse("token", {"text": ev.get("text") or ""})
                 elif kind == "final":
-                    final_text = ev.get("text") or ""
-                    tool_calls = list(ev.get("tool_calls") or [])
                     yield _sse(
                         "final",
-                        {"text": final_text, "tool_calls": tool_calls},
+                        {
+                            "text": ev.get("text") or "",
+                            "tool_calls": list(ev.get("tool_calls") or []),
+                        },
                     )
                 elif kind == "error":
                     yield _sse("error", {"message": ev.get("message") or ""})
-
-            if final_text:
-                record["messages"].append(
-                    {
-                        "role": "assistant",
-                        "content": final_text,
-                        "tool_calls": tool_calls,
-                    }
-                )
         finally:
-            if not pump_task.done():
-                pump_task.cancel()
-                try:
-                    await pump_task
-                except (asyncio.CancelledError, Exception):
-                    pass
-            bus.bind_session(None)
+            # The worker is a daemon thread and persists the turn itself, so we
+            # never cancel it here; turns are sequential per session.
+            pass
 
     return StreamingResponse(
         generator(),

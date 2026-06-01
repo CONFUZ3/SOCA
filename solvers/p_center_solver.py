@@ -57,12 +57,7 @@ Where:
                 "worst case", "equity", "fairness", "maximum distance",
                 "emergency", "equal access"
             ],
-            "variants": [
-                "Vertex P-Center",
-                "Absolute P-Center",
-                "Weighted P-Center",
-                "Conditional P-Center"
-            ]
+            "variants": ["vertex", "weighted", "conditional"]
         }
     
     def get_conversation_prompts(self) -> Dict[str, Any]:
@@ -118,8 +113,61 @@ Where:
         if not ok:
             return False, err
 
+        variant = params.get("variant", "vertex")
+        allowed = {"vertex", "weighted", "conditional"}
+        if variant not in allowed:
+            return False, f"Unknown P-Center variant '{variant}'. Allowed variants: {sorted(allowed)}"
+
+        if variant == "conditional":
+            existing = params.get("existing_facilities")
+            if not existing:
+                return False, "Conditional P-Center requires a non-empty 'existing_facilities' list (candidate-site indices)"
+
         return True, None
-    
+
+    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame, parameters: Dict[str, Any]) -> np.ndarray:
+        """Extract demand weights from GeoDataFrame, preferring population columns and explicit parameter."""
+        # 1) Explicit parameter takes precedence
+        try:
+            explicit_col = parameters.get('demand_weight_column') if parameters else None
+            if explicit_col:
+                for c in demand_gdf.columns:
+                    if c.lower() == str(explicit_col).lower():
+                        values = demand_gdf[c].astype(float).to_numpy()
+                        if np.any(values < 0):
+                            raise ValueError(f"Demand weight column '{c}' contains negative values")
+                        return values
+        except Exception as e:
+            logger.warning(f"Failed to use explicit demand_weight_column: {e}")
+
+        # 2) Case-insensitive exact matches of common names
+        common_exact = ['population', 'pop', 'demand', 'weight']
+        lower_cols = {c.lower(): c for c in demand_gdf.columns}
+        for key in common_exact:
+            if key in lower_cols:
+                c = lower_cols[key]
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    pass
+
+        # 3) Substring heuristic
+        substr_keys = ['population', 'pop', 'weight', 'demand']
+        for c in demand_gdf.columns:
+            lc = c.lower()
+            if any(k in lc for k in substr_keys):
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    continue
+
+        logger.info("No weight column found, using uniform weights of 1.0")
+        return np.ones(len(demand_gdf))
+
     def solve(
         self,
         data: Dict[str, gpd.GeoDataFrame],
@@ -140,12 +188,25 @@ Where:
             
             p = parameters['n_facilities']
             service_radius_unit = parameters.get('service_radius_unit', 'm')
-            
+            variant = parameters.get('variant', 'vertex')
+
+            weights = self._extract_weights(demand_gdf, parameters) if variant == 'weighted' else None
+
+            existing = None
+            if variant == 'conditional':
+                existing = sorted(set(int(v) for v in (parameters.get('existing_facilities') or [])))
+
             constraints = self._merge_facility_set_constraints(constraints, parameters)
 
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
-            
+
+            if variant == 'conditional' and p > len(candidate_gdf) - len(existing):
+                raise ValueError(
+                    f"Cannot locate {p} new facilities: only {len(candidate_gdf) - len(existing)} "
+                    f"candidate sites remain after {len(existing)} existing facilities are fixed open"
+                )
+
             # Calculate distance matrix
             dist_calc = DistanceCalculator()
             network_graph = data.get('_network_graph')
@@ -163,46 +224,67 @@ Where:
                 distance_matrix,
                 p,
                 constraints,
-                time_limit_seconds=fallback_time_limit
+                time_limit_seconds=fallback_time_limit,
+                variant=variant,
+                weights=weights,
+                existing=existing
             )
             mip_elapsed = time.time() - mip_start
-            
+
             timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
             ga_needed = timed_out_flag or (
                 fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
             )
             logger.info(f"P-Center timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
             if ga_needed:
-                logger.info("P-Center: Falling back to Genetic Algorithm")
-                logger.info(f"P-Center: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
-                incumbent_mask = None
-                if solution.get('selected_facilities'):
-                    incumbent_mask = np.zeros(distance_matrix.shape[1], dtype=np.int8)
-                    for idx in solution['selected_facilities']:
-                        if 0 <= idx < incumbent_mask.size:
-                            incumbent_mask[idx] = 1
                 ga_cfg = GAConfig(time_limit_seconds=ga_time_budget)
-                logger.info(f"P-Center: Starting GA with time budget: {ga_time_budget:.2f} seconds")
                 ga_solver = PCenterGeneticSolver(ga_cfg)
-                ga_result = ga_solver.solve(
-                    distance_matrix=distance_matrix,
-                    p=p,
-                    initial_solution=incumbent_mask,
-                    time_budget_seconds=ga_time_budget
-                )
-                logger.info(f"P-Center: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
-                ga_details = {
-                    **ga_result.get('solver_details', {}),
-                    "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
-                    "fallback_reason": "time_limit"
-                }
-                solution = {
-                    "status": ga_result.get("status", "feasible"),
-                    "objective_value": ga_result["objective_value"],
-                    "selected_facilities": ga_result["selected_facilities"],
-                    "assignments": ga_result["assignments"],
-                    "solver_details": ga_details
-                }
+                if ga_solver.supports_variant(variant):
+                    logger.info("P-Center: Falling back to Genetic Algorithm")
+                    logger.info(f"P-Center: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                    incumbent_mask = None
+                    if solution.get('selected_facilities'):
+                        incumbent_mask = np.zeros(distance_matrix.shape[1], dtype=np.int8)
+                        for idx in solution['selected_facilities']:
+                            if 0 <= idx < incumbent_mask.size:
+                                incumbent_mask[idx] = 1
+                    logger.info(f"P-Center: Starting GA with time budget: {ga_time_budget:.2f} seconds")
+                    ga_result = ga_solver.solve(
+                        distance_matrix=distance_matrix,
+                        p=p,
+                        initial_solution=incumbent_mask,
+                        time_budget_seconds=ga_time_budget,
+                        variant=variant,
+                        demand_weights=weights,
+                        existing=existing,
+                    )
+                    logger.info(f"P-Center: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                    ga_details = {
+                        **ga_result.get('solver_details', {}),
+                        "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
+                        "fallback_reason": "time_limit"
+                    }
+                    ga_warnings = []
+                    if ga_result.get("status") == "approximate":
+                        ga_warnings.append(
+                            f"GA fallback returned an approximate solution that may marginally "
+                            f"violate the '{variant}' constraint."
+                        )
+                    solution = {
+                        "status": ga_result.get("status", "feasible"),
+                        "objective_value": ga_result["objective_value"],
+                        "selected_facilities": ga_result["selected_facilities"],
+                        "assignments": ga_result["assignments"],
+                        "solver_details": ga_details,
+                        "warnings": ga_warnings,
+                    }
+                else:
+                    logger.info(f"P-Center: GA fallback not available for variant '{variant}'; keeping MIP incumbent")
+                    if timed_out_flag:
+                        solution.setdefault('warnings', []).append(
+                            f"MIP time limit reached for the '{variant}' variant; returning best incumbent "
+                            f"(genetic-algorithm fallback is not available for this variant)."
+                        )
             else:
                 logger.info(f"P-Center: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
@@ -215,16 +297,19 @@ Where:
             )
             
             solution_time = time.time() - start_time
-            
-            return {
+
+            objective_name = "weighted_max_distance" if variant == "weighted" else "max_distance"
+
+            result = {
                 "status": solution['status'],
                 "objective_value": solution['objective_value'],
                 "selected_facilities": solution['selected_facilities'],
                 "assignments": solution['assignments'],
+                "variant_used": variant,
                 "metrics": {
                     **metrics,
                     "objective_value": float(solution['objective_value']),
-                    "objective_name": "max_distance"
+                    "objective_name": objective_name
                 },
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
@@ -239,7 +324,12 @@ Where:
                     ]
                 }
             }
-            
+
+            if solution.get('warnings'):
+                result.setdefault('warnings', []).extend(solution['warnings'])
+
+            return result
+
         except Exception as e:
             logger.error(f"Error solving P-Center problem: {e}")
             return {
@@ -253,23 +343,29 @@ Where:
         distance_matrix: np.ndarray,
         p: int,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "vertex",
+        weights: Optional[np.ndarray] = None,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         """Solve using MIP"""
         try:
             import gurobipy as gp
             from gurobipy import GRB
-            return self._solve_gurobi(distance_matrix, p, constraints, time_limit_seconds)
+            return self._solve_gurobi(distance_matrix, p, constraints, time_limit_seconds, variant=variant, weights=weights, existing=existing)
         except ImportError:
             logger.info("Gurobi not available, using PuLP")
-            return self._solve_pulp(distance_matrix, p, constraints, time_limit_seconds)
+            return self._solve_pulp(distance_matrix, p, constraints, time_limit_seconds, variant=variant, weights=weights, existing=existing)
     
     def _solve_gurobi(
         self,
         distance_matrix: np.ndarray,
         p: int,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "vertex",
+        weights: Optional[np.ndarray] = None,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
@@ -277,6 +373,7 @@ Where:
         from .base_solver import configure_gurobi_model
 
         n_demand, n_candidates = distance_matrix.shape
+        existing_set = set(existing or [])
 
         model = gp.Model("p-center")
         configure_gurobi_model(model, time_limit_seconds)
@@ -287,7 +384,17 @@ Where:
 
         model.setObjective(W, GRB.MINIMIZE)
 
-        model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) == p)
+        if variant == "conditional":
+            # Existing facilities are forced open and do not consume the budget;
+            # p counts only the new facilities placed among the remaining candidates.
+            for j in existing_set:
+                if 0 <= j < n_candidates:
+                    model.addConstr(x[j] == 1)
+            model.addConstr(
+                gp.quicksum(x[j] for j in range(n_candidates) if j not in existing_set) == p
+            )
+        else:
+            model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) == p)
 
         model.addConstrs(
             (gp.quicksum(y[i, j] for j in range(n_candidates)) == 1
@@ -301,12 +408,19 @@ Where:
             (y[i, j] <= x[j] for i in range(n_demand) for j in range(n_candidates)),
             name="y_le_x",
         )
-        model.addConstrs(
-            (W >= float(distance_matrix[i, j]) * y[i, j]
-             for i in range(n_demand) for j in range(n_candidates)),
-            name="radius_cover",
-        )
-        
+        if variant == "weighted":
+            model.addConstrs(
+                (W >= float(weights[i]) * float(distance_matrix[i, j]) * y[i, j]
+                 for i in range(n_demand) for j in range(n_candidates)),
+                name="radius_cover",
+            )
+        else:
+            model.addConstrs(
+                (W >= float(distance_matrix[i, j]) * y[i, j]
+                 for i in range(n_demand) for j in range(n_candidates)),
+                name="radius_cover",
+            )
+
         # Custom constraints
         must_include = constraints.get('must_include', [])
         for j in must_include:
@@ -355,32 +469,47 @@ Where:
         distance_matrix: np.ndarray,
         p: int,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "vertex",
+        weights: Optional[np.ndarray] = None,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         import pulp
-        
+
         n_demand, n_candidates = distance_matrix.shape
-        
+        existing_set = set(existing or [])
+
         prob = pulp.LpProblem("p-center", pulp.LpMinimize)
-        
+
         x = pulp.LpVariable.dicts("x", range(n_candidates), cat='Binary')
         y = pulp.LpVariable.dicts("y",
             ((i, j) for i in range(n_demand) for j in range(n_candidates)),
             cat='Binary')
         W = pulp.LpVariable("W", lowBound=0)
-        
+
         prob += W
-        
-        prob += pulp.lpSum([x[j] for j in range(n_candidates)]) == p
-        
+
+        if variant == "conditional":
+            # Existing facilities are forced open and do not consume the budget;
+            # p counts only the new facilities placed among the remaining candidates.
+            for j in existing_set:
+                if 0 <= j < n_candidates:
+                    prob += x[j] == 1
+            prob += pulp.lpSum([x[j] for j in range(n_candidates) if j not in existing_set]) == p
+        else:
+            prob += pulp.lpSum([x[j] for j in range(n_candidates)]) == p
+
         for i in range(n_demand):
             prob += pulp.lpSum([y[(i, j)] for j in range(n_candidates)]) == 1
-        
+
         for i in range(n_demand):
             for j in range(n_candidates):
                 prob += y[(i, j)] <= x[j]
-                prob += W >= distance_matrix[i, j] * y[(i, j)]
-        
+                if variant == "weighted":
+                    prob += W >= float(weights[i]) * distance_matrix[i, j] * y[(i, j)]
+                else:
+                    prob += W >= distance_matrix[i, j] * y[(i, j)]
+
         must_include = constraints.get('must_include', [])
         for j in must_include:
             if 0 <= j < n_candidates:

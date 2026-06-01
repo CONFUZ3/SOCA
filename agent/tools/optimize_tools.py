@@ -136,6 +136,8 @@ def stage_optimization(
     k_coverage: Optional[int] = None,
     max_assignment_distance: Optional[float] = None,
     facility_reliability: Optional[float] = None,
+    coverage_reliability: Optional[float] = None,
+    coverage_fraction: Optional[float] = None,
     demand_weight_column: Optional[str] = None,
     objective: str = "total",
     distance_metric: str = "network",
@@ -159,15 +161,25 @@ def stage_optimization(
         service_radius: Coverage radius (required for MCLP and LSCP).
         service_radius_unit: Unit for service_radius. One of: m, km, miles, ft,
                              yd, nm.  Default is metres.
-        variant: Problem variant. p-median: base / capacitated / budget /
-                 max_distance.  mclp: classical / capacitated / budget /
-                 multi_coverage / backup / probabilistic.
+        variant: Problem variant.
+                 p-median: base / capacitated / budget / max_distance.
+                 p-center: vertex / weighted / conditional.
+                 mclp: classical / budget / capacitated / probabilistic /
+                 multi_coverage / backup.
+                 lscp: base / backup / conditional / probabilistic / partial.
         budget: Total budget (required for budget variants).
         k_coverage: Minimum coverage redundancy (required for multi_coverage /
-                    backup MCLP variants).
+                    backup MCLP variants and LSCP backup variant).
         max_assignment_distance: Max assignment distance in metres (required for
                                  p-median max_distance variant).
-        facility_reliability: Reliability probability 0-1 (probabilistic MCLP).
+        facility_reliability: Reliability probability 0-1 (probabilistic MCLP /
+                              LSCP).
+        coverage_reliability: Minimum coverage reliability α (0-1) that every
+                              demand must meet given unreliable facilities
+                              (LSCP probabilistic variant; default 0.95).
+        coverage_fraction: Minimum fraction of weighted demand to cover (0-1)
+                           when full coverage is too costly (LSCP partial
+                           variant; default 0.95).
         demand_weight_column: Column name for demand weights (only needed for
                               non-standard column names).
         objective: Objective type for p-median: "total" or "average".
@@ -301,6 +313,10 @@ def stage_optimization(
         parameters["max_assignment_distance"] = max_assignment_distance
     if facility_reliability is not None:
         parameters["facility_reliability"] = facility_reliability
+    if coverage_reliability is not None:
+        parameters["coverage_reliability"] = coverage_reliability
+    if coverage_fraction is not None:
+        parameters["coverage_fraction"] = coverage_fraction
     if demand_weight_column is not None:
         parameters["demand_weight_column"] = demand_weight_column
     if objective != "total":
@@ -359,6 +375,17 @@ def stage_optimization(
             warnings.append(
                 "Max-distance P-Median needs 'max_assignment_distance'."
             )
+    elif pt == "p-center":
+        if variant == "conditional" and not parameters.get("existing_facilities"):
+            _log_stage("fail", "Conditional P-Center needs existing_facilities")
+            return {
+                "staged": False,
+                "error": (
+                    "Conditional P-Center requires 'existing_facilities' — the "
+                    "candidate-site indices of already-placed facilities. Please "
+                    "provide them or switch to the 'vertex' variant."
+                ),
+            }
     elif pt == "mclp":
         if radius_metres is None:
             _log_stage("fail", "MCLP needs a service radius before staging")
@@ -378,6 +405,31 @@ def stage_optimization(
                 "staged": False,
                 "error": "LSCP requires a service_radius.",
             }
+        if variant == "conditional" and not parameters.get("existing_facilities"):
+            _log_stage("fail", "Conditional LSCP needs existing_facilities")
+            return {
+                "staged": False,
+                "error": (
+                    "Conditional LSCP requires 'existing_facilities' — the "
+                    "candidate-site indices of already-placed facilities. Please "
+                    "provide them or switch to the 'base' variant."
+                ),
+            }
+        if variant == "backup" and "k_coverage" not in parameters:
+            warnings.append(
+                "Backup LSCP needs 'k_coverage'. Defaulting to 2."
+            )
+            parameters["k_coverage"] = 2
+        if variant == "probabilistic" and "coverage_reliability" not in parameters:
+            warnings.append(
+                "Probabilistic LSCP needs 'coverage_reliability'. Defaulting to 0.95."
+            )
+            parameters["coverage_reliability"] = 0.95
+        if variant == "partial" and "coverage_fraction" not in parameters:
+            warnings.append(
+                "Partial LSCP needs 'coverage_fraction'. Defaulting to 0.95."
+            )
+            parameters["coverage_fraction"] = 0.95
 
     # Stage into ADK session state
     pending = {
@@ -951,10 +1003,12 @@ def _enrich_and_explain(
         except Exception as exc:
             logger.warning("enrich: existing_info merge failed (%s)", exc)
 
-    # Equity metrics (Priority 6) — computed regardless of solver.
+    # Equity metrics (Priority 6) + rich analysis facts — both reuse one
+    # distance matrix, computed regardless of solver.
     try:
         from utils.equity_metrics import compute_equity_metrics
         from utils.distance_calculator import DistanceCalculator
+        from utils.solution_report import build_analysis_facts
         import pandas as _pd
         demand_gdf = data_dict.get("demand_points")
         cand_gdf = data_dict.get("candidate_sites")
@@ -986,6 +1040,15 @@ def _enrich_and_explain(
                 coverage_radius=parameters.get("service_radius"),
             )
             solution["equity_metrics"] = equity
+            try:
+                facts = build_analysis_facts(
+                    solution, data_dict, parameters, distance_metric,
+                    distance_matrix=D, demand_weights=weights, equity=equity,
+                )
+                if facts:
+                    solution["analysis_facts"] = facts
+            except Exception as exc:
+                logger.warning("enrich: analysis facts failed (%s)", exc)
     except Exception as exc:
         logger.warning("enrich: equity computation failed (%s)", exc)
 
@@ -1288,6 +1351,7 @@ def confirm_optimization(
         "objective_value": solution.get("objective_value"),
         "num_facilities_selected": len(solution.get("selected_facilities", [])),
         "solution_summary": explanation,
+        "analysis_facts": solution.get("analysis_facts"),
         "error_message": solution.get("error"),
         "warnings": combined_warnings,
         "distance_metric_used": distance_metric,

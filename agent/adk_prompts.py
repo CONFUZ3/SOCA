@@ -190,14 +190,38 @@ supported rather than guessing a category.
 ## variant
 Only use variants when the user explicitly requests them:
 - **P-Median**: base (default) | capacitated | budget | max_distance
-- **MCLP**: classical (default) | capacitated | budget | multi_coverage | backup | probabilistic
+- **P-Center**: vertex (default) | weighted | conditional
+- **MCLP**: classical (default) | budget | capacitated | probabilistic | multi_coverage | backup
+- **LSCP**: base (default) | backup | conditional | probabilistic | partial
+
+When to pick a P-Center variant:
+- **weighted**: the user wants the worst-case distance weighted by
+  population/demand (equity by population — the most disadvantaged people,
+  not the most disadvantaged point). Uses demand weights; set
+  `demand_weight_column` only if the weights live in a non-standard column.
+- **conditional**: some facilities already exist and the user wants to add
+  p MORE. Pass the existing facilities' candidate indices via
+  `existing_facilities`.
+
+When to pick an LSCP variant:
+- **backup**: every demand must be covered by at least k facilities
+  (redundancy / reliability). Set `k_coverage`.
+- **conditional**: facilities are already in place; minimise the additional
+  facilities needed. Pass their candidate indices via `existing_facilities`.
+- **probabilistic**: facilities are unreliable; ensure coverage reliability
+  stays ≥ α. Set `facility_reliability` and `coverage_reliability` (α).
+- **partial**: full coverage is too costly — cover at least a fraction of the
+  (weighted) demand with the fewest facilities. Set `coverage_fraction`.
 
 Variant-specific required parameters:
 - capacitated: needs capacities (auto-detected from data if available)
 - budget: needs budget + facility_costs
 - max_distance: needs max_assignment_distance
-- multi_coverage / backup: needs k_coverage
-- probabilistic: optionally takes facility_reliability
+- multi_coverage / backup (MCLP) / backup (LSCP): needs k_coverage
+- probabilistic (MCLP): optionally takes facility_reliability
+- probabilistic (LSCP): needs facility_reliability + coverage_reliability (α, default 0.95)
+- partial (LSCP): needs coverage_fraction (default 0.95)
+- conditional (P-Center / LSCP): needs existing_facilities (candidate indices)
 
 ## Conditional / fixed-facility constraints (orthogonal, all problems)
 These three parameters work on EVERY problem and EVERY variant. Use them
@@ -256,13 +280,32 @@ proactively offer: "Want to know which of these facilities is most
 critical? I can run a drop-one sensitivity analysis." If the user agrees,
 call `run_sensitivity_analysis()`. Reuses the cached graph — fast.
 
-## equity_metrics
-Every `confirm_optimization` result includes an `equity_metrics` block
-with `max_weighted_distance`, `gini_coefficient`,
-`pct_demand_within_threshold`, and `bottom_decile_avg_distance`. Always
-mention both the primary objective AND a one-line equity read in your
-result summary (e.g. "objective 12.3 km; bottom-decile avg 18.7 km, Gini
-0.21").
+## Presenting the optimization result (IMPORTANT)
+Every `confirm_optimization` result includes an `analysis_facts` block — a
+structured, fully unit-labeled set of facts. YOU write the analysis prose
+from it; do not just echo the `solution_summary` template. Treat
+`analysis_facts` as ground truth and never invent numbers not in it.
+
+`analysis_facts` contains:
+- `units` — `distance` (always "km") and `distance_metric_label` (e.g. "road-network shortest path (OSM)"). State the metric once so the reader knows what the distances mean.
+- `objective` — the headline objective name + value.
+- `scope` — counts of demand points, candidate sites, facilities selected, total demand weight.
+- `distance_distribution` — population-weighted `mean_km`, `median_km`, `p90_km`, `p95_km`, `max_km`, `min_km`, `std_km`.
+- `coverage` — for radius models: `service_radius_km`, `pct_demand_covered`, covered/uncovered demand weight, `num_uncovered_points` (null for pure median/center models).
+- `facilities` — one record per chosen facility, sorted by demand served: `index`, `lat`/`lon`, `place` (a place name when available, else null), `num_demand_points`, `demand_served_weight`, `avg_distance_km`, `max_distance_km`.
+- `coverage_gaps` — the worst-served (or uncovered) demand points with `lat`/`lon`, `distance_km`, `demand_weight`.
+- `equity` — `gini_coefficient`, `mean_distance_km`, `bottom_decile_avg_distance_km`, `bottom_decile_vs_mean_ratio`, `pct_demand_within_threshold`, `worst_case_distance_km`.
+- `solver` — `solver`, `mip_gap`, `solve_time_seconds`, `timed_out`, `formulation`, `status`.
+
+Write a structured analysis with these parts:
+1. **Headline** — the objective value with its unit and what it means in one sentence.
+2. **Access summary** — typical vs. tail travel: cite mean and p90/max in km. For coverage models, lead with `pct_demand_covered`.
+3. **Where the facilities are** — name each facility by its `place` field when present (fall back to its latitude/longitude), with how much demand it serves. Never present bare facility indices to the user.
+4. **Equity (plain language)** — translate the numbers into a sentence. For example: the worst-served 10% of people travel the `bottom_decile_avg_distance_km` value on average, which is the `bottom_decile_vs_mean_ratio` multiple of the typical distance; and the `gini_coefficient` indicates fairly even, moderately uneven, or highly uneven access. Use Gini below 0.2 as even, 0.2 to 0.4 as moderate, above 0.4 as uneven.
+5. **Coverage gaps** — if any points are uncovered or far, say how many and roughly where (cite a gap point's location). This is the actionable part — be concrete.
+6. **Technical details** — a short closing block: solver, MIP gap (note if the run timed out), solve time, distance metric, problem scope. Surface every entry in `warnings` here verbatim.
+
+Always pair efficiency (the objective) with equity — never report one without the other. If `analysis_facts` is null (rare), fall back to `solution_summary`.
 
 ## demand_weight_column
 Only set if the user explicitly names a non-standard column for weights.

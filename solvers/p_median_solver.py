@@ -236,9 +236,15 @@ Where:
 
             # If timed out or we reached the 60s window, switch to GA per user choice (a)
             timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
+            # The GA fallback only optimises the *base* P-Median objective; it does
+            # not honour the capacitated / budget / max_distance constraints, so it
+            # must not be substituted for those variants (it would silently return a
+            # constraint-violating solution labelled "feasible"). Keep the MIP
+            # incumbent for unsupported variants instead.
+            ga_supported = (variant == 'base')
             ga_needed = use_ga_after_timeout and (timed_out_flag or mip_elapsed >= max(0.1, 0.95 * fallback_time_limit))
-            logger.info(f"P-Median timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
-            if ga_needed:
+            logger.info(f"P-Median timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}, ga_supported={ga_supported}")
+            if ga_needed and ga_supported:
                 logger.info("P-Median: Falling back to Genetic Algorithm")
                 logger.info(f"P-Median: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
                 incumbent_mask = None
@@ -271,6 +277,13 @@ Where:
                     "assignments": ga_result["assignments"],
                     "solver_details": ga_details
                 }
+            elif ga_needed and not ga_supported:
+                logger.info(f"P-Median: GA fallback not available for variant '{variant}'; keeping MIP incumbent")
+                if timed_out_flag:
+                    solution.setdefault('warnings', []).append(
+                        f"MIP time limit reached for the '{variant}' P-Median variant; returning best "
+                        f"incumbent (genetic-algorithm fallback is not available for this variant)."
+                    )
             else:
                 logger.info(f"P-Median: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
@@ -321,6 +334,7 @@ Where:
                 "metrics": metrics,
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
+                "warnings": solution.get('warnings', []),
                 "academic_metadata": {
                     "algorithm_used": ("Genetic Algorithm (GA)"
                                        if solution.get('solver_details', {}).get('solver') == 'ga'

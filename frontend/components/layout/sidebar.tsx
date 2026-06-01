@@ -9,49 +9,18 @@ import { useSession } from "@/hooks/use-session";
 import { formatNumber } from "@/lib/format";
 import { sourceLabel } from "@/lib/sources";
 import { UploadDropzone } from "@/components/sidebar/upload-dropzone";
+import {
+  applySubcategoryFilter,
+  nextToggled,
+} from "@/lib/subcategory-filter";
 import type { DatasetSummary } from "@/types";
 
 export function Sidebar() {
   const datasets = useStore((s) => s.datasets);
   const snapshot = useStore((s) => s.snapshot);
-  const updateDatasetSubcategories = useStore((s) => s.updateDatasetSubcategories);
-  const updateDatasetSummary = useStore((s) => s.updateDatasetSummary);
   const hasSolution = Boolean(snapshot?.has_solution);
   const { resetSession } = useSession();
   const [confirmReset, setConfirmReset] = useState(false);
-
-  async function applySubcategoryFilter(dataset: DatasetSummary, next: string[]) {
-    // Optimistic update so the UI reacts instantly.
-    updateDatasetSubcategories(dataset.name, next);
-    try {
-      const resp = await fetch(
-        `/api/data/${encodeURIComponent(dataset.name)}/filter`,
-        {
-          method: "PATCH",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ active_subcategories: next }),
-        },
-      );
-      if (resp.ok) {
-        // Replace with the server's authoritative summary so
-        // active_num_features etc. reflect the real filter result.
-        const body = (await resp.json()) as DatasetSummary;
-        updateDatasetSummary(body);
-      }
-    } catch {
-      // optimistic update stays; map will re-sync on next poll
-    }
-  }
-
-  function toggleSubcategory(dataset: DatasetSummary, sub: string) {
-    const available = dataset.available_subcategories ?? [];
-    const current = dataset.active_subcategories ?? available;
-    const next = current.includes(sub)
-      ? current.filter((s) => s !== sub)
-      : [...current, sub];
-    applySubcategoryFilter(dataset, next);
-  }
 
   return (
     <aside className="flex h-full w-[260px] flex-col bg-surface hairline-r">
@@ -134,8 +103,10 @@ export function Sidebar() {
                   ) : null}
                   <SubcategoryFilter
                     dataset={d}
-                    onToggle={(sub) => toggleSubcategory(d, sub)}
-                    onSetAll={(next) => applySubcategoryFilter(d, next)}
+                    onToggle={(sub) =>
+                      applySubcategoryFilter(d.name, nextToggled(d.name, sub))
+                    }
+                    onSetAll={(next) => applySubcategoryFilter(d.name, next)}
                   />
                 </li>
               );
