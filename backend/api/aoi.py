@@ -115,7 +115,7 @@ class FromDatasetRequest(BaseModel):
     )
     margin_pct: float = Field(
         0.05,
-        description="Bounding-box padding as a fraction of the larger bbox side.",
+        description="Outline padding as a fraction of the larger bbox side.",
     )
 
 
@@ -126,14 +126,13 @@ def aoi_from_dataset(
 ):
     """Derive a candidate AOI polygon from an already-uploaded dataset.
 
-    Point/line geometry → padded bounding box; polygon geometry → dissolved
+    Point/line geometry → padded convex hull; polygon geometry → dissolved
     outline used directly. Returns the same shape as ``/api/aoi/resolve`` so the
     frontend can hand it straight to the editable map + ``/api/aoi/confirm``.
     """
     import json
 
     import geopandas as gpd
-    from shapely.geometry import box
     from shapely.ops import unary_union
 
     from config.settings import settings
@@ -157,21 +156,23 @@ def aoi_from_dataset(
     if is_polygonal:
         geom = unary_union(gdf.geometry.values)
     else:
-        # Padded bounding box, computed in a metric CRS so the margin + floor
-        # are in meters (handles single-point / collinear uploads gracefully).
+        # Padded convex hull, computed in a metric CRS so the margin + floor
+        # are in meters. The hull wraps the actual point/line extent tightly,
+        # avoiding the empty-corner inflation a bounding box produces for
+        # irregular shapes. A buffer handles single-point / collinear uploads
+        # (hull degenerates to a point/line) gracefully.
         proj = gdf.to_crs(crs_projected)
         minx, miny, maxx, maxy = proj.total_bounds
-        # 500 m floor keeps a single-point / tightly-clustered upload above the
-        # 0.5 km² minimum AOI area enforced by _validate.
         pad = max(body.margin_pct * max(maxx - minx, maxy - miny), 500.0)
-        padded = box(minx - pad, miny - pad, maxx + pad, maxy + pad)
+        hull = unary_union(proj.geometry.values).convex_hull
+        padded = hull.buffer(pad)
         geom = (
             gpd.GeoSeries([padded], crs=crs_projected)
             .to_crs(crs_standard)
             .iloc[0]
         )
 
-    ok, err, area = _validate(geom)
+    ok, err, area = _validate(geom, check_min_area=False)
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -179,12 +180,12 @@ def aoi_from_dataset(
         )
 
     out = gpd.GeoDataFrame({"name": ["aoi"], "geometry": [geom]}, crs=crs_standard)
-    label = ("Boundary from " if is_polygonal else "Bounds from ") + body.name
+    label = ("Boundary from " if is_polygonal else "Outline from ") + body.name
     return {
         "name": label,
         "display_name": body.name,
         "source": "upload",
-        "derived": "boundary" if is_polygonal else "bbox",
+        "derived": "boundary" if is_polygonal else "hull",
         "area_km2": area,
         "geojson": json.loads(out.to_json()),
     }

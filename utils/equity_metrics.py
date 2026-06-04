@@ -38,9 +38,12 @@ def _gini(values: np.ndarray, weights: Optional[np.ndarray] = None) -> float:
     if total_w <= 0 or total_vw <= 0:
         return 0.0
     # Standard weighted Gini: 1 - 2 * (area under Lorenz curve).
-    lorenz = cum_vw / total_vw
-    pop_share = cum_w / total_w
-    # Trapezoidal area under (pop_share, lorenz) starting from origin.
+    # The Lorenz curve must start at (0,0) — prepend origin so the
+    # trapezoidal integral covers the full [0,1] population share range.
+    # Omitting the origin systematically underestimates the Lorenz area,
+    # which overestimates the Gini coefficient.
+    lorenz = np.concatenate([[0.0], cum_vw / total_vw])
+    pop_share = np.concatenate([[0.0], cum_w / total_w])
     # NumPy 2.x removed np.trapz; prefer trapezoid when available.
     _trapz = getattr(np, "trapezoid", None) or getattr(np, "trapz")
     area = _trapz(lorenz, pop_share)

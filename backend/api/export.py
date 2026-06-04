@@ -1,4 +1,4 @@
-"""Export endpoints — GeoJSON / CSV / PDF / Shapefile / GeoPackage."""
+"""Export endpoints — GeoJSON / CSV / PDF."""
 
 from __future__ import annotations
 
@@ -7,11 +7,9 @@ import io
 import json
 import logging
 import os
-import tempfile
-import zipfile
+import re
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
@@ -86,6 +84,50 @@ def _first(row: Any, keys: tuple) -> Any:
 
 def _timestamp_slug() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+# Tools whose turns produce solution-narrative text worth carrying into the
+# PDF report (the LLM's written analysis of the current solution).
+_NARRATION_TOOLS = frozenset(
+    {"confirm_optimization", "run_sensitivity_analysis", "analyze_existing_facilities"}
+)
+
+
+def _analysis_narratives(record: Dict[str, Any]) -> List[str]:
+    """Return the LLM's written analysis tied to the current solution.
+
+    Walks the chat history back to the most recent ``confirm_optimization``
+    turn and returns that assistant message plus any later solution-related
+    narration (sensitivity / facility analysis). Falls back to the last
+    non-empty assistant message when no optimisation turn is found.
+    """
+    messages = record.get("messages") or []
+
+    start = None
+    for i in range(len(messages) - 1, -1, -1):
+        m = messages[i]
+        if m.get("role") == "assistant" and "confirm_optimization" in (
+            m.get("tool_calls") or []
+        ):
+            start = i
+            break
+
+    if start is None:
+        for m in reversed(messages):
+            if m.get("role") == "assistant" and (m.get("content") or "").strip():
+                return [m["content"].strip()]
+        return []
+
+    out: List[str] = []
+    for idx, m in enumerate(messages[start:], start=start):
+        if m.get("role") != "assistant":
+            continue
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if idx == start or set(m.get("tool_calls") or []) & _NARRATION_TOOLS:
+            out.append(content)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +394,32 @@ def export_pdf(ctx=Depends(resolve_session)) -> Response:
         fontSize=9,
         leading=11,
     )
+    md_styles = {
+        "body": ParagraphStyle(
+            "md_body", parent=body, fontSize=9.5, leading=13, spaceAfter=2
+        ),
+        "head": ParagraphStyle(
+            "md_head",
+            parent=body,
+            fontName="Helvetica-Bold",
+            fontSize=10.5,
+            leading=14,
+            spaceBefore=4,
+            spaceAfter=2,
+        ),
+        "bullet": ParagraphStyle(
+            "md_bullet",
+            parent=body,
+            fontSize=9.5,
+            leading=13,
+            leftIndent=14,
+            bulletIndent=2,
+            spaceAfter=1,
+        ),
+        "cell": ParagraphStyle(
+            "md_cell", parent=body, fontSize=8.5, leading=11
+        ),
+    }
 
     elements: List[Any] = []
     elements.append(Paragraph("SOCA Optimisation Report", h1))
@@ -424,6 +492,27 @@ def export_pdf(ctx=Depends(resolve_session)) -> Response:
         for w in warnings:
             elements.append(Paragraph(f"• {w}", body))
 
+    # AI analysis — the LLM's written narration of the current solution.
+    narratives = _analysis_narratives(record)
+    if narratives:
+        elements.append(Spacer(1, 0.2 * inch))
+        elements.append(Paragraph("AI analysis", h2))
+        for n_idx, narrative in enumerate(narratives):
+            if n_idx > 0:
+                elements.append(Spacer(1, 0.1 * inch))
+            elements.extend(
+                _render_markdown(
+                    narrative,
+                    md_styles,
+                    Table,
+                    TableStyle,
+                    colors,
+                    Paragraph,
+                    Spacer,
+                    inch,
+                )
+            )
+
     # Selected facilities table
     cand_gdf = _to_4326(_candidate_gdf(record))
     if cand_gdf is not None and selected:
@@ -483,223 +572,110 @@ def export_pdf(ctx=Depends(resolve_session)) -> Response:
     )
 
 
-# ---------------------------------------------------------------------------
-# Shared builder — assemble the three feature GeoDataFrames used by
-# Shapefile + GeoPackage exports.
-# ---------------------------------------------------------------------------
+def _md_inline(text: str) -> str:
+    """Convert inline markdown (bold / italic / code) to reportlab markup.
 
-
-def _build_solution_layers(record: Dict[str, Any]) -> Tuple[Any, Any, Any, Dict[str, Any]]:
-    """Return (facilities_gdf, demand_gdf, assignments_gdf, metadata).
-
-    Any of the three GeoDataFrames may be ``None`` when the inputs don't
-    support that layer (e.g. no demand data → no assignment lines).
+    XML special characters are escaped first so the LLM text can't break the
+    Paragraph parser.
     """
-    import geopandas as gpd  # local import — heavy module
-    from shapely.geometry import LineString
-
-    sol = _require_solution(record)
-    ps = record.get("problem_state") or {}
-    cand_gdf = _to_4326(_candidate_gdf(record))
-    demand_gdf_src = _to_4326(_demand_gdf(record))
-    selected: List[int] = [int(i) for i in (sol.get("selected_facilities") or [])]
-    assignments: Dict[Any, Any] = sol.get("assignments") or {}
-
-    # --- Facilities ---
-    facilities_gdf = None
-    if cand_gdf is not None and selected:
-        rows = []
-        geoms = []
-        for i in selected:
-            if i < 0 or i >= len(cand_gdf):
-                continue
-            row = cand_gdf.iloc[i]
-            geom = row.geometry
-            if geom is None or geom.is_empty:
-                continue
-            props: Dict[str, Any] = {"kind": "facility", "fac_idx": int(i)}
-            for key in ("name", "id", "capacity", "cost", "label"):
-                try:
-                    val = row[key]
-                    if val is not None:
-                        props[key] = val if not hasattr(val, "item") else val.item()
-                except Exception:
-                    continue
-            rows.append(props)
-            geoms.append(geom)
-        if rows:
-            facilities_gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
-
-    # --- Demand (full input demand set, not just assigned) ---
-    out_demand_gdf = None
-    if demand_gdf_src is not None and len(demand_gdf_src) > 0:
-        # Compact attribute set so Shapefile's 10-char column limit isn't painful.
-        keep_cols = [
-            c for c in ("name", "id", "population", "demand", "weight", "default_weight")
-            if c in demand_gdf_src.columns
-        ]
-        out = demand_gdf_src[keep_cols].copy() if keep_cols else demand_gdf_src[[]].copy()
-        out["demand_idx"] = range(len(demand_gdf_src))
-        out["kind"] = "demand"
-        out = out.set_geometry(demand_gdf_src.geometry)
-        out.set_crs("EPSG:4326", inplace=True, allow_override=True)
-        out_demand_gdf = out
-
-    # --- Assignment lines ---
-    assignments_gdf = None
-    if assignments and cand_gdf is not None and demand_gdf_src is not None:
-        rows = []
-        geoms = []
-        for d_idx, f_idx in assignments.items():
-            try:
-                di, fi = int(d_idx), int(f_idx)
-            except Exception:
-                continue
-            if di < 0 or di >= len(demand_gdf_src):
-                continue
-            if fi < 0 or fi >= len(cand_gdf):
-                continue
-            d_pt = demand_gdf_src.geometry.iloc[di]
-            f_pt = cand_gdf.geometry.iloc[fi]
-            if d_pt is None or f_pt is None or d_pt.is_empty or f_pt.is_empty:
-                continue
-            rows.append({"kind": "assignment", "demand_idx": di, "fac_idx": fi})
-            geoms.append(LineString([(d_pt.x, d_pt.y), (f_pt.x, f_pt.y)]))
-        if rows:
-            assignments_gdf = gpd.GeoDataFrame(rows, geometry=geoms, crs="EPSG:4326")
-
-    metadata = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "problem_type": ps.get("problem_type"),
-        "parameters": ps.get("parameters") or {},
-        "objective_value": sol.get("objective_value"),
-        "solver": sol.get("solver"),
-        "status": sol.get("status"),
-        "distance_metric_used": sol.get("distance_metric_used"),
-        "n_selected": len(selected),
-    }
-    return facilities_gdf, out_demand_gdf, assignments_gdf, metadata
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"`(.+?)`", r'<font face="Courier">\1</font>', text)
+    return text
 
 
-# ---------------------------------------------------------------------------
-# GET /api/export/shapefile
-# ---------------------------------------------------------------------------
-
-
-@router.get("/shapefile")
-def export_shapefile(ctx=Depends(resolve_session)) -> Response:
-    _, record = ctx
-    facilities_gdf, demand_gdf, assignments_gdf, metadata = _build_solution_layers(record)
-    if facilities_gdf is None and demand_gdf is None and assignments_gdf is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No exportable features available.",
-        )
-
-    layers = [
-        ("facilities", facilities_gdf),
-        ("demand", demand_gdf),
-        ("assignments", assignments_gdf),
+def _md_table(block, Table, TableStyle, colors, Paragraph, cell_style):
+    """Build a reportlab Table from a block of markdown pipe-table lines."""
+    rows = []
+    for ln in block:
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        # Skip separator rows like |---|:--:|
+        if cells and all(re.fullmatch(r":?-{2,}:?", c or "-") for c in cells):
+            continue
+        rows.append(cells)
+    if not rows:
+        return None
+    width = max(len(r) for r in rows)
+    data = [
+        [Paragraph(_md_inline(c), cell_style) for c in (r + [""] * (width - len(r)))]
+        for r in rows
     ]
-
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        tmp_path = Path(tmp)
-        for name, gdf in layers:
-            if gdf is None or len(gdf) == 0:
-                continue
-            shp_path = tmp_path / f"{name}.shp"
-            try:
-                gdf.to_file(str(shp_path), driver="ESRI Shapefile", encoding="utf-8")
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("shapefile write failed for %s: %s", name, exc)
-
-        # metadata.txt — Shapefile has no metadata-side-channel so drop a sidecar.
-        (tmp_path / "metadata.json").write_text(
-            json.dumps(metadata, indent=2, default=str), encoding="utf-8"
+    t = Table(data, repeatRows=1, hAlign="LEFT")
+    t.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
         )
-
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in sorted(tmp_path.iterdir()):
-                if p.is_file():
-                    zf.write(p, arcname=p.name)
-        body = buf.getvalue()
-
-    fname = f"soca-solution-{_timestamp_slug()}.zip"
-    return Response(
-        content=body,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
+    return t
 
 
-# ---------------------------------------------------------------------------
-# GET /api/export/geopackage
-# ---------------------------------------------------------------------------
+def _render_markdown(md, styles, Table, TableStyle, colors, Paragraph, Spacer, inch):
+    """Convert a markdown string into a list of reportlab flowables.
 
+    Handles headings, bullet / numbered lists, pipe tables, and inline
+    bold/italic/code. Unknown syntax falls back to a plain paragraph.
+    """
+    body = styles["body"]
+    head = styles["head"]
+    bullet = styles["bullet"]
+    cell = styles["cell"]
 
-@router.get("/geopackage")
-def export_geopackage(ctx=Depends(resolve_session)) -> Response:
-    _, record = ctx
-    facilities_gdf, demand_gdf, assignments_gdf, metadata = _build_solution_layers(record)
-    if facilities_gdf is None and demand_gdf is None and assignments_gdf is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No exportable features available.",
-        )
+    flow: List[Any] = []
+    lines = md.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        stripped = lines[i].strip()
+        if not stripped:
+            flow.append(Spacer(1, 0.05 * inch))
+            i += 1
+            continue
 
-    layers = [
-        ("facilities", facilities_gdf),
-        ("demand", demand_gdf),
-        ("assignments", assignments_gdf),
-    ]
+        # Pipe-table block
+        if stripped.startswith("|") and "|" in stripped[1:]:
+            block = []
+            while i < n and lines[i].strip().startswith("|"):
+                block.append(lines[i].strip())
+                i += 1
+            tbl = _md_table(block, Table, TableStyle, colors, Paragraph, cell)
+            if tbl is not None:
+                flow.append(tbl)
+                flow.append(Spacer(1, 0.06 * inch))
+            continue
 
-    # GeoPandas/Fiona/pyogrio cannot write to a BytesIO for GPKG — go via temp file.
-    # ignore_cleanup_errors covers Windows where the GPKG driver may briefly
-    # retain a file handle after to_file() returns.
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
-        gpkg_path = Path(tmp) / "solution.gpkg"
-        wrote_any = False
-        for name, gdf in layers:
-            if gdf is None or len(gdf) == 0:
-                continue
-            try:
-                gdf.to_file(str(gpkg_path), layer=name, driver="GPKG")
-                wrote_any = True
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning("gpkg write failed for layer %s: %s", name, exc)
+        hmatch = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+        if hmatch:
+            flow.append(Paragraph(_md_inline(hmatch.group(2)), head))
+            i += 1
+            continue
 
-        if not wrote_any:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="GeoPackage export failed: no layers written.",
-            )
+        bmatch = re.match(r"^[-*•]\s+(.*)$", stripped)
+        if bmatch:
+            flow.append(Paragraph(_md_inline(bmatch.group(1)), bullet, bulletText="•"))
+            i += 1
+            continue
 
-        # Attach metadata as a non-spatial table using sqlite.
-        try:
-            import sqlite3
-            with sqlite3.connect(str(gpkg_path)) as conn:
-                conn.execute(
-                    "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT)"
+        nmatch = re.match(r"^(\d+)[.)]\s+(.*)$", stripped)
+        if nmatch:
+            flow.append(
+                Paragraph(
+                    _md_inline(nmatch.group(2)), bullet, bulletText=f"{nmatch.group(1)}."
                 )
-                conn.execute("DELETE FROM metadata")
-                for k, v in metadata.items():
-                    conn.execute(
-                        "INSERT INTO metadata(key, value) VALUES (?, ?)",
-                        (str(k), json.dumps(v, default=str)),
-                    )
-                conn.commit()
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning("gpkg metadata write failed: %s", exc)
+            )
+            i += 1
+            continue
 
-        body = gpkg_path.read_bytes()
-
-    fname = f"soca-solution-{_timestamp_slug()}.gpkg"
-    return Response(
-        content=body,
-        media_type="application/geopackage+sqlite3",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
-    )
+        flow.append(Paragraph(_md_inline(stripped), body))
+        i += 1
+    return flow
 
 
 def _kv_table(rows, Table, TableStyle, colors):

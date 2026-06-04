@@ -38,7 +38,7 @@ class Settings:
     # --- LLM ---------------------------------------------------------------
     # Default to the current public ID.  Override via GEMINI_MODEL env var
     # for experimentation (e.g. "gemini-2.0-flash-exp").
-    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-pro-latest")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
     MAX_TOKENS: int = _env_int("GEMINI_MAX_TOKENS", 4096)
     GEMINI_TEMPERATURE: float = _env_float("GEMINI_TEMPERATURE", 0.5)
 

@@ -9,6 +9,7 @@ to reconstruct this from conversation history.
 import logging
 from typing import Optional
 
+import pandas as pd
 from google.adk.tools.tool_context import ToolContext
 
 from .state_bridge import get_data, get_problem_state
@@ -27,6 +28,10 @@ def get_data_status(
     Returns:
         dict with keys:
           datasets (list[dict]): each has name, num_features, geometry_type, source.
+              Datasets with numeric attribute columns also include
+              `numeric_columns` (list of column names) — use this to choose a
+              `demand_weight_column` for uploaded demand data whose weight
+              column has a non-standard name.
               POI datasets additionally include `amenity_subtype_counts`
               (dict of subtype → count, e.g. {"primary_school": 12,
               "school": 30, "preschool": 4}), `amenity_subtype_total`,
@@ -55,6 +60,18 @@ def get_data_status(
             "geometry_type": geom_type,
             "source": gdf.attrs.get("source", "uploaded"),
         }
+        # Expose numeric (non-geometry) column names so the agent can pick a
+        # demand-weight column for uploaded data with a non-standard name
+        # (e.g. "expectedva") instead of silently defaulting weights to 1.0.
+        try:
+            numeric_cols = [
+                str(c) for c in gdf.columns
+                if c != "geometry" and pd.api.types.is_numeric_dtype(gdf[c])
+            ]
+            if numeric_cols:
+                summary["numeric_columns"] = numeric_cols
+        except Exception as exc:
+            logger.warning("numeric column listing failed for %s: %s", name, exc)
         # For POI datasets, expose the exact subtype breakdown so the agent
         # can answer questions like "how many primary_school vs school?"
         # without needing a separate query tool.

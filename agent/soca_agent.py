@@ -22,6 +22,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from google.adk.agents import LlmAgent
+from google.adk.agents.run_config import RunConfig, StreamingMode
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types as genai_types
@@ -99,11 +100,16 @@ class SOCAAgent:
 
             tool_calls: list[str] = []
             text_parts: list[str] = []
+            # When a model turn is streamed as deltas (partial events), ADK
+            # emits a trailing complete event repeating the full text. Track
+            # whether deltas were just streamed so we don't display it twice.
+            streamed_since_complete = False
 
             async for event in runner.run_async(
                 user_id=_USER_ID,
                 session_id=session.id,
                 new_message=message,
+                run_config=RunConfig(streaming_mode=StreamingMode.SSE),
             ):
                 if event.content and event.content.parts:
                     for part in event.content.parts:
@@ -146,18 +152,22 @@ class SOCAAgent:
 
                         text = getattr(part, "text", None)
                         if text:
-                            is_final = True
-                            if hasattr(event, "is_final_response"):
-                                try:
-                                    is_final = bool(event.is_final_response())
-                                except Exception as exc:
-                                    logger.warning(
-                                        "ADK is_final_response check failed: %s", exc
-                                    )
-                                    is_final = True
-                            if is_final:
-                                text_parts.append(text)
+                            is_partial = bool(getattr(event, "partial", False))
+                            if is_partial:
+                                # Live delta — stream it to the client. Don't
+                                # accumulate into text_parts; the trailing
+                                # complete event carries the authoritative text.
+                                streamed_since_complete = True
                                 yield {"type": "token", "text": text}
+                            else:
+                                # Complete text segment (final aggregate of a
+                                # streamed turn, or a one-shot non-streamed turn).
+                                text_parts.append(text)
+                                if not streamed_since_complete:
+                                    # Nothing was streamed for this segment, so
+                                    # the client hasn't seen it yet — emit it.
+                                    yield {"type": "token", "text": text}
+                                streamed_since_complete = False
 
             refreshed = await self._session_service.get_session(
                 app_name=_APP_NAME,

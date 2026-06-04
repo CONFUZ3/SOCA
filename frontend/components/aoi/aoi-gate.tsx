@@ -32,8 +32,8 @@ interface ResolvedAoi {
   source: string;
   area_km2: number;
   geojson: unknown;
-  // "boundary" = polygon upload used directly; "bbox" = box fitted to points/lines.
-  derived?: "boundary" | "bbox";
+  // "boundary" = polygon upload used directly; "hull" = convex hull fitted to points/lines.
+  derived?: "boundary" | "hull";
 }
 
 type Mode = "search" | "draw" | "upload";
@@ -416,7 +416,7 @@ export function AoiGate() {
         instructions:
           derived.derived === "boundary"
             ? "Uploaded polygon · drag vertices to refine, or confirm as-is"
-            : "Bounding box fitted to your data · drag vertices to refine, or confirm as-is",
+            : "Outline fitted to your data · drag vertices to refine, or confirm as-is",
         initialGeojson: derived.geojson as GeoJSON.FeatureCollection,
         pointsGeojson: pointsFc,
         area: drawnAreaKm2 ?? derived.area_km2,

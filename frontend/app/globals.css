@@ -1,4 +1,5 @@
 @import 'maplibre-gl/dist/maplibre-gl.css';
+@import 'katex/dist/katex.min.css';
 
 @tailwind base;
 @tailwind components;
@@ -134,5 +135,87 @@
   /* Subtle button / inline control base — used via the <Button> component */
   .btn-base {
     @apply inline-flex items-center justify-center gap-1.5 rounded text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  /* ---------- Assistant markdown (react-markdown output) ---------- */
+  /* Tailwind preflight strips heading/list styling, so the agent's
+     markdown renders flat without this. Gives sections real hierarchy. */
+  .prose-soca > :first-child {
+    @apply mt-0;
+  }
+  .prose-soca > :last-child {
+    @apply mb-0;
+  }
+  .prose-soca p {
+    @apply my-2 leading-relaxed;
+  }
+  .prose-soca h1,
+  .prose-soca h2,
+  .prose-soca h3,
+  .prose-soca h4 {
+    @apply mt-4 mb-1.5 font-semibold tracking-tight text-text;
+  }
+  .prose-soca h1 {
+    @apply text-md;
+  }
+  .prose-soca h2 {
+    @apply text-md;
+  }
+  /* The agent uses ### for section headers — make these the clear anchor. */
+  .prose-soca h3 {
+    @apply flex items-center gap-2 border-b border-border pb-1 text-sm uppercase tracking-wide text-text-muted;
+  }
+  .prose-soca h4 {
+    @apply text-sm text-text-muted;
+  }
+  .prose-soca strong {
+    @apply font-semibold text-text;
+  }
+  .prose-soca em {
+    @apply italic;
+  }
+  .prose-soca a {
+    @apply text-accent underline underline-offset-2;
+  }
+  .prose-soca ul,
+  .prose-soca ol {
+    @apply my-2 pl-5;
+  }
+  .prose-soca ul {
+    @apply list-disc;
+  }
+  .prose-soca ol {
+    @apply list-decimal;
+  }
+  .prose-soca li {
+    @apply my-0.5 leading-relaxed;
+  }
+  .prose-soca li::marker {
+    @apply text-text-faint;
+  }
+  .prose-soca code {
+    @apply rounded bg-mono-surface px-1 py-0.5 font-mono text-2xs text-text;
+  }
+  .prose-soca pre {
+    @apply my-2 overflow-x-auto rounded bg-mono-surface p-3 text-2xs;
+  }
+  .prose-soca pre code {
+    @apply bg-transparent p-0;
+  }
+  .prose-soca hr {
+    @apply my-3 border-border;
+  }
+  .prose-soca blockquote {
+    @apply my-2 border-l-2 border-border-strong pl-3 text-text-muted;
+  }
+  .prose-soca table {
+    @apply my-2 w-full border-collapse text-2xs;
+  }
+  .prose-soca th,
+  .prose-soca td {
+    @apply border border-border px-2 py-1 text-left;
+  }
+  .prose-soca th {
+    @apply bg-surface-2 font-semibold;
   }
 }

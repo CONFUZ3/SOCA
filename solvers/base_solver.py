@@ -206,6 +206,101 @@ class SpatialOptimizationProblem(ABC):
     # selected facilities are counted toward `n_facilities`. Users who want
     # "locate p *additional* facilities" should set n_facilities = p + k.
 
+    # Tokens used by the substring heuristic in _extract_weights. Kept as a
+    # class attribute so all solvers share one list (divergent per-solver copies
+    # previously caused columns like "expectedva" to be picked up by MCLP but
+    # silently ignored by p-median/p-center/lscp).
+    _DEMAND_WEIGHT_TOKENS = (
+        'population', 'pop', 'weight', 'demand',
+        'expected', 'value', 'score', 'priority',
+    )
+
+    def _extract_weights(
+        self,
+        demand_gdf: gpd.GeoDataFrame,
+        parameters: Dict[str, Any],
+    ) -> np.ndarray:
+        """Extract demand weights from a demand GeoDataFrame.
+
+        Resolution order:
+          1. Explicit ``parameters['demand_weight_column']`` — exact
+             case-insensitive match, then a partial match for truncated names
+             (e.g. an uploaded ``ExpectedVa`` for a requested ``ExpectedValue``).
+          2. Case-insensitive exact match of common names
+             (population / pop / demand / weight).
+          3. Substring heuristic over ``_DEMAND_WEIGHT_TOKENS``.
+          4. Fallback to uniform weights of 1.0.
+
+        Negative values are rejected for an explicitly requested column and skip
+        a column for the heuristic paths.
+        """
+        all_cols = [c for c in demand_gdf.columns if c != 'geometry']
+
+        # 1) Explicit parameter takes precedence.
+        try:
+            explicit_col = parameters.get('demand_weight_column') if parameters else None
+            if explicit_col:
+                explicit_lower = str(explicit_col).lower()
+                for c in demand_gdf.columns:
+                    if c.lower() == explicit_lower:
+                        values = demand_gdf[c].astype(float).to_numpy()
+                        if np.any(values < 0):
+                            raise ValueError(
+                                f"Demand weight column '{c}' contains negative values"
+                            )
+                        logger.info(
+                            "Using explicit weight column '%s' (sum=%.2f)", c, values.sum()
+                        )
+                        return values
+                # Partial match for truncated/renamed column names.
+                for c in demand_gdf.columns:
+                    c_lower = c.lower()
+                    if c_lower.startswith(explicit_lower[:6]) or explicit_lower.startswith(c_lower[:6]):
+                        try:
+                            values = demand_gdf[c].astype(float).to_numpy()
+                            if np.all(values >= 0):
+                                logger.info(
+                                    "Using partial-matched weight column '%s' for "
+                                    "requested '%s' (sum=%.2f)", c, explicit_col, values.sum()
+                                )
+                                return values
+                        except Exception:
+                            continue
+                logger.warning(
+                    "Explicit demand_weight_column '%s' not found in columns: %s",
+                    explicit_col, all_cols,
+                )
+        except Exception as e:
+            logger.warning("Failed to use explicit demand_weight_column: %s", e)
+
+        # 2) Case-insensitive exact matches of common names.
+        common_exact = ['population', 'pop', 'demand', 'weight']
+        lower_cols = {c.lower(): c for c in demand_gdf.columns}
+        for key in common_exact:
+            if key in lower_cols:
+                c = lower_cols[key]
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    pass
+
+        # 3) Substring heuristic.
+        for c in demand_gdf.columns:
+            lc = c.lower()
+            if any(k in lc for k in self._DEMAND_WEIGHT_TOKENS):
+                try:
+                    values = demand_gdf[c].astype(float).to_numpy()
+                    if np.all(values >= 0):
+                        return values
+                except Exception:
+                    continue
+
+        # 4) Fallback to uniform weights.
+        logger.info("No suitable demand weight column found; using uniform weights of 1.0")
+        return np.ones(len(demand_gdf))
+
     def _validate_facility_sets(
         self,
         params: Dict[str, Any],

@@ -95,7 +95,7 @@ def _geojson_to_geom(feature: dict):
     return shape(feature)
 
 
-def _validate(geom) -> tuple[bool, Optional[str], float]:
+def _validate(geom, check_min_area: bool = True) -> tuple[bool, Optional[str], float]:
     """Check polygon validity and area bounds. Returns (ok, err_msg, area_km2)."""
     if geom is None or geom.is_empty:
         return False, "No polygon drawn.", 0.0
@@ -110,7 +110,7 @@ def _validate(geom) -> tuple[bool, Optional[str], float]:
             return False, "Polygon is self-intersecting or invalid.", 0.0
 
     area = _area_km2(geom)
-    if area < MIN_AOI_KM2:
+    if check_min_area and area < MIN_AOI_KM2:
         return False, f"AOI too small ({area:.3f} km²). Minimum is {MIN_AOI_KM2} km².", area
     if area > MAX_AOI_KM2:
         return False, f"AOI too large ({area:,.0f} km²). Maximum is {MAX_AOI_KM2:,.0f} km².", area

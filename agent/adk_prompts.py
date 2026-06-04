@@ -297,19 +297,41 @@ from it; do not just echo the `solution_summary` template. Treat
 - `equity` — `gini_coefficient`, `mean_distance_km`, `bottom_decile_avg_distance_km`, `bottom_decile_vs_mean_ratio`, `pct_demand_within_threshold`, `worst_case_distance_km`.
 - `solver` — `solver`, `mip_gap`, `solve_time_seconds`, `timed_out`, `formulation`, `status`.
 
-Write a structured analysis with these parts:
-1. **Headline** — the objective value with its unit and what it means in one sentence.
-2. **Access summary** — typical vs. tail travel: cite mean and p90/max in km. For coverage models, lead with `pct_demand_covered`.
-3. **Where the facilities are** — name each facility by its `place` field when present (fall back to its latitude/longitude), with how much demand it serves. Never present bare facility indices to the user.
-4. **Equity (plain language)** — translate the numbers into a sentence. For example: the worst-served 10% of people travel the `bottom_decile_avg_distance_km` value on average, which is the `bottom_decile_vs_mean_ratio` multiple of the typical distance; and the `gini_coefficient` indicates fairly even, moderately uneven, or highly uneven access. Use Gini below 0.2 as even, 0.2 to 0.4 as moderate, above 0.4 as uneven.
-5. **Coverage gaps** — if any points are uncovered or far, say how many and roughly where (cite a gap point's location). This is the actionable part — be concrete.
-6. **Technical details** — a short closing block: solver, MIP gap (note if the run timed out), solve time, distance metric, problem scope. Surface every entry in `warnings` here verbatim.
+Cover the following, in this order. These are the topics to address — NOT
+literal labels. Write a short, descriptive markdown heading of your own for
+each section (e.g. `### Coverage & access`, `### Where the facilities are`).
+NEVER output the internal labels, the word "Headline", or numbered prefixes
+like "1." / "2." as section titles.
+
+- Open with one plain sentence stating the objective value with its unit and what it means. No heading needed for this lead sentence.
+- **Access:** typical vs. tail travel — cite mean and p90/max in km. For coverage models, lead with `pct_demand_covered`.
+- **Facility locations:** name each facility by its `place` field when present (fall back to its latitude/longitude), with how much demand it serves. Never present bare facility indices to the user.
+- **Equity:** translate the numbers into plain language. For example: the worst-served 10% of people travel the `bottom_decile_avg_distance_km` value on average, which is the `bottom_decile_vs_mean_ratio` multiple of the typical distance; and the `gini_coefficient` indicates fairly even, moderately uneven, or highly uneven access. Use Gini below 0.2 as even, 0.2 to 0.4 as moderate, above 0.4 as uneven.
+- **Coverage gaps:** if any points are uncovered or far, say how many and roughly where (cite a gap point's location). This is the actionable part — be concrete.
+- **Technical details:** a short closing block — solver, MIP gap (note if the run timed out), solve time, distance metric, problem scope. Surface every entry in `warnings` here verbatim.
+
+Formatting rules: use markdown `###` headings, short paragraphs, and `**bold**`
+for the key metric in each section. Write ordinary numbers, units, and
+percentages as plain text — "2.58 km", "22.6%", never `$2.58$`. LaTeX math
+(via `$...$`) is rendered, so only use it where it genuinely helps (e.g. a
+degree-symbol coordinate); never wrap plain distances or percentages in it.
 
 Always pair efficiency (the objective) with equity — never report one without the other. If `analysis_facts` is null (rare), fall back to `solution_summary`.
 
 ## demand_weight_column
-Only set if the user explicitly names a non-standard column for weights.
-Standard columns (demand, weight, population, pop, default_weight) are auto-detected.
+Standard column names (demand, weight, population, pop) are auto-detected by the
+solver — leave `demand_weight_column` unset for those.
+
+For UPLOADED demand data, the weights often live in a non-standard column
+(e.g. "expectedva", "households", "footfall", "visits") that the solver will NOT
+recognise — it would silently default every weight to 1.0. To prevent this:
+- Call `get_data_status` and read the demand dataset's `numeric_columns`.
+- If exactly one numeric column plausibly represents demand/weight/value, pass it
+  as `demand_weight_column` when you call `stage_optimization`.
+- If several numeric columns could be the weight (genuinely ambiguous), ask the
+  user which one represents demand before staging — list the candidates.
+- If no numeric column looks like a weight, proceed (uniform weights of 1.0 is
+  the intended behaviour) but tell the user weights defaulted to 1.0.
 
 # Agentic Workflow Examples
 

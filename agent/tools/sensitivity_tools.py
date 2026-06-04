@@ -6,8 +6,8 @@ degradation in objective value (sign-correct for minimisation vs.
 maximisation problems) and flags the facility whose removal hurts the
 solution most as ``most_critical``.
 
-Re-uses the cached road-network graph and current data_dict — never
-re-fetches.
+Re-uses the session's cached road-network graph (re-fetching only if the
+LRU cache was evicted) and current data_dict.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def run_sensitivity_analysis(
     """Drop-one re-optimization on the most recent solution.
 
     For each facility selected by the last solve, re-runs the solver with
-    that facility dropped from the candidate pool, and records:
+    that facility dropped from the candidate pool (same p), and records:
       - ``objective_without``: objective value of the new solve
       - ``objective_degradation_pct``: percentage degradation (positive =
         worse). For minimisation problems (P-Median, P-Center, LSCP),
@@ -45,6 +45,14 @@ def run_sensitivity_analysis(
       - ``newly_uncovered_demand_weight``: only meaningful for coverage
         models; weight of demand that the original solution covered but
         the perturbed one does not.
+
+    Design note — p vs p-1: this analysis re-solves with the same p from
+    n-1 candidates, which answers "how replaceable is this facility?" (the
+    solver substitutes the best available alternative). The alternative
+    convention — re-solve with p-1 — answers "what is the absolute value
+    of having this facility?". The replaceability framing is more useful
+    for practitioners deciding which facilities to protect or harden, and
+    avoids conflating facility criticality with the marginal value of p.
 
     Returns:
         ``{"sensitivity": [...], "most_critical_facility_id": int|None,
@@ -103,6 +111,19 @@ def run_sensitivity_analysis(
     if cand_gdf is None or len(cand_gdf) <= 1:
         return {"error": "Candidate set has fewer than 2 sites — cannot drop one."}
 
+    # Re-acquire the road-network graph the baseline used. It lives in the
+    # session NetworkManager's LRU cache (not in problem_state), so we fetch
+    # it via the same helper confirm_optimization uses — a cache hit for the
+    # unchanged AOI. Without this the solvers silently downgrade to geodesic,
+    # inflating absolute coverage/objective relative to the network baseline.
+    network_graph = None
+    network_warnings: list = []
+    if distance_metric == "network":
+        from agent.tools.optimize_tools import _fetch_network_graph
+        network_graph, distance_metric, network_warnings, _ = _fetch_network_graph(
+            distance_metric, False, data_dict, boundary_keys, data_store,
+        )
+
     is_max = problem_type in _MAXIMISATION_TYPES
 
     results = []
@@ -117,6 +138,11 @@ def run_sensitivity_analysis(
             reduced = cand_gdf.drop(cand_gdf.index[i]).reset_index(drop=True)
             sub_data = dict(data_dict)
             sub_data["candidate_sites"] = reduced
+            # Solvers read the road graph from data['_network_graph'] (see
+            # optimize_tools confirm path); inject the re-acquired graph so the
+            # re-solve uses the same network distances as the baseline.
+            if network_graph is not None:
+                sub_data["_network_graph"] = network_graph
             try:
                 sub_solution = problem_solver.solve(
                     data=sub_data,
@@ -174,6 +200,8 @@ def run_sensitivity_analysis(
         "ran_n_reoptimizations": len(sorted_results),
         "problem_type": problem_type,
         "baseline_objective_value": base_obj,
+        "distance_metric_used": distance_metric,
+        "warnings": network_warnings,
         "error": None,
     }
 

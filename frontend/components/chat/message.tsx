@@ -2,6 +2,8 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
 import type { ChatTurn } from "@/lib/store";
 import { cn } from "@/lib/cn";
 import { ToolCallCard } from "./tool-call-card";
@@ -38,7 +40,10 @@ export function Message({ turn }: { turn: ChatTurn }) {
         )}
       >
         {turn.content ? (
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm, remarkMath]}
+            rehypePlugins={[rehypeKatex]}
+          >
             {turn.content}
           </ReactMarkdown>
         ) : turn.pending ? (
