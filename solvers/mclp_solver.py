@@ -60,9 +60,7 @@ Where:
                 "capacitated",
                 "probabilistic",
                 "multi_coverage",
-                "backup",
-                "hierarchical",
-                "dynamic"
+                "backup"
             ]
         }
     
@@ -185,7 +183,11 @@ Where:
             k = params.get("k_coverage", 2 if variant == "backup" else 1)
             if not isinstance(k, int) or k <= 0:
                 return False, "k_coverage must be a positive integer"
-        
+
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         return True, None
     
     def solve(
@@ -193,7 +195,7 @@ Where:
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
         """
         Main solve method that delegates to variant-specific solvers.
@@ -214,6 +216,8 @@ Where:
             
             variant = parameters.get('variant', 'classical')
             logger.info(f"MCLP Solver: Using variant '{variant}' with parameters: {parameters}")
+
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
             
             # Select variant-specific solver
             mip_start = time.time()
@@ -258,11 +262,22 @@ Where:
                             initial_solution=incumbent_mask,
                             time_budget_seconds=ga_time_budget
                         )
-                        logger.info(f"MCLP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                    except Exception as ga_err:
+                        logger.error(
+                            f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}",
+                            exc_info=True,
+                        )
+                    else:
+                        logger.info(
+                            "MCLP: GA fallback succeeded for variant '%s' (status=%s, objective=%s)",
+                            variant,
+                            ga_result.get("status", "unknown"),
+                            ga_result.get("objective_value", "N/A"),
+                        )
                         ga_details = {
                             **ga_result.get("solver_details", {}),
-                            "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
-                            "fallback_reason": "time_limit"
+                            "fallback_from": solution.get("solver_details", {}).get("solver", "mip"),
+                            "fallback_reason": "time_limit",
                         }
                         solution = {
                             "status": ga_result.get("status", "feasible"),
@@ -270,17 +285,20 @@ Where:
                             "selected_facilities": ga_result["selected_facilities"],
                             "assignments": ga_result.get("assignments", {}),
                             "z_values": ga_result.get("z_values"),
-                            "solver_details": ga_details
+                            "solver_details": ga_details,
                         }
-                    except Exception as ga_err:
-                        logger.error(f"MCLP: GA fallback for variant '{variant}' failed: {ga_err}", exc_info=True)
-                    else:
-                        logger.warning(
-                            "GA fallback not available for MCLP variant '%s'; returning MIP result",
-                            variant
-                        )
                 else:
-                    logger.info(f"MCLP: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                    logger.warning(
+                        "MCLP: GA fallback not available for variant '%s'; returning MIP result",
+                        variant,
+                    )
+            else:
+                logger.info(
+                    "MCLP: MIP solver completed within time limit, no fallback needed "
+                    "(status=%s, objective=%s)",
+                    solution.get("status", "unknown"),
+                    solution.get("objective_value", "N/A"),
+                )
             
             # Calculate metrics
             metrics = self._calculate_metrics(
@@ -395,19 +413,21 @@ Where:
         
         # Calculate coverage and distance matrices
         dist_calc = DistanceCalculator()
-        
+
         # Get unit conversion info
         unit_info = dist_calc.get_unit_info(service_radius, service_radius_unit)
-        
+
+        network_graph = data.get('_network_graph')
         coverage_matrix = dist_calc.calculate_coverage_matrix(
-            demand_gdf, candidate_gdf, 
+            demand_gdf, candidate_gdf,
             threshold=service_radius,
             metric=distance_metric,
-            unit=service_radius_unit
+            unit=service_radius_unit,
+            network_graph=network_graph,
         )
-        
+
         distance_matrix = dist_calc.calculate_distance_matrix(
-            demand_gdf, candidate_gdf, metric=distance_metric
+            demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
         )
         
         # Extract optional parameters
@@ -495,75 +515,6 @@ Where:
                 return values
         return None
 
-    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame, parameters: Dict[str, Any]) -> np.ndarray:
-        """
-        Extract demand weights from GeoDataFrame.
-        
-        Returns:
-            Array of demand weights, allowing zero weights for valid use cases.
-        """
-        # DEBUG: Log available columns
-        all_cols = [c for c in demand_gdf.columns if c != 'geometry']
-        logger.info(f"_extract_weights: Available columns in demand data: {all_cols}")
-        
-        # 1) Explicit parameter takes precedence
-        try:
-            explicit_col = parameters.get('demand_weight_column')
-            if explicit_col:
-                logger.info(f"_extract_weights: Looking for explicit column '{explicit_col}'")
-                explicit_lower = str(explicit_col).lower()
-                # Try exact case-insensitive match first
-                for c in demand_gdf.columns:
-                    if c.lower() == explicit_lower:
-                        values = demand_gdf[c].astype(float).to_numpy()
-                        if np.any(values < 0):
-                            raise ValueError(f"Demand weight column '{c}' contains negative values")
-                        logger.info(f"Using explicit weight column '{c}' with sum={values.sum():.2f}")
-                        return values
-                # Try partial match (for truncated column names like 'ExpectedVa' from 'ExpectedValue')
-                for c in demand_gdf.columns:
-                    c_lower = c.lower()
-                    if c_lower.startswith(explicit_lower[:6]) or explicit_lower.startswith(c_lower[:6]):
-                        try:
-                            values = demand_gdf[c].astype(float).to_numpy()
-                            if np.all(values >= 0):
-                                logger.info(f"Using partial-matched weight column '{c}' for requested '{explicit_col}' with sum={values.sum():.2f}")
-                                return values
-                        except Exception:
-                            continue
-                logger.warning(f"Explicit demand_weight_column '{explicit_col}' not found in columns: {all_cols}")
-        except Exception as e:
-            logger.warning(f"Failed to use explicit demand_weight_column: {e}")
-
-        # 2) Case-insensitive exact matches of common names
-        common_exact = ['demand', 'weight', 'population', 'pop']
-        lower_cols = {c.lower(): c for c in demand_gdf.columns}
-        for key in common_exact:
-            if key in lower_cols:
-                c = lower_cols[key]
-                try:
-                    values = demand_gdf[c].astype(float).to_numpy()
-                    if np.all(values >= 0):
-                        return values
-                except Exception:
-                    pass
-
-        # 3) Substring heuristic: pick the first numeric column whose name contains pop/weight/demand/expected/value
-        substr_keys = ['population', 'pop', 'weight', 'demand', 'expected', 'value', 'score', 'priority']
-        for c in demand_gdf.columns:
-            lc = c.lower()
-            if any(k in lc for k in substr_keys):
-                try:
-                    values = demand_gdf[c].astype(float).to_numpy()
-                    if np.all(values >= 0):
-                        return values
-                except Exception:
-                    continue
-
-        # 4) Fallback to ones if nothing found
-        logger.warning("No suitable demand weight column found; defaulting to 1.0 per demand point")
-        return np.ones(len(demand_gdf))
-    
     def _calculate_assignments(
         self,
         selected_facilities: List[int],
@@ -822,37 +773,35 @@ Where:
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = coverage_matrix.shape
-        
+
         model = gp.Model("mclp")
-        model.setParam('OutputFlag', 0)
+        configure_gurobi_model(model, time_limit_seconds)
         if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-            logger.info(f"MCLP Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
-        else:
-            model.setParam('TimeLimit', 300)
-        model.setParam('MIPGap', 0.01)  # 1% optimality gap
-        model.setParam('Presolve', 2)   # Aggressive presolve
-        model.setParam('Cuts', 2)       # Aggressive cut generation
+            logger.info(
+                "MCLP Gurobi: TimeLimit set to %.2f seconds", float(time_limit_seconds)
+            )
         
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")  # facility location
         z_vtype = GRB.CONTINUOUS if variant == "probabilistic" else GRB.BINARY
         z = model.addVars(n_demand, vtype=z_vtype, lb=0.0, ub=1.0, name="z")  # demand covered or fraction covered
         
-        # For capacitated variant, add assignment variables
+        # For capacitated variant, add single-source assignment variables.
+        # Binary y → each demand is served in full by at most one facility (the
+        # canonical capacitated MCLP, Pirkul & Schilling 1991). This mirrors the
+        # PuLP backend so both solvers optimise the same model rather than the
+        # fractional/splittable relaxation used previously.
         if variant == "capacitated":
-            # Fractional assignment variables: fraction of demand i served by facility j (0..1)
-            y = model.addVars(n_demand, n_candidates, vtype=GRB.CONTINUOUS, lb=0.0, ub=1.0, name="y")
-        
-        # Objective: maximize weighted coverage
-        # Capacitated: maximize total served population directly via y
-        if variant == "capacitated":
-            obj = gp.quicksum(float(demand_weights[i]) * y[i, j] for i in range(n_demand) for j in range(n_candidates) if coverage_matrix[i, j] == 1)
-        else:
-            # Non-capacitated and probabilistic variants use z
-            obj = gp.quicksum(float(demand_weights[i]) * z[i] for i in range(n_demand))
+            y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")
+
+        # Objective: maximize weighted coverage (Σ wᵢ zᵢ for every variant). For
+        # capacitated, zᵢ is tied to the assignment vars below (zᵢ ≤ Σⱼ yᵢⱼ), so
+        # this equals the served demand under single-source assignment.
+        obj = gp.quicksum(float(demand_weights[i]) * z[i] for i in range(n_demand))
         model.setObjective(obj, GRB.MAXIMIZE)
         
         # Facility selection constraints
@@ -880,12 +829,13 @@ Where:
                 # Require at least k facilities to claim coverage
                 model.addConstr(gp.quicksum(x[j] for j in covering_facilities) >= int(k_coverage) * z[i], f"kcover_{i}")
             elif variant == "capacitated":
-                # For capacitated variant, coverage indicator z[i] is 1 if any positive fraction served
+                # Coverage indicator z[i] = 1 only if demand i is assigned to a facility
                 model.addConstr(z[i] <= gp.quicksum(y[i, j] for j in covering_facilities), f"cover_{i}")
-                # Assignment constraints: can only serve from open facilities and total fraction ≤ 1
+                # Assignment constraints: can only serve from open facilities and
+                # each demand is assigned to at most one facility (single source)
                 for j in covering_facilities:
                     model.addConstr(y[i, j] <= x[j], f"assign_{i}_{j}")
-                model.addConstr(gp.quicksum(y[i, j] for j in covering_facilities) <= 1.0, f"fraction_sum_{i}")
+                model.addConstr(gp.quicksum(y[i, j] for j in covering_facilities) <= 1, f"assign_sum_{i}")
             else:
                 # classical and budget: binary coverage if any facility covers
                 model.addConstr(z[i] <= gp.quicksum(x[j] for j in covering_facilities), f"cover_{i}")

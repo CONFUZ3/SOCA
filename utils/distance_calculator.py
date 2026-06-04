@@ -6,6 +6,9 @@ from pyproj import Geod
 from typing import Optional, Any, Dict
 import logging
 import hashlib
+import time
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -81,20 +84,25 @@ class DistanceCalculator:
         return False
     
     def _generate_cache_key(
-        self, 
-        origins: gpd.GeoDataFrame, 
-        destinations: gpd.GeoDataFrame, 
-        metric: str
+        self,
+        origins: gpd.GeoDataFrame,
+        destinations: gpd.GeoDataFrame,
+        metric: str,
+        cutoff_m: Optional[float] = None,
     ) -> str:
         """Generate cache key for distance matrix including CRS information."""
         origin_coords = np.array([[geom.x, geom.y] for geom in origins.geometry])
         dest_coords = np.array([[geom.x, geom.y] for geom in destinations.geometry])
-        
+
         # Include CRS in cache key to avoid incorrect cached results
         origin_crs = str(origins.crs) if origins.crs else "None"
         dest_crs = str(destinations.crs) if destinations.crs else "None"
-        
-        key_data = f"{origin_coords.tobytes()}{dest_coords.tobytes()}{metric}{origin_crs}{dest_crs}"
+        cutoff_tag = f"c{float(cutoff_m):.0f}" if cutoff_m else "c0"
+
+        key_data = (
+            f"{origin_coords.tobytes()}{dest_coords.tobytes()}"
+            f"{metric}{origin_crs}{dest_crs}{cutoff_tag}"
+        )
         return hashlib.md5(key_data.encode()).hexdigest()
     
     def _manage_cache(self, key: str, value: np.ndarray):
@@ -215,7 +223,8 @@ class DistanceCalculator:
         origins: gpd.GeoDataFrame,
         destinations: gpd.GeoDataFrame,
         metric: str = "euclidean",
-        network_graph: Optional[Any] = None
+        network_graph: Optional[Any] = None,
+        cutoff_m: Optional[float] = None,
     ) -> np.ndarray:
         """Calculate distance matrix with caching for performance.
         
@@ -238,7 +247,7 @@ class DistanceCalculator:
         - network: Road network distance (not implemented, falls back to euclidean)
         """
         # Check cache first
-        cache_key = self._generate_cache_key(origins, destinations, metric)
+        cache_key = self._generate_cache_key(origins, destinations, metric, cutoff_m)
         if cache_key in self._cache:
             logger.debug("Using cached distance matrix")
             return self._cache[cache_key]
@@ -280,7 +289,9 @@ class DistanceCalculator:
                 else:
                     result = self._euclidean_distance(origins, destinations)
             else:
-                result = self._network_distance(origins, destinations, network_graph)
+                result = self._network_distance(
+                    origins, destinations, network_graph, cutoff_m=cutoff_m
+                )
         else:
             raise ValueError(f"Unknown distance metric: {metric}. Use 'euclidean', 'manhattan', or 'network'")
         
@@ -334,23 +345,123 @@ class DistanceCalculator:
         return self._manhattan_distance(origins, destinations)
     
     def _network_distance(
-        self, 
-        origins: gpd.GeoDataFrame, 
-        destinations: gpd.GeoDataFrame, 
-        network_graph
+        self,
+        origins: gpd.GeoDataFrame,
+        destinations: gpd.GeoDataFrame,
+        network_graph,
+        cutoff_m: Optional[float] = None,
     ) -> np.ndarray:
-        """Network-based distance using OSMnx (placeholder - not implemented)."""
-        try:
-            import osmnx as ox
-            import networkx as nx
-            
-            # Placeholder for future implementation
-            logger.warning("Network distance calculation not fully implemented yet. Using Euclidean as fallback.")
-            return self.euclidean_distance(origins, destinations)
-            
-        except ImportError:
-            logger.error("OSMnx not installed. Install with: pip install osmnx")
-            raise
+        """Road-network shortest-path distances via OSMnx + NetworkX Dijkstra.
+
+        The Dijkstra sweep is wall-clock bounded by
+        ``settings.NETWORK_DIJKSTRA_BUDGET_SECONDS``.  Destinations whose
+        shortest-path could not be computed in time fall back to geodesic
+        distance so the solver still gets a usable (if slightly less accurate)
+        matrix instead of hanging for minutes on a large graph.
+
+        ``network_graph`` must be the ``(G_proj, crs_proj)`` tuple returned
+        by :meth:`utils.network_manager.NetworkManager.get_graph`.  The
+        returned matrix is a float64 array of metres.
+        """
+        import osmnx as ox
+        import networkx as nx
+
+        G_proj, crs_proj = network_graph
+
+        origins_proj = origins.to_crs(crs_proj)
+        destinations_proj = destinations.to_crs(crs_proj)
+
+        origin_xs = [g.x for g in origins_proj.geometry]
+        origin_ys = [g.y for g in origins_proj.geometry]
+        dest_xs = [g.x for g in destinations_proj.geometry]
+        dest_ys = [g.y for g in destinations_proj.geometry]
+
+        origin_nodes = ox.distance.nearest_nodes(G_proj, origin_xs, origin_ys)
+        dest_nodes = ox.distance.nearest_nodes(G_proj, dest_xs, dest_ys)
+
+        n_origins = len(origin_nodes)
+        n_dests = len(dest_nodes)
+        dist_matrix = np.full((n_origins, n_dests), np.inf, dtype=np.float64)
+
+        # Group destination columns by node to run one Dijkstra per unique dest node.
+        unique_dest_nodes = list(dict.fromkeys(dest_nodes))
+        dest_node_to_cols: dict = {}
+        for col_idx, node in enumerate(dest_nodes):
+            dest_node_to_cols.setdefault(node, []).append(col_idx)
+
+        budget = float(getattr(settings, "NETWORK_DIJKSTRA_BUDGET_SECONDS", 60.0))
+        deadline = time.monotonic() + budget if budget > 0 else None
+
+        origin_nodes_arr = np.asarray(origin_nodes)
+        budget_exceeded = False
+        processed = 0
+        total_unique = len(unique_dest_nodes)
+
+        for dest_node in unique_dest_nodes:
+            if deadline is not None and time.monotonic() >= deadline:
+                remaining = total_unique - processed
+                logger.warning(
+                    "NetworkDistance: Dijkstra budget (%.1fs) exceeded after %d/%d "
+                    "destinations; falling back to geodesic for remaining %d.",
+                    budget, processed, total_unique, remaining,
+                )
+                budget_exceeded = True
+                break
+            try:
+                lengths = nx.single_source_dijkstra_path_length(
+                    G_proj, dest_node, cutoff=cutoff_m, weight="length"
+                )
+            except nx.NodeNotFound:
+                processed += 1
+                continue
+            cols = dest_node_to_cols[dest_node]
+            for row_idx, orig_node in enumerate(origin_nodes_arr):
+                if orig_node in lengths:
+                    val = lengths[orig_node]
+                    for col_idx in cols:
+                        dist_matrix[row_idx, col_idx] = val
+            processed += 1
+
+        inf_mask = np.isinf(dist_matrix)
+        if inf_mask.any():
+            n_inf = int(inf_mask.sum())
+            if budget_exceeded:
+                logger.warning(
+                    "NetworkDistance: budget exceeded — %d/%d pairs filled with geodesic fallback.",
+                    n_inf, n_origins * n_dests,
+                )
+            else:
+                logger.info(
+                    "NetworkDistance: %d disconnected pairs replaced with geodesic fallback.",
+                    n_inf,
+                )
+            geodesic = self._geodesic_distance_matrix(origins, destinations)
+            dist_matrix[inf_mask] = geodesic[inf_mask]
+
+            if budget_exceeded:
+                try:
+                    from utils.activity_log import log_event
+
+                    cutoff_note = (
+                        f" (cutoff {cutoff_m:.0f} m)"
+                        if cutoff_m
+                        else ""
+                    )
+                    pct = (n_inf / max(1, n_origins * n_dests)) * 100.0
+                    log_event(
+                        "distance.network",
+                        "fail",
+                        (
+                            f"Dijkstra budget ({budget:.0f}s){cutoff_note} exceeded — "
+                            f"geodesic fallback used for {n_inf:,}/"
+                            f"{n_origins * n_dests:,} pairs ({pct:.1f}%). "
+                            "Consider a smaller AOI or fewer facilities."
+                        ),
+                    )
+                except Exception:
+                    pass
+
+        return dist_matrix
     
     # Keep public alias for backward compatibility
     def network_distance(
@@ -368,7 +479,8 @@ class DistanceCalculator:
         destinations: gpd.GeoDataFrame,
         threshold: float,
         metric: str = "euclidean",
-        unit: Optional[str] = None
+        unit: Optional[str] = None,
+        network_graph: Optional[Any] = None,
     ) -> np.ndarray:
         """Calculate binary coverage matrix.
         
@@ -382,8 +494,9 @@ class DistanceCalculator:
         Returns:
             Binary matrix where 1 indicates destination is within threshold of origin
         """
-        distances = self.calculate_distance_matrix(origins, destinations, metric)
-        
+        distances = self.calculate_distance_matrix(origins, destinations, metric,
+                                                    network_graph=network_graph)
+
         # Convert threshold to meters
         threshold_meters = self._convert_to_meters(threshold, unit)
         

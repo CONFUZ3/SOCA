@@ -2,6 +2,7 @@ from .base_solver import SpatialOptimizationProblem
 from typing import Dict, List, Any, Optional
 import geopandas as gpd
 import numpy as np
+import math
 import time
 import logging
 
@@ -50,12 +51,7 @@ Where:
                 "lscp", "set cover", "minimize facilities", "full coverage",
                 "cover all", "minimum number", "complete coverage"
             ],
-            "variants": [
-                "LSCP with backup coverage",
-                "Conditional set covering",
-                "Maximal covering with optional coverage",
-                "Probabilistic LSCP"
-            ]
+            "variants": ["base", "backup", "conditional", "probabilistic", "partial"]
         }
     
     def get_conversation_prompts(self) -> Dict[str, Any]:
@@ -106,15 +102,72 @@ Where:
         
         if not isinstance(params["service_radius"], (int, float)) or params["service_radius"] <= 0:
             return False, "service_radius must be a positive number"
-        
+
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
+        variant = params.get("variant", "base")
+        allowed = {"base", "backup", "conditional", "probabilistic", "partial"}
+        if variant not in allowed:
+            return False, f"Unknown variant '{variant}'. Allowed: {sorted(allowed)}"
+
+        if variant == "backup":
+            k = params.get("k_coverage", 2)
+            if not isinstance(k, int) or isinstance(k, bool) or k < 1:
+                return False, "k_coverage must be an integer >= 1 for the backup variant"
+
+        if variant == "probabilistic":
+            alpha = params.get("coverage_reliability", 0.95)
+            if not isinstance(alpha, (int, float)) or not (0.0 < alpha < 1.0):
+                return False, "coverage_reliability must satisfy 0 < alpha < 1 for the probabilistic variant"
+
+        if variant == "partial":
+            fraction = params.get("coverage_fraction", 0.95)
+            if not isinstance(fraction, (int, float)) or not (0.0 < fraction <= 1.0):
+                return False, "coverage_fraction must satisfy 0 < f <= 1 for the partial variant"
+
+        if variant == "conditional":
+            existing = params.get("existing_facilities")
+            if not existing:
+                return False, "existing_facilities must be a non-empty list for the conditional variant"
+
         return True, None
-    
+
+    def _normalize_reliability(self, reliability: Optional[Any], n_candidates: int) -> np.ndarray:
+        """Return a length-n reliability array in [0,1].
+
+        Accepts None, scalar, list, or numpy array. If None, returns ones.
+        If scalar provided, broadcasts to length n. If array-like provided,
+        validates length and value range.
+        """
+        if reliability is None:
+            return np.ones(n_candidates, dtype=float)
+        # Convert to numpy array if not already
+        if np.isscalar(reliability):
+            val = float(reliability)
+            if not (0.0 <= val <= 1.0):
+                raise ValueError("facility_reliability scalar must be between 0 and 1")
+            return np.full(n_candidates, val, dtype=float)
+        arr = np.asarray(reliability, dtype=float)
+        if arr.ndim == 0:
+            # 0-d array: treat as scalar
+            val = float(arr)
+            if not (0.0 <= val <= 1.0):
+                raise ValueError("facility_reliability scalar must be between 0 and 1")
+            return np.full(n_candidates, val, dtype=float)
+        if arr.shape[0] != n_candidates:
+            raise ValueError("Length of facility_reliability must match number of candidate sites")
+        if np.any((arr < 0.0) | (arr > 1.0)):
+            raise ValueError("facility_reliability values must be between 0 and 1")
+        return arr
+
     def solve(
         self,
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
         start_time = time.time()
         
@@ -130,38 +183,71 @@ Where:
             service_radius = parameters['service_radius']
             # Get explicit unit from parameters (default to 'm' if not specified)
             service_radius_unit = parameters.get('service_radius_unit', 'm')
+
+            variant = parameters.get('variant', 'base')
             
             # Calculate coverage matrix
             dist_calc = DistanceCalculator()
-            
+
             # Get unit conversion info
             unit_info = dist_calc.get_unit_info(service_radius, service_radius_unit)
-            
+
+            network_graph = data.get('_network_graph')
             coverage_matrix = dist_calc.calculate_coverage_matrix(
                 demand_gdf, candidate_gdf,
                 threshold=service_radius,
                 metric=distance_metric,
-                unit=service_radius_unit
+                unit=service_radius_unit,
+                network_graph=network_graph,
             )
-            
+
             distance_matrix = dist_calc.calculate_distance_matrix(
-                demand_gdf, candidate_gdf, metric=distance_metric
+                demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
             )
             
+            n_candidates = coverage_matrix.shape[1]
+
+            # Variant-specific extras
+            k = int(parameters.get('k_coverage', 2))
+            weights = self._extract_weights(demand_gdf, parameters)
+            reliability = self._normalize_reliability(parameters.get('facility_reliability'), n_candidates)
+            alpha = float(parameters.get('coverage_reliability', 0.95))
+            fraction = float(parameters.get('coverage_fraction', 0.95))
+            existing = sorted(set(int(v) for v in (parameters.get('existing_facilities') or [])))
+
             # Check feasibility
+            # For 'backup', a demand is uncoverable if fewer than k candidates cover it.
+            # For 'partial', uncoverable demand is allowed (those demands simply stay uncovered).
             uncoverable = []
             for i in range(len(demand_gdf)):
-                if not np.any(coverage_matrix[i, :]):
-                    uncoverable.append(i)
-            
-            if uncoverable:
+                if variant == "backup":
+                    if int(coverage_matrix[i, :].sum()) < k:
+                        uncoverable.append(i)
+                else:
+                    if not np.any(coverage_matrix[i, :]):
+                        uncoverable.append(i)
+
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
+
+            if uncoverable and variant != "partial":
+                if variant == "backup":
+                    error_msg = (
+                        f"Infeasible: {len(uncoverable)} demand points cannot be covered by at least "
+                        f"k={k} facilities within service radius {service_radius}. Consider increasing the "
+                        f"service radius, lowering k_coverage, or adding more candidate sites."
+                    )
+                else:
+                    error_msg = (
+                        f"Infeasible: {len(uncoverable)} demand points cannot be covered with service radius "
+                        f"{service_radius}. Consider increasing the service radius or adding more candidate sites."
+                    )
                 return {
                     "status": "infeasible",
-                    "error": f"Infeasible: {len(uncoverable)} demand points cannot be covered with service radius {service_radius}. Consider increasing the service radius or adding more candidate sites.",
+                    "error": error_msg,
                     "uncoverable_points": uncoverable,
                     "solution_time": time.time() - start_time
                 }
-            
+
             fallback_time_limit = float(parameters.get('fallback_time_limit_seconds', 60.0))
             ga_time_budget = float(parameters.get('ga_time_budget_seconds', 60.0))
             logger.info(f"LSCP: Fallback time limit set to {fallback_time_limit:.2f} seconds, GA time budget: {ga_time_budget:.2f} seconds")
@@ -170,49 +256,78 @@ Where:
             solution = self._solve_mip(
                 coverage_matrix,
                 constraints,
-                time_limit_seconds=fallback_time_limit
+                time_limit_seconds=fallback_time_limit,
+                variant=variant,
+                k=k,
+                weights=weights,
+                reliability=reliability,
+                alpha=alpha,
+                fraction=fraction,
+                existing=existing
             )
             mip_elapsed = time.time() - mip_start
-            
+
             timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
             ga_needed = timed_out_flag or (
                 fallback_time_limit > 0 and mip_elapsed >= max(0.1, 0.95 * fallback_time_limit)
             )
             logger.info(f"LSCP timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
             if ga_needed:
-                logger.info("LSCP: Falling back to Genetic Algorithm")
-                logger.info(f"LSCP: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
-                incumbent_mask = None
-                if solution.get('selected_facilities'):
-                    incumbent_mask = np.zeros(coverage_matrix.shape[1], dtype=np.int8)
-                    for idx in solution['selected_facilities']:
-                        if 0 <= idx < coverage_matrix.shape[1]:
-                            incumbent_mask[idx] = 1
                 ga_cfg = GAConfig(time_limit_seconds=ga_time_budget)
-                logger.info(f"LSCP: Starting GA with time budget: {ga_time_budget:.2f} seconds")
                 ga_solver = LSCPGeneticSolver(ga_cfg)
-                ga_result = ga_solver.solve(
-                    coverage_matrix=coverage_matrix,
-                    distance_matrix=distance_matrix,
-                    time_budget_seconds=ga_time_budget,
-                    initial_solution=incumbent_mask
-                )
-                logger.info(f"LSCP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
-                ga_details = {
-                    **ga_result.get("solver_details", {}),
-                    "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
-                    "fallback_reason": "time_limit"
-                }
-                solution = {
-                    "status": ga_result.get("status", "feasible"),
-                    "objective_value": len(ga_result["selected_facilities"]),
-                    "selected_facilities": ga_result["selected_facilities"],
-                    "assignments": ga_result["assignments"],
-                    "solver_details": ga_details
-                }
+                if ga_solver.supports_variant(variant):
+                    logger.info("LSCP: Falling back to Genetic Algorithm")
+                    logger.info(f"LSCP: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
+                    incumbent_mask = None
+                    if solution.get('selected_facilities'):
+                        incumbent_mask = np.zeros(coverage_matrix.shape[1], dtype=np.int8)
+                        for idx in solution['selected_facilities']:
+                            if 0 <= idx < coverage_matrix.shape[1]:
+                                incumbent_mask[idx] = 1
+                    logger.info(f"LSCP: Starting GA with time budget: {ga_time_budget:.2f} seconds")
+                    ga_result = ga_solver.solve(
+                        coverage_matrix=coverage_matrix,
+                        distance_matrix=distance_matrix,
+                        time_budget_seconds=ga_time_budget,
+                        initial_solution=incumbent_mask,
+                        variant=variant,
+                        k_coverage=k,
+                        demand_weights=weights,
+                        reliability=reliability,
+                        coverage_reliability=alpha,
+                        coverage_fraction=fraction,
+                        existing=existing,
+                    )
+                    logger.info(f"LSCP: GA completed with status: {ga_result.get('status', 'unknown')}, objective: {ga_result.get('objective_value', 'N/A')}")
+                    ga_details = {
+                        **ga_result.get("solver_details", {}),
+                        "fallback_from": solution.get('solver_details', {}).get('solver', 'mip'),
+                        "fallback_reason": "time_limit"
+                    }
+                    ga_warnings = list(solution.get('warnings', []))
+                    if ga_result.get("status") == "approximate":
+                        ga_warnings.append(
+                            f"GA fallback returned an approximate solution that may marginally "
+                            f"violate the '{variant}' constraint."
+                        )
+                    solution = {
+                        "status": ga_result.get("status", "feasible"),
+                        "objective_value": len(ga_result["selected_facilities"]),
+                        "selected_facilities": ga_result["selected_facilities"],
+                        "assignments": ga_result["assignments"],
+                        "solver_details": ga_details,
+                        "warnings": ga_warnings,
+                    }
+                else:
+                    logger.info(f"LSCP: GA fallback not available for variant '{variant}'; keeping MIP incumbent")
+                    if timed_out_flag:
+                        solution.setdefault('warnings', []).append(
+                            f"MIP time limit reached for the '{variant}' LSCP variant; returning best incumbent "
+                            f"(no GA fallback for this variant)."
+                        )
             else:
                 logger.info(f"LSCP: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
-            
+
             # Calculate metrics
             metrics = self._calculate_metrics(
                 coverage_matrix, distance_matrix,
@@ -231,6 +346,8 @@ Where:
                 "metrics": metrics,
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
+                "variant_used": variant,
+                "warnings": solution.get('warnings', []),
                 "service_radius_unit": service_radius_unit,  # Pass unit for visualization
                 "academic_metadata": {
                     "algorithm_used": "Mixed Integer Programming (Set Cover)",
@@ -256,81 +373,164 @@ Where:
         self,
         coverage_matrix: np.ndarray,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "base",
+        k: int = 2,
+        weights: Optional[np.ndarray] = None,
+        reliability: Optional[np.ndarray] = None,
+        alpha: float = 0.95,
+        fraction: float = 0.95,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         try:
             import gurobipy as gp
             from gurobipy import GRB
-            return self._solve_gurobi(coverage_matrix, constraints, time_limit_seconds)
+            return self._solve_gurobi(
+                coverage_matrix, constraints, time_limit_seconds,
+                variant=variant, k=k, weights=weights, reliability=reliability,
+                alpha=alpha, fraction=fraction, existing=existing
+            )
         except ImportError:
-            return self._solve_pulp(coverage_matrix, constraints, time_limit_seconds)
+            return self._solve_pulp(
+                coverage_matrix, constraints, time_limit_seconds,
+                variant=variant, k=k, weights=weights, reliability=reliability,
+                alpha=alpha, fraction=fraction, existing=existing
+            )
     
     def _solve_gurobi(
         self,
         coverage_matrix: np.ndarray,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "base",
+        k: int = 2,
+        weights: Optional[np.ndarray] = None,
+        reliability: Optional[np.ndarray] = None,
+        alpha: float = 0.95,
+        fraction: float = 0.95,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = coverage_matrix.shape
-        
+        existing_set = set(existing or [])
+
         model = gp.Model("lscp")
-        model.setParam('OutputFlag', 0)
-        if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-        else:
-            model.setParam('TimeLimit', 300)
-        
+        configure_gurobi_model(model, time_limit_seconds)
+
         # Decision variables
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")
-        
-        # Objective: minimize number of facilities
-        model.setObjective(gp.quicksum(x[j] for j in range(n_candidates)), GRB.MINIMIZE)
-        
-        # Constraint: each demand must be covered by at least one facility
+
+        # Objective
+        if variant == "conditional":
+            # Minimize ADDITIONAL facilities (pre-existing ones are forced open)
+            model.setObjective(
+                gp.quicksum(x[j] for j in range(n_candidates) if j not in existing_set),
+                GRB.MINIMIZE
+            )
+        else:
+            # Minimize total number of facilities
+            model.setObjective(gp.quicksum(x[j] for j in range(n_candidates)), GRB.MINIMIZE)
+
+        # Coverage indicator variables for the partial variant
+        z = None
+        if variant == "partial":
+            z = model.addVars(n_demand, vtype=GRB.BINARY, name="z")
+
+        # Coverage constraints
         for i in range(n_demand):
             covering_facilities = [j for j in range(n_candidates) if coverage_matrix[i, j] == 1]
-            if covering_facilities:
+            if variant == "backup":
+                # Each demand must be covered by at least k facilities
                 model.addConstr(
-                    gp.quicksum(x[j] for j in covering_facilities) >= 1,
+                    gp.quicksum(x[j] for j in covering_facilities) >= k,
                     f"cover_{i}"
                 )
+            elif variant == "probabilistic":
+                # Reliability-based redundancy: sum of -ln(1-p_j) over covering facilities >= -ln(1-alpha)
+                coeffs = {
+                    j: -math.log(1.0 - min(float(reliability[j]), 1.0 - 1e-9))
+                    for j in covering_facilities
+                }
+                if covering_facilities:
+                    model.addConstr(
+                        gp.quicksum(coeffs[j] * x[j] for j in covering_facilities) >= -math.log(1.0 - alpha),
+                        f"cover_{i}"
+                    )
+                else:
+                    # This should have been caught in feasibility check
+                    raise ValueError(f"Demand point {i} cannot be covered")
+            elif variant == "partial":
+                # z[i] can only be 1 if at least one covering facility is selected
+                if covering_facilities:
+                    model.addConstr(
+                        z[i] <= gp.quicksum(x[j] for j in covering_facilities),
+                        f"cover_{i}"
+                    )
+                else:
+                    model.addConstr(z[i] == 0, f"cover_{i}")
             else:
-                # This should have been caught in feasibility check
-                raise ValueError(f"Demand point {i} cannot be covered")
-        
+                # base / conditional: each demand covered by at least one facility
+                if covering_facilities:
+                    model.addConstr(
+                        gp.quicksum(x[j] for j in covering_facilities) >= 1,
+                        f"cover_{i}"
+                    )
+                else:
+                    # This should have been caught in feasibility check
+                    raise ValueError(f"Demand point {i} cannot be covered")
+
+        # Conditional variant: force pre-existing facilities open
+        if variant == "conditional":
+            for j in existing_set:
+                if 0 <= j < n_candidates:
+                    model.addConstr(x[j] == 1)
+
+        # Partial variant: cover at least a fraction of total weighted demand
+        if variant == "partial":
+            w = weights if weights is not None else np.ones(n_demand)
+            total_weight = float(np.sum(w))
+            model.addConstr(
+                gp.quicksum(float(w[i]) * z[i] for i in range(n_demand)) >= fraction * total_weight,
+                "partial_coverage"
+            )
+
         # Custom constraints
         must_include = constraints.get('must_include', [])
         for j in must_include:
             if 0 <= j < n_candidates:
                 model.addConstr(x[j] == 1)
-        
+
         must_exclude = constraints.get('must_exclude', [])
         for j in must_exclude:
             if 0 <= j < n_candidates:
                 model.addConstr(x[j] == 0)
-        
+
         # Maximum budget constraint (if provided)
         max_facilities = constraints.get('max_facilities')
         if max_facilities:
             model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) <= max_facilities)
-        
+
         model.optimize()
-        
+
         timed_out = (model.status == GRB.TIME_LIMIT)
         if model.status in (GRB.OPTIMAL, GRB.SUBOPTIMAL, GRB.TIME_LIMIT):
             selected = [j for j in range(n_candidates) if x[j].X > 0.5]
-            
+
             # Determine assignments
             assignments = {}
             for i in range(n_demand):
+                if variant == "partial" and z[i].X <= 0.5:
+                    # Demand intentionally left uncovered under the partial variant
+                    continue
                 # Assign to nearest selected facility that covers this demand
                 covering_selected = [j for j in selected if coverage_matrix[i, j] == 1]
                 if covering_selected:
                     assignments[i] = covering_selected[0]  # Just pick first one
-            
+
             return {
                 'status': 'optimal' if model.status == GRB.OPTIMAL else 'feasible',
                 'objective_value': len(selected),
@@ -339,7 +539,7 @@ Where:
                 'solver_details': {
                     'solver': 'gurobi',
                     'gap': model.MIPGap,
-                    'formulation': 'LSCP Set Cover MIP',
+                    'formulation': f'LSCP Set Cover MIP ({variant})',
                     'timed_out': bool(timed_out)
                 }
             }
@@ -355,54 +555,103 @@ Where:
         self,
         coverage_matrix: np.ndarray,
         constraints: Dict[str, Any],
-        time_limit_seconds: Optional[float] = None
+        time_limit_seconds: Optional[float] = None,
+        variant: str = "base",
+        k: int = 2,
+        weights: Optional[np.ndarray] = None,
+        reliability: Optional[np.ndarray] = None,
+        alpha: float = 0.95,
+        fraction: float = 0.95,
+        existing: Optional[List[int]] = None
     ) -> Dict[str, Any]:
         import pulp
-        
+
         n_demand, n_candidates = coverage_matrix.shape
-        
+        existing_set = set(existing or [])
+
         prob = pulp.LpProblem("lscp", pulp.LpMinimize)
-        
+
         x = pulp.LpVariable.dicts("x", range(n_candidates), cat='Binary')
-        
+
+        # Coverage indicator variables for the partial variant
+        z = None
+        if variant == "partial":
+            z = pulp.LpVariable.dicts("z", range(n_demand), cat='Binary')
+
         # Objective
-        prob += pulp.lpSum([x[j] for j in range(n_candidates)])
-        
-        # Constraints
+        if variant == "conditional":
+            # Minimize ADDITIONAL facilities (pre-existing ones are forced open)
+            prob += pulp.lpSum([x[j] for j in range(n_candidates) if j not in existing_set])
+        else:
+            prob += pulp.lpSum([x[j] for j in range(n_candidates)])
+
+        # Coverage constraints
         for i in range(n_demand):
             covering_facilities = [j for j in range(n_candidates) if coverage_matrix[i, j] == 1]
-            if covering_facilities:
-                prob += pulp.lpSum([x[j] for j in covering_facilities]) >= 1
+            if variant == "backup":
+                prob += pulp.lpSum([x[j] for j in covering_facilities]) >= k
+            elif variant == "probabilistic":
+                if covering_facilities:
+                    coeffs = {
+                        j: -math.log(1.0 - min(float(reliability[j]), 1.0 - 1e-9))
+                        for j in covering_facilities
+                    }
+                    prob += pulp.lpSum([coeffs[j] * x[j] for j in covering_facilities]) >= -math.log(1.0 - alpha)
+                else:
+                    raise ValueError(f"Demand point {i} cannot be covered")
+            elif variant == "partial":
+                if covering_facilities:
+                    prob += z[i] <= pulp.lpSum([x[j] for j in covering_facilities])
+                else:
+                    prob += z[i] == 0
             else:
-                raise ValueError(f"Demand point {i} cannot be covered")
-        
+                if covering_facilities:
+                    prob += pulp.lpSum([x[j] for j in covering_facilities]) >= 1
+                else:
+                    raise ValueError(f"Demand point {i} cannot be covered")
+
+        # Conditional variant: force pre-existing facilities open
+        if variant == "conditional":
+            for j in existing_set:
+                if 0 <= j < n_candidates:
+                    prob += x[j] == 1
+
+        # Partial variant: cover at least a fraction of total weighted demand
+        if variant == "partial":
+            w = weights if weights is not None else np.ones(n_demand)
+            total_weight = float(np.sum(w))
+            prob += pulp.lpSum([float(w[i]) * z[i] for i in range(n_demand)]) >= fraction * total_weight
+
         must_include = constraints.get('must_include', [])
         for j in must_include:
             if 0 <= j < n_candidates:
                 prob += x[j] == 1
-        
+
         must_exclude = constraints.get('must_exclude', [])
         for j in must_exclude:
             if 0 <= j < n_candidates:
                 prob += x[j] == 0
-        
+
         max_facilities = constraints.get('max_facilities')
         if max_facilities:
             prob += pulp.lpSum([x[j] for j in range(n_candidates)]) <= max_facilities
-        
+
         solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=float(time_limit_seconds) if time_limit_seconds is not None else None)
         prob.solve(solver)
         timed_out = bool(time_limit_seconds is not None and prob.status not in (pulp.LpStatusOptimal, pulp.LpStatusInfeasible))
-        
+
         if prob.status == pulp.LpStatusOptimal:
             selected = [j for j in range(n_candidates) if pulp.value(x[j]) > 0.5]
-            
+
             assignments = {}
             for i in range(n_demand):
+                if variant == "partial" and (pulp.value(z[i]) or 0) <= 0.5:
+                    # Demand intentionally left uncovered under the partial variant
+                    continue
                 covering_selected = [j for j in selected if coverage_matrix[i, j] == 1]
                 if covering_selected:
                     assignments[i] = covering_selected[0]
-            
+
             return {
                 'status': 'optimal',
                 'objective_value': len(selected),
@@ -410,7 +659,7 @@ Where:
                 'assignments': assignments,
                 'solver_details': {
                     'solver': 'pulp',
-                    'formulation': 'LSCP Set Cover MIP',
+                    'formulation': f'LSCP Set Cover MIP ({variant})',
                     'timed_out': timed_out
                 }
             }

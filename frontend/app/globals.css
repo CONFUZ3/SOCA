@@ -1,0 +1,221 @@
+@import 'maplibre-gl/dist/maplibre-gl.css';
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---------- Design tokens ---------- */
+/* Warm, paper-hued neutrals. Not slate, not zinc, not AI-default grey.  */
+@layer base {
+  :root {
+    --bg: 251 250 247;            /* #fbfaf7 paper */
+    --surface: 255 255 255;
+    --surface-2: 245 243 238;     /* nested surface, inputs */
+    --border: 230 226 218;        /* hairline */
+    --border-strong: 201 195 182;
+    --text: 26 25 23;             /* not #000 */
+    --text-muted: 107 103 96;
+    --text-faint: 155 150 141;
+    --accent: 181 72 46;          /* brick */
+    --accent-soft: 243 230 224;
+    --ok: 58 122 75;
+    --warn: 166 106 27;
+    --err: 163 52 31;
+    --mono-surface: 241 238 231;
+  }
+
+  /* Keep the warm cast in dark mode; invert lightness, not hue. */
+  .dark {
+    --bg: 22 21 19;
+    --surface: 27 26 23;
+    --surface-2: 33 31 28;
+    --border: 56 53 47;
+    --border-strong: 82 77 69;
+    --text: 232 228 220;
+    --text-muted: 165 159 148;
+    --text-faint: 122 117 107;
+    --accent: 215 112 82;
+    --accent-soft: 55 36 29;
+    --ok: 99 176 119;
+    --warn: 204 152 71;
+    --err: 211 98 75;
+    --mono-surface: 38 36 32;
+  }
+
+  html,
+  body {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg text-text font-sans antialiased;
+    font-feature-settings: "cv11", "ss01", "tnum", "calt";
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Slim, engineering-feel scrollbars */
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background: rgb(var(--border) / 1);
+    border: 2px solid rgb(var(--bg) / 1);
+    border-radius: 8px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: rgb(var(--border-strong) / 1);
+  }
+
+  :focus-visible {
+    outline: 2px solid rgb(var(--accent) / 1);
+    outline-offset: 2px;
+    border-radius: 3px;
+  }
+
+  :focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* Selection */
+  ::selection {
+    background: rgb(var(--accent) / 0.18);
+    color: rgb(var(--text) / 1);
+  }
+
+  /* Disable animations for motion-sensitive users. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .hairline-b {
+    @apply border-b border-border;
+  }
+  .hairline-t {
+    @apply border-t border-border;
+  }
+  .hairline-r {
+    @apply border-r border-border;
+  }
+  .hairline-l {
+    @apply border-l border-border;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-sm border border-border bg-surface px-1.5 py-0.5 text-2xs font-medium text-text-muted;
+  }
+
+  .mono {
+    @apply font-mono tabular-nums;
+  }
+
+  /* The two heading sizes used across the UI. No more. */
+  .heading-panel {
+    @apply text-xl font-semibold tracking-tight text-text;
+  }
+  .heading-section {
+    @apply text-md font-semibold tracking-tight text-text;
+  }
+
+  /* Subtle button / inline control base — used via the <Button> component */
+  .btn-base {
+    @apply inline-flex items-center justify-center gap-1.5 rounded text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50;
+  }
+
+  /* ---------- Assistant markdown (react-markdown output) ---------- */
+  /* Tailwind preflight strips heading/list styling, so the agent's
+     markdown renders flat without this. Gives sections real hierarchy. */
+  .prose-soca > :first-child {
+    @apply mt-0;
+  }
+  .prose-soca > :last-child {
+    @apply mb-0;
+  }
+  .prose-soca p {
+    @apply my-2 leading-relaxed;
+  }
+  .prose-soca h1,
+  .prose-soca h2,
+  .prose-soca h3,
+  .prose-soca h4 {
+    @apply mt-4 mb-1.5 font-semibold tracking-tight text-text;
+  }
+  .prose-soca h1 {
+    @apply text-md;
+  }
+  .prose-soca h2 {
+    @apply text-md;
+  }
+  /* The agent uses ### for section headers — make these the clear anchor. */
+  .prose-soca h3 {
+    @apply flex items-center gap-2 border-b border-border pb-1 text-sm uppercase tracking-wide text-text-muted;
+  }
+  .prose-soca h4 {
+    @apply text-sm text-text-muted;
+  }
+  .prose-soca strong {
+    @apply font-semibold text-text;
+  }
+  .prose-soca em {
+    @apply italic;
+  }
+  .prose-soca a {
+    @apply text-accent underline underline-offset-2;
+  }
+  .prose-soca ul,
+  .prose-soca ol {
+    @apply my-2 pl-5;
+  }
+  .prose-soca ul {
+    @apply list-disc;
+  }
+  .prose-soca ol {
+    @apply list-decimal;
+  }
+  .prose-soca li {
+    @apply my-0.5 leading-relaxed;
+  }
+  .prose-soca li::marker {
+    @apply text-text-faint;
+  }
+  .prose-soca code {
+    @apply rounded bg-mono-surface px-1 py-0.5 font-mono text-2xs text-text;
+  }
+  .prose-soca pre {
+    @apply my-2 overflow-x-auto rounded bg-mono-surface p-3 text-2xs;
+  }
+  .prose-soca pre code {
+    @apply bg-transparent p-0;
+  }
+  .prose-soca hr {
+    @apply my-3 border-border;
+  }
+  .prose-soca blockquote {
+    @apply my-2 border-l-2 border-border-strong pl-3 text-text-muted;
+  }
+  .prose-soca table {
+    @apply my-2 w-full border-collapse text-2xs;
+  }
+  .prose-soca th,
+  .prose-soca td {
+    @apply border border-border px-2 py-1 text-left;
+  }
+  .prose-soca th {
+    @apply bg-surface-2 font-semibold;
+  }
+}

@@ -6,30 +6,37 @@ import pydeck as pdk
 import geopandas as gpd
 from pathlib import Path
 import os
+import re
 import logging
+import sys
 import time
-import inspect
 import hashlib
 import json
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler('spopt_app.log')
-    ]
-)
+# Set up logging — force UTF-8 so activity-log glyphs (✓ … • ✗) don't crash
+# the Windows cp1252 console. errors="replace" is a belt-and-braces fallback.
+try:
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+_log_fmt = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_stream_handler = logging.StreamHandler(stream=sys.stderr)
+_stream_handler.setFormatter(_log_fmt)
+_file_handler = logging.FileHandler('spopt_app.log', encoding='utf-8')
+_file_handler.setFormatter(_log_fmt)
+
+logging.basicConfig(level=logging.INFO, handlers=[_stream_handler, _file_handler])
 logger = logging.getLogger(__name__)
 
 # Imports from our modules
-from agent.conversation_manager import ConversationManager
+from agent.soca_agent import SOCAAgent
 from solvers.registry import problem_registry
 from utils.data_processor import DataProcessor
 from utils.visualizer import MapVisualizer
 from utils.pydeck_visualizer import PyDeckVisualizer
 from utils.export_handler import ExportHandler
+from utils.aoi_selector import render_aoi_selector, aoi_to_boundary_gdf
 from config.settings import settings
 
 
@@ -87,31 +94,6 @@ def initialize_session_state():
     """Initialize all session state variables"""
     if "messages" not in st.session_state:
         st.session_state.messages = []
-        # Add welcome message
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": """Welcome to the Spatial Optimization Conversational Agent!
-
-I'm here to help you solve facility location problems using state-of-the-art optimization techniques.
-
-**To get started:**
-1. Upload your geospatial data using the sidebar
-   - **Demand points** (required): Locations with population/demand
-   - **Candidate sites** (optional): Potential facility locations
-2. Describe your optimization problem in natural language
-3. I'll guide you through the process and help you find the optimal solution
-
-**New Feature: Automatic Candidate Site Generation**
-If you only upload demand data (no candidate sites), I'll automatically generate 100 random candidate sites within your demand extent. You can adjust the count and set a random seed for reproducibility in the sidebar.
-
-**I can help you with:**
-- P-Median: Minimize average/total distance
-- P-Center: Minimize maximum distance (worst-case)
-- MCLP: Maximize coverage within a service radius
-- LSCP: Minimize facilities needed for full coverage
-
-What problem would you like to solve today?"""
-        })
     
     if "problem_state" not in st.session_state:
         st.session_state.problem_state = {
@@ -120,7 +102,9 @@ What problem would you like to solve today?"""
             "constraints": {},
             "data": {},
             "solution": None,
-            "solution_history": []
+            "solution_history": [],
+            "aoi": None,
+            "aoi_confirmed": False,
         }
     
     if "raster_data" not in st.session_state:
@@ -147,7 +131,7 @@ What problem would you like to solve today?"""
             st.error("GEMINI_API_KEY not found. Please set it in .streamlit/secrets.toml or as an environment variable.")
             st.stop()
         
-        st.session_state.conversation_manager = ConversationManager(
+        st.session_state.conversation_manager = SOCAAgent(
             api_key=api_key,
             problem_registry=problem_registry
         )
@@ -160,18 +144,215 @@ What problem would you like to solve today?"""
     
     if "export_handler" not in st.session_state:
         st.session_state.export_handler = ExportHandler()
+    
+    if "data_fetcher" not in st.session_state:
+        st.session_state.data_fetcher = None  # Lazy-initialised on first use
+
+    if "network_manager" not in st.session_state:
+        from utils.network_manager import NetworkManager
+        st.session_state.network_manager = NetworkManager()
 
 initialize_session_state()
+
+# Inject NetworkManager into problem_state on every rerun so soca_agent can access it
+st.session_state.problem_state["_network_manager"] = st.session_state.network_manager
+
+
+def _reset_to_aoi_step() -> None:
+    """Fresh start: clear data, solution, chat and return to AOI selection."""
+    st.session_state.messages = []
+    st.session_state.problem_state = {
+        "problem_type": None,
+        "parameters": {},
+        "constraints": {},
+        "data": {},
+        "solution": None,
+        "solution_history": [],
+        "aoi": None,
+        "aoi_confirmed": False,
+        "_network_manager": st.session_state.network_manager,
+    }
+    st.session_state.raster_data = {}
+    # Clear AOI selector widget state
+    for k in (
+        "_aoi_search_result", "_aoi_current_geom", "_aoi_current_name",
+        "_aoi_current_source", "_aoi_search_input",
+    ):
+        if k in st.session_state:
+            st.session_state[k] = None if "input" not in k else ""
+    # Reset road-network prefetch status so the sidebar pill clears until the
+    # next AOI is confirmed.
+    for k in ("_network_status", "_network_status_error", "_network_status_stats"):
+        if k in st.session_state:
+            st.session_state[k] = None
+    st.session_state["_aoi_map_key"] = st.session_state.get("_aoi_map_key", 0) + 1
+
+
+# ============================================================================
+# AOI GATE — Step 1 of the flow. Until AOI is confirmed, nothing else renders.
+# ============================================================================
+if not st.session_state.problem_state.get("aoi_confirmed"):
+    st.title("Spatial Optimization Conversational Agent")
+    confirmed = render_aoi_selector()
+    if confirmed is not None:
+        aoi_gdf = aoi_to_boundary_gdf(confirmed)
+        st.session_state.problem_state["aoi"] = confirmed
+        st.session_state.problem_state["aoi_confirmed"] = True
+        st.session_state.problem_state["data"]["boundary_aoi"] = aoi_gdf
+        # Kick off background road-network prefetch so the first optimisation
+        # (network distance is the default) sees a warm cache.
+        try:
+            from utils.network_manager import launch_prefetch_thread
+            launch_prefetch_thread(
+                st.session_state.network_manager,
+                aoi_gdf,
+                session_state=st.session_state,
+            )
+        except Exception:
+            # Prefetch is best-effort; solvers still auto-fall back if the
+            # graph is missing at solve time.
+            pass
+        # Seed a scoped welcome message
+        st.session_state.messages = [{
+            "role": "assistant",
+            "content": (
+                f"Great — your area of interest is **{confirmed['name']}** "
+                f"({confirmed['area_km2']:,.1f} km²).\n\n"
+                "Now tell me what you want to optimize. Examples:\n"
+                "- *Place 5 hospitals here to minimize travel distance*\n"
+                "- *Maximize clinic coverage within a 2 km radius using 4 facilities*\n"
+                "- *How many fire stations do I need to cover every block within 3 km?*\n\n"
+                "I can also fetch population grids and existing facility locations "
+                "for this area — just ask."
+            ),
+        }]
+        st.rerun()
+    st.stop()
+
+
+# ============================================================================
+# AOI HEADER — persistent chip showing current AOI with Change AOI button
+# ============================================================================
+_aoi = st.session_state.problem_state.get("aoi") or {}
+_hdr_cols = st.columns([6, 1])
+with _hdr_cols[0]:
+    st.markdown(
+        f"**AOI:** {_aoi.get('name', '—')} · "
+        f"{_aoi.get('area_km2', 0):,.1f} km² · "
+        f"source `{_aoi.get('source', '—')}`"
+    )
+with _hdr_cols[1]:
+    if st.button("Change AOI", use_container_width=True, help="Clears data, solutions, and chat"):
+        if st.session_state.problem_state.get("solution") or st.session_state.problem_state.get("data"):
+            st.session_state["_aoi_change_pending"] = True
+        else:
+            _reset_to_aoi_step()
+            st.rerun()
+
+if st.session_state.get("_aoi_change_pending"):
+    with st.container(border=True):
+        st.warning(
+            "Changing the AOI will clear loaded data, the current solution, "
+            "and the chat history. This cannot be undone."
+        )
+        c1, c2, _ = st.columns([1, 1, 4])
+        with c1:
+            if st.button("Confirm change", type="primary"):
+                st.session_state["_aoi_change_pending"] = False
+                _reset_to_aoi_step()
+                st.rerun()
+        with c2:
+            if st.button("Cancel"):
+                st.session_state["_aoi_change_pending"] = False
+                st.rerun()
+
+# ---------------------------------------------------------------------------
+# Road-network banner — visible alongside the AOI header so the user knows
+# the road graph is being prefetched (or was fetched / failed) without having
+# to look at the sidebar. Network distance is the default metric.
+# ---------------------------------------------------------------------------
+_net_status_main = st.session_state.get("_network_status")
+if _net_status_main == "fetching":
+    st.info(
+        "Downloading road network from OpenStreetMap for this AOI… "
+        "you can keep talking to the agent; the first optimisation will wait "
+        "for this to finish.",
+        icon="⏳",
+    )
+elif _net_status_main == "failed":
+    _net_err_main = st.session_state.get("_network_status_error") or "unknown error"
+    st.warning(
+        f"Road network could not be downloaded ({_net_err_main}). "
+        "Optimisation will fall back to geodesic (straight-line) distance. "
+        "Use the sidebar's \"Refresh road network\" button to retry.",
+        icon="⚠️",
+    )
+elif _net_status_main == "ready":
+    _net_stats_main = st.session_state.get("_network_status_stats") or {}
+    _nodes_main = _net_stats_main.get("nodes", 0)
+    if _nodes_main:
+        st.caption(
+            f"Road network ready · {_nodes_main:,} nodes cached for this AOI."
+        )
+
+st.divider()
 
 # Sidebar
 with st.sidebar:
     st.title("Spatial Optimization")
     
     st.divider()
-    
+
+    # ------------------------------------------------------------------
+    # Road-network status — network distance is the default metric, so we
+    # surface the prefetch status here. Only renders once the AOI is set.
+    # ------------------------------------------------------------------
+    if st.session_state.problem_state.get("aoi_confirmed"):
+        _net_status = st.session_state.get("_network_status")
+        _net_stats = st.session_state.get("_network_status_stats") or {}
+        _net_err = st.session_state.get("_network_status_error")
+
+        st.subheader("Road network")
+        if _net_status == "ready":
+            nodes = _net_stats.get("nodes", 0)
+            edges = _net_stats.get("edges", 0)
+            st.success(f"Ready — {nodes:,} nodes, {edges:,} edges")
+        elif _net_status == "fetching":
+            st.info("Downloading road network from OpenStreetMap…")
+        elif _net_status == "failed":
+            reason = f" ({_net_err})" if _net_err else ""
+            st.warning(
+                f"Road network unavailable{reason}. "
+                "Optimisation will fall back to geodesic distance."
+            )
+        else:
+            st.caption("Road network not yet fetched.")
+
+        if st.button("Refresh road network", key="_network_refresh_btn"):
+            try:
+                from utils.network_manager import launch_prefetch_thread
+                st.session_state.network_manager.clear_cache()
+                aoi_gdf_refresh = (
+                    st.session_state.problem_state.get("data", {}).get("boundary_aoi")
+                )
+                if aoi_gdf_refresh is not None:
+                    launch_prefetch_thread(
+                        st.session_state.network_manager,
+                        aoi_gdf_refresh,
+                        session_state=st.session_state,
+                    )
+                    st.rerun()
+                else:
+                    st.warning("No AOI boundary found — confirm an AOI first.")
+            except Exception as exc:
+                st.error(f"Could not refresh road network: {exc}")
+
+        st.divider()
+
     # File upload section
     st.subheader("Upload Data")
     st.markdown("Upload geospatial data files (GeoJSON, Shapefile, CSV)")
+    st.caption("🌐 Or just describe your problem with a **location name** and I'll fetch data automatically!")
     
     uploaded_files = st.file_uploader(
         "Choose files",
@@ -243,6 +424,9 @@ with st.sidebar:
                 }
             try:
                 with st.spinner("Syncing uploaded data with AI..."):
+                    # Propagate generated-sites settings into problem_state for tools
+                    st.session_state.problem_state["_generated_sites_count"] = st.session_state.get("generated_sites_count", 100)
+                    st.session_state.problem_state["_generated_sites_seed"] = st.session_state.get("generated_sites_seed", None)
                     result = st.session_state.conversation_manager.notify_data_uploaded(
                         conversation_history=st.session_state.messages,
                         problem_state=st.session_state.problem_state,
@@ -316,7 +500,7 @@ with st.sidebar:
             data_type = st.session_state.data_processor.identify_data_type(gdf)
             if data_type == "demand_points" or "demand" in name.lower():
                 has_demand = True
-            elif data_type == "candidate_sites" or any(word in name.lower() for word in ['candidate', 'site', 'facility']):
+            if data_type == "candidate_sites" or any(word in name.lower() for word in ['candidate', 'site', 'facility']):
                 has_candidates = True
         
         # Show candidate generation controls if we have demand but no candidates
@@ -420,12 +604,13 @@ with st.sidebar:
             "constraints": {},
             "data": st.session_state.problem_state.get("data", {}),  # Keep data
             "solution": None,
-            "solution_history": []
+            "solution_history": [],
+            "aoi": st.session_state.problem_state.get("aoi"),
+            "aoi_confirmed": st.session_state.problem_state.get("aoi_confirmed", False),
         }
         st.rerun()
 
 # Main content area
-st.title("Spatial Optimization Conversational Agent")
 
 # Create two columns: chat and map
 col1, col2 = st.columns([1, 1])
@@ -682,45 +867,87 @@ def render_map_fragment():
         try:
             data_items = st.session_state.problem_state["data"]
             data_processor = st.session_state.data_processor
-            has_demand_viz = False
-            has_candidates_viz = False
-            for fname, fgdf in data_items.items():
-                dtype = data_processor.identify_data_type(fgdf)
-                if dtype == "demand_points" or "demand" in fname.lower():
-                    has_demand_viz = True
-                if dtype == "candidate_sites" or any(w in fname.lower() for w in ["candidate", "site", "facility"]):
-                    has_candidates_viz = True
+
+            # Categorize datasets (reuse same logic as optimize handler)
+            _viz_boundary_keys = set()
+            _viz_poi_keys = set()
+            _viz_demand_keys = set()
+            for _fname, _fgdf in data_items.items():
+                _src = _fgdf.attrs.get("source", "")
+                _fkey = _fname.lower()
+                if _fkey.startswith("boundary_") or _src in (
+                    "auto_fetched", "osmnx",
+                    "photon_bbox_fallback",
+                    "nominatim", "nominatim_bbox_fallback",
+                    "gadm",
+                ):
+                    if len(_fgdf) > 0 and _fgdf.geometry.iloc[0].geom_type in ("Polygon", "MultiPolygon"):
+                        _viz_boundary_keys.add(_fname)
+                        continue
+                if "_facilities_" in _fkey or any(
+                    _fkey.startswith(_c + "_") for _c in [
+                        "health", "education", "food", "finance",
+                        "fire_station", "police", "library", "generated",
+                    ]
+                ) or _fkey == "generated_candidates":
+                    _viz_poi_keys.add(_fname)
+                    continue
+                _dtype = data_processor.identify_data_type(_fgdf)
+                if _dtype == "demand_points" or "demand" in _fkey:
+                    _viz_demand_keys.add(_fname)
+                elif _dtype == "candidate_sites" or any(
+                    w in _fkey for w in ["candidate", "site", "facility"]
+                ):
+                    _viz_poi_keys.add(_fname)
+                else:
+                    _viz_demand_keys.add(_fname)
+
+            has_demand_viz    = bool(_viz_demand_keys)
+            has_candidates_viz = bool(_viz_poi_keys)
 
             if has_demand_viz and not has_candidates_viz and "generated_candidates" not in data_items:
                 demand_gdf_viz = None
-                for fname, fgdf in data_items.items():
-                    dtype = data_processor.identify_data_type(fgdf)
-                    if dtype == "demand_points" or "demand" in fname.lower():
-                        demand_gdf_viz = fgdf
-                        break
-                if demand_gdf_viz is not None and len(demand_gdf_viz) > 0:
+                for _fname in _viz_demand_keys:
+                    demand_gdf_viz = data_items[_fname]
+                    break
+
+                boundary_gdf_viz = None
+                for _fname in _viz_boundary_keys:
+                    boundary_gdf_viz = data_items[_fname]
+                    break
+
+                sampling_gdf_viz = boundary_gdf_viz if boundary_gdf_viz is not None else demand_gdf_viz
+
+                if sampling_gdf_viz is not None and len(sampling_gdf_viz) > 0:
                     num_sites = st.session_state.get("generated_sites_count", 100)
                     random_seed = st.session_state.get("generated_sites_seed", None)
                     generated_candidates_viz = data_processor.generate_candidate_sites(
-                        demand_gdf_viz,
+                        sampling_gdf_viz,
                         num_sites=num_sites,
                         random_seed=random_seed
                     )
                     st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates_viz
+                    _viz_poi_keys.add("generated_candidates")
         except Exception as viz_gen_err:
             logger.warning(f"Could not auto-generate candidate sites for visualization: {viz_gen_err}")
-        
-        # Map data to expected format for visualizer
+
+        # Map data to expected format for visualizer (skip boundary/polygon datasets)
         data_processor = st.session_state.data_processor
         mapped_data = {}
-        
+        boundary_gdf_viz_out = None  # AOI polygon surfaced as its own map layer
+
         for file_name, gdf in st.session_state.problem_state["data"].items():
-            data_type = data_processor.identify_data_type(gdf)
-            
-            if data_type == "demand_points" or "demand" in file_name.lower():
-                mapped_data["demand_points"] = gdf
-            elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
+            # Boundary polygons get their own overlay layer so the user always
+            # sees the AOI outline; capture the first one for the map.
+            if file_name in _viz_boundary_keys:
+                if boundary_gdf_viz_out is None:
+                    boundary_gdf_viz_out = gdf
+                continue
+
+            if file_name in _viz_poi_keys:
                 mapped_data["candidate_sites"] = gdf
+            elif file_name in _viz_demand_keys:
+                mapped_data["demand_points"] = gdf
             elif "demand_points" not in mapped_data:
                 mapped_data["demand_points"] = gdf
             elif "candidate_sites" not in mapped_data:
@@ -743,6 +970,7 @@ def render_map_fragment():
             with ls_col1:
                 with st.popover("🗺️ Layers", help="Toggle map layers"):
                     st.caption("Layer Visibility")
+                    viz_config["show_boundary"] = st.checkbox("AOI Boundary", value=True, key="pd_show_boundary")
                     viz_config["show_demand"] = st.checkbox("Demand Points", value=True, key="pd_show_demand")
                     viz_config["show_candidates"] = st.checkbox("Candidate Sites", value=True, key="pd_show_candidates")
                     viz_config["show_facilities"] = st.checkbox("Selected Facilities", value=True, key="pd_show_facilities")
@@ -771,7 +999,8 @@ def render_map_fragment():
                 viz_config=viz_config,
                 parameters=parameters,
                 constraints=st.session_state.problem_state.get("constraints", {}),
-                basemap_style=basemap_style
+                basemap_style=basemap_style,
+                boundary=boundary_gdf_viz_out,
             )
             with st.container():
                 legend_html = st.session_state.pydeck_visualizer.generate_legend_html(
@@ -821,7 +1050,8 @@ def render_map_fragment():
                 viz_config=viz_config,
                 parameters=parameters,
                 constraints=st.session_state.problem_state.get("constraints", {}),
-                raster_data=st.session_state.get("raster_data", {})
+                raster_data=st.session_state.get("raster_data", {}),
+                boundary=boundary_gdf_viz_out,
             )
             st_folium(map_obj, width=700, height=500, key="map_frag")
     
@@ -896,258 +1126,60 @@ with col1:
                     "column_stats": column_stats
                 }
         
-        # Call conversation manager
-        with st.spinner("Thinking..."):
+        # Propagate generated-sites settings into problem_state for ADK tools
+        st.session_state.problem_state["_generated_sites_count"] = st.session_state.get("generated_sites_count", 100)
+        st.session_state.problem_state["_generated_sites_seed"] = st.session_state.get("generated_sites_seed", None)
+
+        # Human-readable labels for ADK tool names shown in the status panel
+        _TOOL_LABELS = {
+            "fetch_city_data": "Fetching geographic data…",
+            "stage_optimization": "Staging optimization parameters…",
+            "confirm_optimization": "Running solver…",
+            "get_data_status": "Checking data status…",
+        }
+
+        # Call agent — use st.status() so users see what's happening
+        with st.status("Thinking…", expanded=True) as _status:
             try:
                 result = st.session_state.conversation_manager.chat(
                     user_message=prompt,
-                    conversation_history=st.session_state.messages[:-1],  # Exclude current message
+                    conversation_history=st.session_state.messages[:-1],
                     problem_state=st.session_state.problem_state,
-                    uploaded_data_summary=data_summary
+                    uploaded_data_summary=data_summary,
                 )
             except Exception as e:
                 st.error(f"Error communicating with AI: {e}")
                 result = {
                     "response": f"I encountered an error: {str(e)}",
                     "actions": [],
-                    "updated_state": st.session_state.problem_state
+                    "updated_state": st.session_state.problem_state,
+                    "tool_calls": [],
                 }
-        
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                for tc in tool_calls:
+                    _status.write(f"✓ {_TOOL_LABELS.get(tc, tc.replace('_', ' ').title())}")
+            _status.update(
+                label="Done" if tool_calls else "Response ready",
+                state="complete",
+                expanded=False,
+            )
+
         # Update state
         st.session_state.problem_state = result["updated_state"]
-        
+
+        # Toast notifications for key background actions
+        if "fetch_city_data" in tool_calls:
+            st.toast("Geographic data loaded — check the map!", icon="🗺️")
+        if "confirm_optimization" in tool_calls:
+            st.toast("Optimization complete — solution on map!", icon="✅")
+
         # Add assistant response to history
         st.session_state.messages.append({
             "role": "assistant",
             "content": result["response"]
         })
-        
-        # Handle actions (e.g., optimization trigger)
-        if result["actions"]:
-            logger.info(f"App: Processing {len(result['actions'])} action(s): {[a.get('action', 'unknown') for a in result['actions']]}")
-            
-            # Track processed actions to prevent duplicates
-            processed_actions = set()
-            
-            for i, action in enumerate(result["actions"]):
-                if action["action"] == "optimize":
-                    # Create a unique key for this action to prevent duplicates
-                    action_key = f"{action.get('problem_type', 'unknown')}_{action.get('parameters', {}).get('n_facilities', 'unknown')}_{action.get('parameters', {}).get('service_radius', 'unknown')}"
-                    
-                    if action_key in processed_actions:
-                        logger.warning(f"App: Skipping duplicate optimization action: {action_key}")
-                        continue
-                    
-                    processed_actions.add(action_key)
-                    logger.info(f"App: Processing optimization action {i+1}/{len(result['actions'])}: {action_key}")
-                    with st.spinner("Running optimization..."):
-                        try:
-                            # Get problem solver
-                            problem_solver = problem_registry.get_problem(action["problem_type"])
-                            
-                            if not problem_solver:
-                                st.error(f"Problem type '{action['problem_type']}' not found")
-                                continue
-                            
-                            # Prepare data mapping
-                            data_dict = {}
-                            data_processor = st.session_state.data_processor
-                            
-                            # Try to intelligently map uploaded files to required data
-                            for file_name, gdf in st.session_state.problem_state["data"].items():
-                                data_type = data_processor.identify_data_type(gdf)
-                                
-                                if data_type == "demand_points" or "demand" in file_name.lower():
-                                    data_dict["demand_points"] = gdf
-                                elif data_type == "candidate_sites" or any(word in file_name.lower() for word in ['candidate', 'site', 'facility']):
-                                    data_dict["candidate_sites"] = gdf
-                            
-                            # Fallback: if we still don't have both types, make educated guesses
-                            if "demand_points" not in data_dict and "candidate_sites" not in data_dict:
-                                # If we have exactly 2 datasets, assume first is demand, second is candidates
-                                data_files = list(st.session_state.problem_state["data"].items())
-                                if len(data_files) == 2:
-                                    data_dict["demand_points"] = data_files[0][1]
-                                    data_dict["candidate_sites"] = data_files[1][1]
-                                elif len(data_files) == 1:
-                                    # Single dataset - assume it's demand points
-                                    data_dict["demand_points"] = data_files[0][1]
-                            elif "demand_points" not in data_dict:
-                                # We have candidates but no demand - use first remaining dataset as demand
-                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
-                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
-                                if remaining_files:
-                                    data_dict["demand_points"] = remaining_files[0][1]
-                            elif "candidate_sites" not in data_dict:
-                                # We have demand but no candidates - use first remaining dataset as candidates
-                                remaining_files = [(name, gdf) for name, gdf in st.session_state.problem_state["data"].items() 
-                                                 if name not in [k for k, v in data_dict.items() if v is not None]]
-                                if remaining_files:
-                                    data_dict["candidate_sites"] = remaining_files[0][1]
-                            
-                            # Generate candidate sites if we have demand but no candidates
-                            if "demand_points" in data_dict and "candidate_sites" not in data_dict:
-                                logger.info("No candidate sites found - generating random sites within demand extent")
-                                try:
-                                    # Get generation parameters from session state
-                                    num_sites = st.session_state.get("generated_sites_count", 100)
-                                    random_seed = st.session_state.get("generated_sites_seed", None)
-                                    
-                                    # Generate candidate sites
-                                    generated_candidates = data_processor.generate_candidate_sites(
-                                        data_dict["demand_points"], 
-                                        num_sites=num_sites, 
-                                        random_seed=random_seed
-                                    )
-                                    data_dict["candidate_sites"] = generated_candidates
-                                    # Persist generated candidates so they appear on the map and in state
-                                    try:
-                                        st.session_state.problem_state["data"]["generated_candidates"] = generated_candidates
-                                    except Exception as persist_error:
-                                        logger.warning(f"Could not persist generated candidate sites to session state: {persist_error}")
-                                    
-                                    logger.info(f"Generated {num_sites} candidate sites with seed {random_seed}")
-                                    
-                                    # Add info message to chat
-                                    seed_info = f" (seed: {random_seed})" if random_seed is not None else ""
-                                    st.session_state.messages.append({
-                                        "role": "assistant",
-                                        "content": f"Generated {num_sites} random candidate sites within demand extent{seed_info}."
-                                    })
-                                    
-                                except Exception as gen_error:
-                                    logger.error(f"Failed to generate candidate sites: {gen_error}")
-                                    st.error(f"Failed to generate candidate sites: {gen_error}")
-                                    continue
-                            
-                            # Auto-detect and add variant-specific parameters from data
-                            parameters = action.get("parameters", {}).copy()
-                            
-                            # Only auto-detect data if variant is explicitly requested by user
-                            # Check if capacitated variant and no capacities provided
-                            if parameters.get("variant") == "capacitated" and "capacities" not in parameters:
-                                # First try to get capacity data from candidate sites
-                                if "candidate_sites" in data_dict:
-                                    capacity_data = data_processor.extract_capacity_data(data_dict["candidate_sites"])
-                                    if capacity_data:
-                                        parameters["capacities"] = capacity_data
-                                        logger.info(f"Auto-detected capacity data from candidate sites: {len(capacity_data)} values")
-                                    else:
-                                        # If no capacity data in candidate sites, calculate based on demand dataset population
-                                        if "demand_points" in data_dict:
-                                            demand_population = data_processor.extract_demand_data(data_dict["demand_points"])
-                                            if demand_population:
-                                                total_demand = sum(demand_population)
-                                                n_facilities = parameters.get("n_facilities", len(data_dict["candidate_sites"]))
-                                                # Distribute total demand among facilities
-                                                avg_capacity = total_demand / n_facilities
-                                                # Create capacity array for all candidate sites
-                                                capacity_data = [avg_capacity] * len(data_dict["candidate_sites"])
-                                                parameters["capacities"] = capacity_data
-                                                logger.info(f"Calculated capacity data based on demand population: {len(capacity_data)} values, avg capacity: {avg_capacity:.2f}")
-                                            else:
-                                                logger.warning("Capacitated variant requested but no population data found in demand dataset")
-                                        else:
-                                            logger.warning("Capacitated variant requested but no demand points data available")
-                            
-                            # Check if budget variant and no costs provided
-                            # Only auto-detect costs if variant is explicitly set to budget
-                            if parameters.get("variant") == "budget" and "facility_costs" not in parameters:
-                                if "candidate_sites" in data_dict:
-                                    cost_data = data_processor.extract_cost_data(data_dict["candidate_sites"])
-                                    if cost_data:
-                                        parameters["facility_costs"] = cost_data
-                                        logger.info(f"Auto-detected cost data: {len(cost_data)} values")
-                                    else:
-                                        logger.warning("Budget variant requested but no cost data found in candidate sites")
-                                        # Remove budget variant if no cost data available
-                                        parameters["variant"] = "base" if parameters.get("problem_type") == "p-median" else "classical"
-                                        logger.info(f"Reverted to {'base' if parameters.get('problem_type') == 'p-median' else 'classical'} variant due to missing cost data")
-                            
-                            # Add default weights if needed (use a non-conflicting column name)
-                            if "demand_points" in data_dict:
-                                data_dict["demand_points"] = data_processor.add_default_weights(data_dict["demand_points"], weight_column='default_weight')
-                            
-                            # Validate required data
-                            required_data = problem_solver.get_required_data()
-                            missing_data = [k for k, v in required_data.items() if v.get('required') and k not in data_dict]
-                            
-                            if missing_data:
-                                error_msg = f"Missing required data: {', '.join(missing_data)}"
-                                st.error(error_msg)
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"{error_msg}. Please upload the required data files."
-                                })
-                                st.rerun()
-                                continue
-                            
-                            # Solve with performance monitoring
-                            logger.info(f"App: Solving with parameters: {parameters}")
-                            start_time = time.time()
-                            
-                            try:
-                                solution = problem_solver.solve(
-                                    data=data_dict,
-                                    parameters=parameters,
-                                    constraints=action.get("constraints", {}),
-                                    distance_metric=action.get("distance_metric", "euclidean")
-                                )
-                                
-                                solve_time = time.time() - start_time
-                                logger.info(f"Optimization completed in {solve_time:.2f} seconds")
-                                
-                                # Log performance metrics
-                                if solution.get('status') in ['optimal', 'feasible']:
-                                    logger.info(f"Solution status: {solution.get('status')}")
-                                    logger.info(f"Objective value: {solution.get('objective_value', 'N/A')}")
-                                    logger.info(f"Selected facilities: {len(solution.get('selected_facilities', []))}")
-                                    
-                            except Exception as solve_error:
-                                solve_time = time.time() - start_time
-                                logger.error(f"Optimization failed after {solve_time:.2f} seconds: {solve_error}")
-                                raise
-                            
-                            st.session_state.problem_state["solution"] = solution
-                            st.session_state.problem_state["solution_history"].append(solution)
-                            
-                            # Generate explanation
-                            if solution.get('status') != 'error':
-                                # Build kwargs based on solver signature to avoid unexpected kwargs
-                                explain_sig = inspect.signature(problem_solver.explain_solution)
-                                explain_kwargs = {
-                                    "solution": solution,
-                                    "data": data_dict,
-                                    "detail_level": "standard",
-                                }
-                                if "objective_type" in explain_sig.parameters:
-                                    explain_kwargs["objective_type"] = parameters.get("objective", "total")
-                                explanation = problem_solver.explain_solution(**explain_kwargs)
-                                
-                                # Add explanation to chat
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": f"**Optimization Complete.**\n\n{explanation}"
-                                })
-                                
-                                st.success("Optimization completed! Check the map for results.")
-                            else:
-                                error_msg = f"Optimization failed: {solution.get('error', 'Unknown error')}"
-                                st.session_state.messages.append({
-                                    "role": "assistant",
-                                    "content": error_msg
-                                })
-                                st.error(error_msg)
-                        
-                        except Exception as e:
-                            error_msg = f"Optimization error: {str(e)}"
-                            st.session_state.messages.append({
-                                "role": "assistant",
-                                "content": error_msg
-                            })
-                            st.error(error_msg)
-                            logger.error(f"Optimization error: {e}", exc_info=True)
-        
+
         st.rerun()
 
 with col2:

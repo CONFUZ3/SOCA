@@ -33,7 +33,8 @@ class MapVisualizer:
         viz_config: Optional[Dict[str, Any]] = None,
         parameters: Optional[Dict[str, Any]] = None,
         constraints: Optional[Dict[str, Any]] = None,
-        raster_data: Optional[Dict[str, Any]] = None
+        raster_data: Optional[Dict[str, Any]] = None,
+        boundary: Optional[gpd.GeoDataFrame] = None,
     ) -> folium.Map:
         """
         Create comprehensive map visualization.
@@ -73,8 +74,11 @@ class MapVisualizer:
                     if key not in viz_config:
                         viz_config[key] = default_value
             
-            # Calculate map center
+            # Calculate map center — include the AOI boundary so the camera
+            # frames the region of interest even when no points are present.
             all_gdfs = [gdf for gdf in data.values() if gdf is not None and len(gdf) > 0]
+            if boundary is not None and len(boundary) > 0:
+                all_gdfs.append(boundary)
             if not all_gdfs:
                 # Default center if no data
                 center = [40.7128, -74.0060]  # New York City
@@ -97,6 +101,17 @@ class MapVisualizer:
                         self._add_raster_overlay(m, raster_info, raster_name)
                     except Exception as e:
                         logger.warning(f"Could not add raster overlay {raster_name}: {e}")
+
+            # Add AOI boundary overlay (below points so labels stay legible).
+            if (
+                boundary is not None
+                and len(boundary) > 0
+                and viz_config.get("show_boundary", True)
+            ):
+                try:
+                    self._add_boundary_layer(m, boundary)
+                except Exception as e:
+                    logger.warning(f"Could not add boundary layer: {e}")
             
             # Add data layers
             demand_gdf = data.get('demand_points')
@@ -583,6 +598,40 @@ class MapVisualizer:
 
         map_obj.get_root().html.add_child(folium.Element(legend_html))
     
+    def _add_boundary_layer(
+        self,
+        map_obj: folium.Map,
+        boundary_gdf: gpd.GeoDataFrame,
+    ) -> None:
+        """Render the AOI polygon(s) as a styled GeoJson overlay in Folium.
+
+        Only Polygon / MultiPolygon rows are used; reprojection to EPSG:4326
+        is done when the GeoDataFrame is in another CRS.
+        """
+        gdf = boundary_gdf
+        try:
+            if gdf.crs is not None and str(gdf.crs) not in ("EPSG:4326", "epsg:4326"):
+                gdf = gdf.to_crs("EPSG:4326")
+        except Exception:
+            pass
+
+        poly_mask = gdf.geometry.type.isin(("Polygon", "MultiPolygon"))
+        gdf = gdf[poly_mask]
+        if len(gdf) == 0:
+            return
+
+        style_fn = lambda _feature: {
+            "fillColor": "#2196F3",
+            "color": "#1565C0",
+            "weight": 2,
+            "fillOpacity": 0.10,
+        }
+        folium.GeoJson(
+            gdf.__geo_interface__,
+            name="AOI Boundary",
+            style_function=style_fn,
+        ).add_to(map_obj)
+
     def _calculate_map_center(self, gdfs: List[gpd.GeoDataFrame]) -> List[float]:
         """Calculate center point of all data for map initialization"""
         # Combine all bounds

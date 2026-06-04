@@ -1,4 +1,5 @@
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from typing import List, Dict, Any, Optional
 import json
 import logging
@@ -20,8 +21,7 @@ class ConversationManager:
     """
     
     def __init__(self, api_key: str, problem_registry):
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(settings.GEMINI_MODEL)
+        self.client = genai.Client(api_key=api_key)
         self.problem_registry = problem_registry
         self.max_tokens = 4096
     
@@ -69,27 +69,23 @@ class ConversationManager:
             chat_history = []
             for msg in messages:
                 if msg["role"] == "user":
-                    chat_history.append({"role": "user", "parts": [msg["content"]]})
+                    chat_history.append({"role": "user", "parts": [{"text": msg["content"]}]})
                 elif msg["role"] == "assistant":
-                    chat_history.append({"role": "model", "parts": [msg["content"]]})
-            
-            # Create a new model instance with system instruction
-            model_with_system = genai.GenerativeModel(
-                settings.GEMINI_MODEL,
-                system_instruction=system_prompt
-            )
-            
-            # Start chat session
-            chat = model_with_system.start_chat(history=chat_history)
-            
-            # Send the latest user message
-            response = chat.send_message(
-                user_message,
-                generation_config=genai.types.GenerationConfig(
+                    chat_history.append({"role": "model", "parts": [{"text": msg["content"]}]})
+
+            # Create chat session with system instruction and config
+            chat = self.client.chats.create(
+                model=settings.GEMINI_MODEL,
+                history=chat_history,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt,
                     max_output_tokens=self.max_tokens,
                     temperature=0.7,
                 )
             )
+
+            # Send the latest user message
+            response = chat.send_message(message=user_message)
             
             # Parse response
             return self._parse_response(response, problem_state, last_user_message=user_message)
@@ -233,7 +229,55 @@ class ConversationManager:
                     action_data['parameters'] = merged_params
                 
                 # Validate action
-                if action_data.get("action") == "optimize":
+                if action_data.get("action") == "fetch_data":
+                    # Non-destructive read action — no confirmation gate needed.
+                    # The agent's conversational text explaining what will be fetched
+                    # is preserved as text_response (not overridden here).
+                    steps = action_data.get("steps")
+                    if isinstance(steps, list) and len(steps) > 0:
+                        # Normalise scale + admin_level fields.
+                        # The LLM should always provide these, but apply heuristic
+                        # fallbacks for robustness (e.g. old conversation history).
+                        from utils.scale_classifier import (
+                            heuristic_scale_from_location,
+                            get_admin_level_for_scale,
+                        )
+                        _VALID_SCALES = ("country", "region", "city", "neighborhood")
+
+                        scale = str(action_data.get("scale", "")).strip().lower()
+                        if scale not in _VALID_SCALES:
+                            first_loc = next(
+                                (s.get("location", "") for s in steps if s.get("location")),
+                                "",
+                            )
+                            scale = heuristic_scale_from_location(first_loc)
+                            action_data["scale"] = scale
+                            logger.info(
+                                f"fetch_data: scale not provided; "
+                                f"heuristic inferred '{scale}' from '{first_loc}'"
+                            )
+
+                        admin_level = action_data.get("admin_level")
+                        if not isinstance(admin_level, int) or not (2 <= admin_level <= 10):
+                            admin_level = get_admin_level_for_scale(scale)
+                            action_data["admin_level"] = admin_level
+                            logger.info(
+                                f"fetch_data: admin_level missing/invalid; "
+                                f"defaulting to {admin_level} for scale='{scale}'"
+                            )
+
+                        actions.append(action_data)
+                        logger.info(
+                            f"Conversation Manager: fetch_data action accepted "
+                            f"with {len(steps)} step(s), "
+                            f"scale='{scale}', admin_level={admin_level}"
+                        )
+                    else:
+                        logger.warning(
+                            "Invalid fetch_data action: missing or empty 'steps' array"
+                        )
+
+                elif action_data.get("action") == "optimize":
                     # Validate required fields
                     if "problem_type" in action_data and "parameters" in action_data:
                         # Validate variant-specific parameters

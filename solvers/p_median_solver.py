@@ -138,6 +138,11 @@ Where:
             if params["objective"] not in ["total", "average"]:
                 return False, "objective must be either 'total' or 'average'"
         
+        # Cross-cutting facility-set params
+        ok, err = self._validate_facility_sets(params)
+        if not ok:
+            return False, err
+
         # Variant validation
         variant = params.get("variant", "base")
         if variant not in ["base", "capacitated", "budget", "max_distance"]:
@@ -156,7 +161,7 @@ Where:
         data: Dict[str, gpd.GeoDataFrame],
         parameters: Dict[str, Any],
         constraints: Dict[str, Any],
-        distance_metric: str = "euclidean"
+        distance_metric: str = "network"
     ) -> Dict[str, Any]:
         """Solve the P-Median problem"""
         start_time = time.time()
@@ -188,6 +193,9 @@ Where:
             use_ga_after_timeout = True
             logger.info(f"P-Median: Fallback time limit set to {fallback_time_limit:.2f} seconds")
             
+            # Merge fixed_open/fixed_closed/existing_facilities into constraints
+            constraints = self._merge_facility_set_constraints(constraints, parameters)
+
             # Validate p
             if p > len(candidate_gdf):
                 raise ValueError(f"Cannot locate {p} facilities with only {len(candidate_gdf)} candidate sites")
@@ -197,8 +205,9 @@ Where:
             
             # Calculate distance matrix
             dist_calc = DistanceCalculator()
+            network_graph = data.get('_network_graph')
             distance_matrix = dist_calc.calculate_distance_matrix(
-                demand_gdf, candidate_gdf, metric=distance_metric
+                demand_gdf, candidate_gdf, metric=distance_metric, network_graph=network_graph
             )
             # For max-distance variant, compute a mask where assignments allowed
             distance_mask = None
@@ -227,9 +236,15 @@ Where:
 
             # If timed out or we reached the 60s window, switch to GA per user choice (a)
             timed_out_flag = bool(solution.get('solver_details', {}).get('timed_out', False))
+            # The GA fallback only optimises the *base* P-Median objective; it does
+            # not honour the capacitated / budget / max_distance constraints, so it
+            # must not be substituted for those variants (it would silently return a
+            # constraint-violating solution labelled "feasible"). Keep the MIP
+            # incumbent for unsupported variants instead.
+            ga_supported = (variant == 'base')
             ga_needed = use_ga_after_timeout and (timed_out_flag or mip_elapsed >= max(0.1, 0.95 * fallback_time_limit))
-            logger.info(f"P-Median timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}")
-            if ga_needed:
+            logger.info(f"P-Median timeout check: mip_elapsed={mip_elapsed:.2f}s, fallback_limit={fallback_time_limit:.2f}s, timed_out_flag={timed_out_flag}, ga_needed={ga_needed}, ga_supported={ga_supported}")
+            if ga_needed and ga_supported:
                 logger.info("P-Median: Falling back to Genetic Algorithm")
                 logger.info(f"P-Median: MIP solver status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
                 incumbent_mask = None
@@ -262,6 +277,13 @@ Where:
                     "assignments": ga_result["assignments"],
                     "solver_details": ga_details
                 }
+            elif ga_needed and not ga_supported:
+                logger.info(f"P-Median: GA fallback not available for variant '{variant}'; keeping MIP incumbent")
+                if timed_out_flag:
+                    solution.setdefault('warnings', []).append(
+                        f"MIP time limit reached for the '{variant}' P-Median variant; returning best "
+                        f"incumbent (genetic-algorithm fallback is not available for this variant)."
+                    )
             else:
                 logger.info(f"P-Median: MIP solver completed successfully within time limit, no fallback needed. Status: {solution.get('status', 'unknown')}, objective: {solution.get('objective_value', 'N/A')}")
             
@@ -312,6 +334,7 @@ Where:
                 "metrics": metrics,
                 "solution_time": solution_time,
                 "solver_details": solution.get('solver_details', {}),
+                "warnings": solution.get('warnings', []),
                 "academic_metadata": {
                     "algorithm_used": ("Genetic Algorithm (GA)"
                                        if solution.get('solver_details', {}).get('solver') == 'ga'
@@ -333,49 +356,6 @@ Where:
                 "error": str(e),
                 "solution_time": time.time() - start_time
             }
-    
-    def _extract_weights(self, demand_gdf: gpd.GeoDataFrame, parameters: Dict[str, Any]) -> np.ndarray:
-        """Extract demand weights from GeoDataFrame, preferring population columns and explicit parameter."""
-        # 1) Explicit parameter takes precedence
-        try:
-            explicit_col = parameters.get('demand_weight_column') if parameters else None
-            if explicit_col:
-                for c in demand_gdf.columns:
-                    if c.lower() == str(explicit_col).lower():
-                        values = demand_gdf[c].astype(float).to_numpy()
-                        if np.any(values < 0):
-                            raise ValueError(f"Demand weight column '{c}' contains negative values")
-                        return values
-        except Exception as e:
-            logger.warning(f"Failed to use explicit demand_weight_column: {e}")
-
-        # 2) Case-insensitive exact matches of common names
-        common_exact = ['population', 'pop', 'demand', 'weight']
-        lower_cols = {c.lower(): c for c in demand_gdf.columns}
-        for key in common_exact:
-            if key in lower_cols:
-                c = lower_cols[key]
-                try:
-                    values = demand_gdf[c].astype(float).to_numpy()
-                    if np.all(values >= 0):
-                        return values
-                except Exception:
-                    pass
-
-        # 3) Substring heuristic
-        substr_keys = ['population', 'pop', 'weight', 'demand']
-        for c in demand_gdf.columns:
-            lc = c.lower()
-            if any(k in lc for k in substr_keys):
-                try:
-                    values = demand_gdf[c].astype(float).to_numpy()
-                    if np.all(values >= 0):
-                        return values
-                except Exception:
-                    continue
-
-        logger.info("No weight column found, using uniform weights of 1.0")
-        return np.ones(len(demand_gdf))
     
     def _solve_mip(
         self,
@@ -428,20 +408,18 @@ Where:
         """Solve using Gurobi"""
         import gurobipy as gp
         from gurobipy import GRB
-        
+
+        from .base_solver import configure_gurobi_model
+
         n_demand, n_candidates = distance_matrix.shape
-        
-        # Create model
+
         model = gp.Model("p-median")
-        model.setParam('OutputFlag', 0)  # Suppress output
+        configure_gurobi_model(model, time_limit_seconds)
         if time_limit_seconds is not None:
-            model.setParam('TimeLimit', float(time_limit_seconds))
-            logger.info(f"P-Median Gurobi: Setting TimeLimit to {time_limit_seconds:.2f} seconds")
-        else:
-            model.setParam('TimeLimit', 300)
-        model.setParam('MIPGap', 0.01)
-        
-        # Decision variables
+            logger.info(
+                "P-Median Gurobi: TimeLimit set to %.2f seconds", float(time_limit_seconds)
+            )
+
         x = model.addVars(n_candidates, vtype=GRB.BINARY, name="x")  # facility location
         y = model.addVars(n_demand, n_candidates, vtype=GRB.BINARY, name="y")  # assignment
         
@@ -466,35 +444,39 @@ Where:
         
         # Constraint: locate exactly p facilities
         model.addConstr(gp.quicksum(x[j] for j in range(n_candidates)) == p, "p_facilities")
-        
-        # Constraint: each demand assigned to exactly one facility
-        for i in range(n_demand):
-            model.addConstr(
-                gp.quicksum(y[i, j] for j in range(n_candidates)) == 1,
-                f"assign_demand_{i}"
-            )
-        
-        # Constraint: assignment only to open facilities
-        for i in range(n_demand):
-            for j in range(n_candidates):
-                model.addConstr(y[i, j] <= x[j], f"open_facility_{i}_{j}")
-        
+
+        # Constraint: each demand assigned to exactly one facility (batched).
+        model.addConstrs(
+            (gp.quicksum(y[i, j] for j in range(n_candidates)) == 1
+             for i in range(n_demand)),
+            name="assign_demand",
+        )
+
+        # Constraint: assignment only to open facilities (batched → ~10× faster
+        # to build than n_demand·n_candidates individual addConstr calls).
+        model.addConstrs(
+            (y[i, j] <= x[j] for i in range(n_demand) for j in range(n_candidates)),
+            name="open_facility",
+        )
+
         # Max-distance: forbid assignments beyond threshold
         if variant == 'max_distance' and distance_mask is not None:
-            for i in range(n_demand):
-                for j in range(n_candidates):
-                    if distance_mask[i, j] == 0:
-                        model.addConstr(y[i, j] == 0, f"maxdist_forbid_{i}_{j}")
+            model.addConstrs(
+                (y[i, j] == 0 for i in range(n_demand) for j in range(n_candidates)
+                 if distance_mask[i, j] == 0),
+                name="maxdist_forbid",
+            )
 
         # Capacitated variant
         if variant == 'capacitated' and capacities is not None:
             if len(capacities) != n_candidates:
                 raise ValueError("capacities length must match number of candidate sites")
-            for j in range(n_candidates):
-                model.addConstr(
-                    gp.quicksum(demand_weights[i] * y[i, j] for i in range(n_demand)) <= float(capacities[j]) * x[j],
-                    f"capacity_{j}"
-                )
+            model.addConstrs(
+                (gp.quicksum(demand_weights[i] * y[i, j] for i in range(n_demand))
+                 <= float(capacities[j]) * x[j]
+                 for j in range(n_candidates)),
+                name="capacity",
+            )
 
         # Budget variant
         if variant == 'budget':

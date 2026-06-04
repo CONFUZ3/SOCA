@@ -17,18 +17,25 @@ Core capabilities:
 - Geospatial input handling (CSV/GeoJSON/Shapefile)
 - Interactive map output and result export
 
+## Architecture
+
+The product is a **FastAPI backend + Next.js (React) frontend**. The legacy Streamlit `app.py` still works for local use.
+
 ## Repository Contents
 
-- `app.py`: Streamlit entry point
-- `agent/`: conversation and prompt logic
+- `frontend/`: Next.js 16 + React UI (MapLibre map, chat, sidebar)
+- `backend/`: FastAPI server (REST/SSE API under `/api/*`)
+- `agent/`: Google ADK conversational agent and tools
 - `solvers/`: optimization model implementations
-- `utils/`: data processing, distance, visualization, export helpers
+- `utils/`: data fetching, distance, visualization, export helpers
+- `app.py`: legacy Streamlit entry point
 - `datasets/`: included datasets used for experiments/examples
 - `tests/`: unit and integration-oriented tests
 
 ## Requirements
 
 - Python 3.10+
+- Node.js 20+ (for the React frontend)
 - `pip` and virtual environment tooling
 - Gemini API key
 - Optional: Gurobi license (PuLP fallback is supported)
@@ -54,6 +61,24 @@ cp .env.example .env
 Set `GEMINI_API_KEY` in `.env` or in `.streamlit/secrets.toml`.
 
 ## Run
+
+Start the FastAPI backend:
+
+```bash
+uvicorn backend.main:app --reload --port 8000
+```
+
+Start the Next.js frontend (in a second terminal):
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+App: `http://localhost:3000` · API: `http://localhost:8000`
+
+### Legacy Streamlit app
 
 ```bash
 streamlit run app.py
