@@ -538,3 +538,136 @@ def test_confirm_optimization_skips_network_fetch_for_huge_aoi(monkeypatch):
         for w in result.get("warnings", [])
     )
     nm.get_graph.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# 8) Gurobi license/runtime failure falls back to PuLP
+# ---------------------------------------------------------------------------
+#
+# gurobipy being *importable* doesn't mean it can solve anything — an
+# expired or missing license raises gurobipy.GurobiError from inside
+# _solve_gurobi (at Model()/optimize() time), not ImportError. Each
+# solver's _solve_mip must catch that too, or the error escapes all the
+# way to the top-level handler instead of falling back to PuLP/CBC.
+
+
+def _fake_gurobipy_module():
+    """A minimal fake ``gurobipy`` module: importable, but GurobiError
+    is a real Exception subclass so ``except (..., gp.GurobiError)``
+    in the solver code binds and catches it correctly."""
+    mod = MagicMock()
+
+    class GurobiError(Exception):
+        pass
+
+    mod.GurobiError = GurobiError
+    mod.GRB = MagicMock()
+    return mod, GurobiError
+
+
+def test_p_median_falls_back_to_pulp_on_gurobi_license_error(monkeypatch):
+    from solvers.p_median_solver import PMedianSolver
+
+    fake_gp, GurobiError = _fake_gurobipy_module()
+    monkeypatch.setitem(__import__("sys").modules, "gurobipy", fake_gp)
+
+    solver = PMedianSolver()
+    monkeypatch.setattr(
+        solver,
+        "_solve_gurobi",
+        MagicMock(side_effect=GurobiError("HostID mismatch (license expired)")),
+    )
+    pulp_result = {"status": "optimal", "solver_details": {"solver": "pulp"}}
+    monkeypatch.setattr(solver, "_solve_pulp", MagicMock(return_value=pulp_result))
+
+    result = solver._solve_mip(
+        distance_matrix=np.array([[1.0, 2.0], [2.0, 1.0]]),
+        demand_weights=np.array([1.0, 1.0]),
+        p=1,
+        constraints={},
+        variant="base",
+        objective_type="total",
+        capacities=None,
+        facility_costs=None,
+        budget=None,
+        distance_mask=None,
+    )
+
+    assert result == pulp_result
+    solver._solve_pulp.assert_called_once()
+
+
+def test_p_center_falls_back_to_pulp_on_gurobi_license_error(monkeypatch):
+    from solvers.p_center_solver import PCenterSolver
+
+    fake_gp, GurobiError = _fake_gurobipy_module()
+    monkeypatch.setitem(__import__("sys").modules, "gurobipy", fake_gp)
+
+    solver = PCenterSolver()
+    monkeypatch.setattr(
+        solver, "_solve_gurobi", MagicMock(side_effect=GurobiError("license expired"))
+    )
+    pulp_result = {"status": "optimal", "solver_details": {"solver": "pulp"}}
+    monkeypatch.setattr(solver, "_solve_pulp", MagicMock(return_value=pulp_result))
+
+    result = solver._solve_mip(
+        distance_matrix=np.array([[1.0, 2.0], [2.0, 1.0]]),
+        p=1,
+        constraints={},
+    )
+
+    assert result == pulp_result
+    solver._solve_pulp.assert_called_once()
+
+
+def test_mclp_falls_back_to_pulp_on_gurobi_license_error(monkeypatch):
+    from solvers.mclp_solver import MCLPSolver
+
+    fake_gp, GurobiError = _fake_gurobipy_module()
+    monkeypatch.setitem(__import__("sys").modules, "gurobipy", fake_gp)
+
+    solver = MCLPSolver()
+    monkeypatch.setattr(
+        solver, "_solve_gurobi", MagicMock(side_effect=GurobiError("license expired"))
+    )
+    pulp_result = {"status": "optimal", "solver_details": {"solver": "pulp"}}
+    monkeypatch.setattr(solver, "_solve_pulp", MagicMock(return_value=pulp_result))
+
+    result = solver._solve_mip(
+        coverage_matrix=np.ones((2, 2), dtype=int),
+        demand_weights=np.array([1.0, 1.0]),
+        p=1,
+        constraints={},
+        variant="classical",
+        facility_costs=None,
+        budget=None,
+        capacities=None,
+        k_coverage=1,
+        reliability=None,
+        distance_matrix=np.array([[100.0, 200.0], [200.0, 100.0]]),
+    )
+
+    assert result == pulp_result
+    solver._solve_pulp.assert_called_once()
+
+
+def test_lscp_falls_back_to_pulp_on_gurobi_license_error(monkeypatch):
+    from solvers.lscp_solver import LSCPSolver
+
+    fake_gp, GurobiError = _fake_gurobipy_module()
+    monkeypatch.setitem(__import__("sys").modules, "gurobipy", fake_gp)
+
+    solver = LSCPSolver()
+    monkeypatch.setattr(
+        solver, "_solve_gurobi", MagicMock(side_effect=GurobiError("license expired"))
+    )
+    pulp_result = {"status": "optimal", "solver_details": {"solver": "pulp"}}
+    monkeypatch.setattr(solver, "_solve_pulp", MagicMock(return_value=pulp_result))
+
+    result = solver._solve_mip(
+        coverage_matrix=np.ones((2, 2), dtype=int),
+        constraints={},
+    )
+
+    assert result == pulp_result
+    solver._solve_pulp.assert_called_once()

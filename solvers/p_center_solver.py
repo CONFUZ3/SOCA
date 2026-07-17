@@ -313,6 +313,9 @@ Where:
         except ImportError:
             logger.info("Gurobi not available, using PuLP")
             return self._solve_pulp(distance_matrix, p, constraints, time_limit_seconds, variant=variant, weights=weights, existing=existing)
+        except gp.GurobiError as e:
+            logger.warning("Gurobi unavailable (%s), falling back to PuLP", e)
+            return self._solve_pulp(distance_matrix, p, constraints, time_limit_seconds, variant=variant, weights=weights, existing=existing)
     
     def _solve_gurobi(
         self,

@@ -390,6 +390,13 @@ Where:
                 variant, objective_type, capacities, facility_costs, budget, distance_mask,
                 time_limit_seconds=time_limit_seconds
             )
+        except gp.GurobiError as e:
+            logger.warning("Gurobi unavailable (%s), falling back to PuLP", e)
+            return self._solve_pulp(
+                distance_matrix, demand_weights, p, constraints,
+                variant, objective_type, capacities, facility_costs, budget, distance_mask,
+                time_limit_seconds=time_limit_seconds
+            )
     
     def _solve_gurobi(
         self,

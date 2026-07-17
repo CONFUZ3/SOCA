@@ -391,6 +391,14 @@ Where:
                 alpha=alpha, fraction=fraction, existing=existing
             )
         except ImportError:
+            logger.info("Gurobi not available, using PuLP")
+            return self._solve_pulp(
+                coverage_matrix, constraints, time_limit_seconds,
+                variant=variant, k=k, weights=weights, reliability=reliability,
+                alpha=alpha, fraction=fraction, existing=existing
+            )
+        except gp.GurobiError as e:
+            logger.warning("Gurobi unavailable (%s), falling back to PuLP", e)
             return self._solve_pulp(
                 coverage_matrix, constraints, time_limit_seconds,
                 variant=variant, k=k, weights=weights, reliability=reliability,

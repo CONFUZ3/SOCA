@@ -750,6 +750,14 @@ Where:
                 time_limit_seconds
             )
         except ImportError:
+            logger.info("Gurobi not available, using PuLP")
+            return self._solve_pulp(
+                coverage_matrix, demand_weights, p, constraints,
+                variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix,
+                time_limit_seconds
+            )
+        except gp.GurobiError as e:
+            logger.warning("Gurobi unavailable (%s), falling back to PuLP", e)
             return self._solve_pulp(
                 coverage_matrix, demand_weights, p, constraints,
                 variant, facility_costs, budget, capacities, k_coverage, reliability, distance_matrix,
